@@ -1,0 +1,58 @@
+packages/otlp-ingester/src/clickhouse.ts
+  s_b3e019178ce01d::t_dca7514ec49574 78,80,89
+  s_b3e019178ce01d::t_966253d1bf72b8 112
+packages/otlp-ingester/src/migrations.ts
+  s_b3e019178ce01d::t_d983aa725dc04a 68-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "658e4bd478085e5ac849f4ff36c3d8e92cd15ce9",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:041b38cb9341c3a0c022919cfbcf1b57906070d1fe9c8caf45cc8a94ef59bb2d",
+      "total_additions": 22,
+      "total_deletions": 4,
+      "accepted_lines": 22,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:041b38cb9341c3a0c022919cfbcf1b57906070d1fe9c8caf45cc8a94ef59bb2d",
+      "stats": {
+        "total_additions": 22,
+        "total_deletions": 4,
+        "accepted_lines": 22,
+        "overriden_lines": 0,
+        "files": {
+          "packages/otlp-ingester/src/clickhouse.ts": {
+            "total_additions": 4,
+            "total_deletions": 4,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/migrations.ts": {
+            "total_additions": 18,
+            "total_deletions": 0,
+            "accepted_lines": 18,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

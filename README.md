@@ -105,15 +105,25 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 - [Architecture & data model](docs/ARCHITECTURE.md)
 - [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
 
-## Self-hosting the ingester
+## Hosting the ingester
+
+**Autter cloud** hosts it at `otlp.autter.dev` (the SDKs' default
+endpoint). Deployment runbook + scripts for the AWS/ECS setup:
+[`deploy/aws`](deploy/aws).
+
+**Self-hosting** — prebuilt multi-arch image, no clone needed:
 
 ```bash
-docker compose up          # local ClickHouse + ingester
-# or
-cd packages/otlp-ingester
-AUTTER_INGEST_KEYS='[{"key":"dev-key","orgId":"org1","repositoryId":"repo1"}]' \
-CLICKHOUSE_URL=http://localhost:8123 \
-npm run dev
+docker run -p 4318:4318 \
+  -e CLICKHOUSE_URL=… -e CLICKHOUSE_PASSWORD=… \
+  -e AUTTER_INGEST_KEYS='[{"key":"…","orgId":"o","repositoryId":"r"}]' \
+  ghcr.io/autter-dev/otlp-ingester:latest
+```
+
+Or for local development with a bundled ClickHouse:
+
+```bash
+docker compose up          # local ClickHouse + ingester on :4318, key "dev-key"
 ```
 
 Point your OpenTelemetry exporter at it:

@@ -1,0 +1,71 @@
+name: Deploy ingester (AWS)
+
+# Builds the otlp-ingester image, pushes to ECR, registers a new task
+# definition revision, and rolls the ECS service — mirroring the Autter
+# backend's OIDC deploy pattern. All account-specific values come from
+# repo/org variables and secrets, nothing is hard-coded.
+#
+# Repo VARIABLES required:
+#   AWS_DEPLOY_ROLE_ARN     OIDC role to assume
+#   AWS_REGION              e.g. ap-south-1
+#   AWS_ACCOUNT_ID
+#   ECS_CLUSTER             e.g. autter-prod
+#   ECS_SERVICE             e.g. autter-otlp-ingester
+#   EXECUTION_ROLE_ARN      ECS task execution role
+#   KEY_VALIDATOR_URL       optional, e.g. https://api.autter.dev/runtime/validate-key
+#   SINK_URL                optional, e.g. https://api.autter.dev/runtime/sink
+#   INGESTER_HEALTH_URL     optional, e.g. https://otlp.autter.dev/healthz
+#   AWS_AUTODEPLOY_ENABLED  "true" to deploy on pushes to main
+# Repo SECRETS required (Secrets Manager ARNs, not the values):
+#   CLICKHOUSE_URL_SECRET_ARN
+#   CLICKHOUSE_PASSWORD_SECRET_ARN
+#   AUTTER_KEY_VALIDATOR_TOKEN_SECRET_ARN  (optional)
+#   AUTTER_SINK_TOKEN_SECRET_ARN           (optional)
+#   AUTTER_INGEST_KEYS_SECRET_ARN          (optional)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "packages/otlp-ingester/**"
+      - "deploy/aws/**"
+      - ".github/workflows/deploy-aws.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-aws
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || vars.AWS_AUTODEPLOY_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy
+        run: bash deploy/aws/deploy.sh
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE }}
+          EXECUTION_ROLE_ARN: ${{ vars.EXECUTION_ROLE_ARN }}
+          KEY_VALIDATOR_URL: ${{ vars.KEY_VALIDATOR_URL }}
+          SINK_URL: ${{ vars.SINK_URL }}
+          HEALTH_URL: ${{ vars.INGESTER_HEALTH_URL }}
+          IMAGE_TAG: ${{ github.sha }}
+          CLICKHOUSE_URL_SECRET_ARN: ${{ secrets.CLICKHOUSE_URL_SECRET_ARN }}
+          CLICKHOUSE_PASSWORD_SECRET_ARN: ${{ secrets.CLICKHOUSE_PASSWORD_SECRET_ARN }}
+          AUTTER_KEY_VALIDATOR_TOKEN_SECRET_ARN: ${{ secrets.AUTTER_KEY_VALIDATOR_TOKEN_SECRET_ARN }}
+          AUTTER_SINK_TOKEN_SECRET_ARN: ${{ secrets.AUTTER_SINK_TOKEN_SECRET_ARN }}
+          AUTTER_INGEST_KEYS_SECRET_ARN: ${{ secrets.AUTTER_INGEST_KEYS_SECRET_ARN }}

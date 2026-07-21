@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<title>Autter Runtime example</title>
+</head>
+<body>
+	<h1>Autter Runtime — browser tracker example</h1>
+	<button id="handled">captureException()</button>
+	<button id="unhandled">throw unhandled</button>
+	<button id="rejection">unhandled rejection</button>
+	<button id="track">trackEvent("clicked_cta")</button>
+	<button id="server">call failing API</button>
+
+	<script type="module">
+		import {
+			initAutterBrowser,
+			captureException,
+			trackEvent,
+			flush,
+		} from "/sdk/index.js";
+
+		initAutterBrowser({
+			endpoint: "/api/autter-runtime", // same-origin relay — no key here
+			service: "example-web",
+			environment: "development",
+			release: "dev",
+		});
+
+		document.getElementById("handled").onclick = () => {
+			try {
+				JSON.parse("{nope");
+			} catch (err) {
+				captureException(err, { operation: "parse-config" });
+			}
+		};
+		document.getElementById("unhandled").onclick = () => {
+			undefined.someProperty; // TypeError, caught by window.onerror
+		};
+		document.getElementById("rejection").onclick = () => {
+			Promise.reject(new Error("promise went sideways"));
+		};
+		document.getElementById("track").onclick = () => trackEvent("clicked_cta");
+		document.getElementById("server").onclick = () => fetch("/api/boom");
+
+		window.addEventListener("keydown", (e) => e.key === "f" && flush());
+	</script>
+</body>
+</html>

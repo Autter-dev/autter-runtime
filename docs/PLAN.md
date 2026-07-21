@@ -49,7 +49,7 @@ limiting, source maps (symbolication is a backend concern).
 5. Backpressure: buffered ClickHouse inserts with bounded queue + drop policy.
 6. Container image published to GHCR on tag (`ghcr.io/autter-dev/otlp-ingester`).
 
-## Milestone 2 — `@autter/runtime-browser` (v0.1)
+## Milestone 2 — `@autter/runtime-browser` (v0.1, shipped)
 
 Zero-dependency, <5 KB gzipped (CI-enforced with `size-limit`).
 
@@ -66,7 +66,7 @@ Zero-dependency, <5 KB gzipped (CI-enforced with `size-limit`).
 - Never sends OTLP from the browser; the compact JSON payload is the contract
   with `/v1/browser`.
 
-## Milestone 3 — `@autter/runtime-node` (v0.1)
+## Milestone 3 — `@autter/runtime-node` (v0.1, shipped)
 
 Two halves, one package:
 
@@ -81,7 +81,7 @@ Two halves, one package:
    peers. Default sampling: errors 100%, successful traces 1%, metrics at
    60 s. Never the auto-instrumentation metapackage.
 
-## Milestone 4 — `@autter/runtime-next` (v0.1)
+## Milestone 4 — `@autter/runtime-next` (v0.1, shipped)
 
 One install command, one config file: server OTel init, browser tracker init,
 relay route export, `<AutterErrorBoundary>`, release metadata from `GIT_SHA`,

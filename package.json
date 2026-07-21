@@ -9,10 +9,11 @@
 		"url": "https://github.com/Autter-dev/autter-runtime.git"
 	},
 	"workspaces": [
-		"packages/*"
+		"packages/*",
+		"examples/*"
 	],
 	"scripts": {
-		"build": "npm run build --workspaces --if-present",
+		"build": "npm run build -w @autter/runtime-browser -w @autter/runtime-node -w @autter/otlp-ingester && npm run build -w @autter/runtime-next",
 		"dev": "npm run dev -w @autter/otlp-ingester"
 	},
 	"engines": {

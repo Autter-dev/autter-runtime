@@ -13,9 +13,16 @@ import type {
 
 const browserEventSchema = z.object({
 	id: z.string().max(64).optional(),
-	type: z.enum(["exception", "unhandled_rejection", "session_start"]),
+	type: z.enum([
+		"exception",
+		"unhandled_rejection",
+		"session_start",
+		"track_event",
+	]),
 	timestamp: z.string().datetime(),
 	message: z.string().max(4000).default(""),
+	/** track_event only: the event name (counted, never free-form PII). */
+	name: z.string().max(200).optional(),
 	stack: z.string().max(32000).optional(),
 	errorType: z.string().max(200).optional(),
 	filename: z.string().max(1000).optional(),
@@ -51,32 +58,48 @@ export function normalizeBrowserPayload(
 	payload: BrowserPayload,
 ): NormalizedBrowser {
 	const occurrences: RuntimeOccurrenceInput[] = [];
-	const sessions = new Map<string, RuntimeMetricPoint>();
+	const rollups = new Map<string, RuntimeMetricPoint>();
+
+	function bumpRollup(
+		route: string,
+		occurredAt: Date,
+		field: "sessionCount" | "requestCount",
+	): void {
+		const bucketAt = new Date(
+			Math.floor(occurredAt.getTime() / 60_000) * 60_000,
+		);
+		const key = `${route} ${bucketAt.getTime()}`;
+		const existing = rollups.get(key);
+		if (existing) {
+			existing[field] += 1;
+			return;
+		}
+		rollups.set(key, {
+			service: payload.service,
+			environment: payload.environment,
+			release: payload.release ?? null,
+			route,
+			bucketAt,
+			requestCount: field === "requestCount" ? 1 : 0,
+			errorCount: 0,
+			durationSumMs: 0,
+			sessionCount: field === "sessionCount" ? 1 : 0,
+		});
+	}
 
 	for (const event of payload.events) {
 		const occurredAt = new Date(event.timestamp);
 
 		if (event.type === "session_start") {
-			const bucketAt = new Date(
-				Math.floor(occurredAt.getTime() / 60_000) * 60_000,
-			);
-			const key = String(bucketAt.getTime());
-			const existing = sessions.get(key);
-			if (existing) {
-				existing.sessionCount += 1;
-			} else {
-				sessions.set(key, {
-					service: payload.service,
-					environment: payload.environment,
-					release: payload.release ?? null,
-					route: "",
-					bucketAt,
-					requestCount: 0,
-					errorCount: 0,
-					durationSumMs: 0,
-					sessionCount: 1,
-				});
-			}
+			bumpRollup("", occurredAt, "sessionCount");
+			continue;
+		}
+
+		// Coarse usage counters: track_event("checkout_opened") becomes a
+		// request_count increment on the synthetic route "event:checkout_opened".
+		if (event.type === "track_event") {
+			const name = (event.name ?? event.message ?? "").slice(0, 200);
+			if (name) bumpRollup(`event:${name}`, occurredAt, "requestCount");
 			continue;
 		}
 
@@ -103,5 +126,5 @@ export function normalizeBrowserPayload(
 		});
 	}
 
-	return { occurrences, metricPoints: [...sessions.values()] };
+	return { occurrences, metricPoints: [...rollups.values()] };
 }

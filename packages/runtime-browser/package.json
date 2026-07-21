@@ -1,0 +1,40 @@
+{
+	"name": "@autter/runtime-browser",
+	"version": "0.1.0",
+	"description": "Tiny, dependency-free browser error and usage tracker for Autter Runtime (<5 KB gzipped)",
+	"license": "MIT",
+	"type": "module",
+	"sideEffects": false,
+	"main": "./dist/index.cjs",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"require": "./dist/index.cjs"
+		}
+	},
+	"files": ["dist"],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Autter-dev/autter-runtime.git",
+		"directory": "packages/runtime-browser"
+	},
+	"scripts": {
+		"build": "tsup src/index.ts --format esm,cjs,iife --global-name AutterRuntime --dts --minify --target es2019 --clean",
+		"size": "size-limit"
+	},
+	"size-limit": [
+		{
+			"path": "dist/index.js",
+			"limit": "5 KB"
+		}
+	],
+	"devDependencies": {
+		"@size-limit/preset-small-lib": "^11.1.6",
+		"size-limit": "^11.1.6",
+		"tsup": "^8.3.5",
+		"typescript": "^5.7.0"
+	}
+}

@@ -102,6 +102,11 @@ Span-level:
 }
 ```
 
+Event types: `exception`, `unhandled_rejection`, `session_start`, and
+`track_event` (carries a `name`; counted into `runtime_metrics_1m` as
+`request_count` on the synthetic route `event:<name>` — coarse usage
+counters, not an analytics event store).
+
 Forbidden at the schema level (rejected/stripped): full URLs with query
 strings, cookies, DOM content, form values, request headers/bodies, emails.
 

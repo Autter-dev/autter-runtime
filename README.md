@@ -25,9 +25,13 @@ flowchart TD
 | Package | Status | Description |
 | --- | --- | --- |
 | [`packages/otlp-ingester`](packages/otlp-ingester) | **v0.1** | Self-hostable ingest service: OTLP/HTTP (JSON) traces + metrics, browser error payloads → ClickHouse |
-| `packages/runtime-browser` | planned | Zero-dependency, <5 KB browser error + usage tracker |
-| `packages/runtime-node` | planned | Same-origin relay handler + curated OTel server setup |
-| `packages/runtime-next` | planned | One-command Next.js integration |
+| [`packages/runtime-browser`](packages/runtime-browser) | **v0.1** | Zero-dependency browser error + usage tracker (~1 KB brotlied) |
+| [`packages/runtime-node`](packages/runtime-node) | **v0.1** | Same-origin relay handler + curated OTel server tracker |
+| [`packages/runtime-next`](packages/runtime-next) | **v0.1** | One-command Next.js integration (relay route + error boundary) |
+
+Runnable demo: [`examples/express-app`](examples/express-app) — browser
+tracker → relay → ingester and OTel server tracker, against a compose-run
+ClickHouse.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the detailed roadmap and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data model.

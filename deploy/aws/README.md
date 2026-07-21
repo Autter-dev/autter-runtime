@@ -5,6 +5,10 @@ Autter production setup: cluster `autter-prod`, region `ap-south-1`,
 domain `otlp.autter.dev`). Everything is parameterised — nothing
 account-specific lives in the scripts.
 
+Just want the simplest self-hosted option, no existing ECS/ALB/VPC to
+attach to? See [`../single-server`](../single-server) instead — one EC2 or
+Lightsail box running the ingester + ClickHouse via Docker Compose.
+
 The service is stateless and tiny: 0.25 vCPU / 512 MB is plenty to start.
 
 ## Architecture

@@ -1,0 +1,65 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-autter_runtime}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    # Not published to the host — only the ingester talks to it, over the
+    # internal compose network. Never expose 8123/9000 publicly.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  otlp-ingester:
+    image: ghcr.io/autter-dev/otlp-ingester:${INGESTER_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      PORT: 4318
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-autter_runtime}
+      # Static key → tenant mapping (self-host mode). See ../README or the
+      # main README's "self-hosting" section for the JSON shape.
+      AUTTER_INGEST_KEYS: ${AUTTER_INGEST_KEYS:-}
+      # Cloud-connected mode instead of AUTTER_INGEST_KEYS (mutually exclusive
+      # with it in practice — set whichever matches your setup):
+      AUTTER_KEY_VALIDATOR_URL: ${AUTTER_KEY_VALIDATOR_URL:-}
+      AUTTER_KEY_VALIDATOR_TOKEN: ${AUTTER_KEY_VALIDATOR_TOKEN:-}
+      AUTTER_SINK_URL: ${AUTTER_SINK_URL:-}
+      AUTTER_SINK_TOKEN: ${AUTTER_SINK_TOKEN:-}
+    # Not published to the host — only Caddy reaches it, over the internal
+    # compose network. TLS termination and the public port live on Caddy.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - otlp-ingester
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env, e.g. otlp.yourdomain.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  clickhouse_data:
+  caddy_data:
+  caddy_config:

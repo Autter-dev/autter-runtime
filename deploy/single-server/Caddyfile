@@ -1,0 +1,4 @@
+{$DOMAIN} {
+	reverse_proxy otlp-ingester:4318
+	encode gzip
+}

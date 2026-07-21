@@ -121,7 +121,13 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 endpoint). Deployment runbook + scripts for the AWS/ECS setup:
 [`deploy/aws`](deploy/aws).
 
-**Self-hosting** — prebuilt multi-arch image, no clone needed:
+**Self-hosting on your own server** — one small EC2/Lightsail box running
+the ingester + ClickHouse together via Docker Compose, with Caddy handling
+HTTPS automatically. No VPC/ECS setup required:
+[`deploy/single-server`](deploy/single-server).
+
+**Self-hosting, bring-your-own-infra** — prebuilt multi-arch image, no clone
+needed:
 
 ```bash
 docker run -p 4318:4318 \

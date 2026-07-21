@@ -54,6 +54,13 @@ Retention philosophy: raw signal is short-lived; anything worth keeping
 long-term (issue summaries, incident history, learnings) is derived and
 stored by the sink consumer.
 
+**Schema evolution:** the ingester migrates the database itself at boot —
+baseline `CREATE IF NOT EXISTS` for fresh databases plus versioned,
+idempotent migrations (`packages/otlp-ingester/src/migrations.ts`) tracked
+in `<db>.schema_migrations` for existing ones. Deploying a new ingester
+version *is* the schema deployment. Readers (dashboards, the Autter
+backend) should treat columns as additive-only within a major version.
+
 ## Fingerprinting
 
 `sha256(source + service + error_type + normalised_message + top_5_frames + normalised_route)`,

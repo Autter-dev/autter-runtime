@@ -4,6 +4,11 @@ import {
 	type ClickHouseSettings,
 } from "@clickhouse/client";
 import type { IngesterConfig } from "./config.js";
+import {
+	MIGRATIONS,
+	migrationsTableDDL,
+	type Migration,
+} from "./migrations.js";
 import type {
 	IngestContext,
 	RuntimeMetricPoint,
@@ -125,12 +130,45 @@ export class ClickHouseStore {
 		];
 	}
 
-	ensureSchema(): Promise<void> {
+	/**
+	 * Baseline `CREATE ... IF NOT EXISTS` for fresh databases, then the
+	 * versioned migrations from migrations.ts for existing ones — the
+	 * CREATEs no-op on tables that already exist, so schema changes only
+	 * reach deployed databases through migrations. Runs once per process
+	 * (boot + lazily before first ingest); a failure clears the memo so the
+	 * next request retries.
+	 */
+	ensureSchema(migrations: Migration[] = MIGRATIONS): Promise<void> {
 		if (this.ensurePromise) return this.ensurePromise;
 		this.ensurePromise = (async () => {
 			const client = this.getClient();
+			const db = this.config.clickhouseDatabase;
 			for (const statement of this.schemaStatements()) {
 				await client.command({ query: statement });
+			}
+			await client.command({ query: migrationsTableDDL(db) });
+
+			const rows = await client.query({
+				query: `SELECT DISTINCT id FROM ${db}.schema_migrations`,
+				format: "JSONEachRow",
+			});
+			const applied = new Set(
+				(await rows.json<{ id: string }>()).map((row) => row.id),
+			);
+
+			for (const migration of migrations) {
+				if (applied.has(migration.id)) continue;
+				for (const statement of migration.statements) {
+					await client.command({
+						query: statement.replaceAll("{db}", db),
+					});
+				}
+				await client.insert({
+					table: `${db}.schema_migrations`,
+					format: "JSONEachRow",
+					values: [{ id: migration.id }],
+				});
+				console.log(`clickhouse migration applied: ${migration.id}`);
 			}
 		})().catch((err) => {
 			this.ensurePromise = null;

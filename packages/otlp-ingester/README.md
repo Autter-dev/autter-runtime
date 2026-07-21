@@ -61,6 +61,30 @@ The validator webhook may return the same extra fields:
 | `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 
+## Schema migrations
+
+The ingester owns the ClickHouse schema and updates it **automatically on
+boot** — deploying a new ingester version is the schema deployment; there
+is no separate migration step to run.
+
+How it works: the baseline `CREATE TABLE IF NOT EXISTS` statements
+provision fresh databases; versioned migrations in `src/migrations.ts`
+alter existing ones. Applied migration ids are recorded in
+`<db>.schema_migrations`, so each runs exactly once per database, and every
+statement is written to be idempotent (`ADD COLUMN IF NOT EXISTS`, …) so
+concurrent replicas booting during a rolling deploy race harmlessly.
+
+To change the schema (e.g. add a column):
+
+1. Append a migration to `MIGRATIONS` in `src/migrations.ts` — new columns
+   need a `DEFAULT` so still-running old replicas can keep inserting.
+2. Update the baseline in `src/clickhouse.ts` `schemaStatements()` so fresh
+   databases come up with the final shape.
+3. Ship it — the next deploy applies it everywhere; the log line
+   `clickhouse migration applied: <id>` confirms.
+
+Never edit or reorder a shipped migration; append a corrective one.
+
 ## Local development
 
 ```bash

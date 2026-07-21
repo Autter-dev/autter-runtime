@@ -1,0 +1,27 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    ports:
+      - "8123:8123"
+    environment:
+      CLICKHOUSE_PASSWORD: dev
+    ulimits:
+      nofile: 262144
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 5s
+      retries: 10
+
+  ingester:
+    build:
+      context: .
+      dockerfile: packages/otlp-ingester/Dockerfile
+    ports:
+      - "4318:4318"
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_PASSWORD: dev
+      AUTTER_INGEST_KEYS: '[{"key":"dev-key","orgId":"org1","repositoryId":"repo1"}]'
+    depends_on:
+      clickhouse:
+        condition: service_healthy

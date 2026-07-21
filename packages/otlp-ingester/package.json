@@ -1,0 +1,33 @@
+{
+	"name": "@autter/otlp-ingester",
+	"version": "0.1.0",
+	"description": "Self-hostable OTLP + browser-error ingest service for Autter Runtime: normalises telemetry into a per-repo ClickHouse data model",
+	"license": "MIT",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Autter-dev/autter-runtime.git",
+		"directory": "packages/otlp-ingester"
+	},
+	"scripts": {
+		"dev": "tsx watch src/index.ts",
+		"start": "node dist/index.js",
+		"build": "tsc -p tsconfig.json"
+	},
+	"dependencies": {
+		"@clickhouse/client": "^1.12.0",
+		"express": "^4.21.2",
+		"zod": "^3.24.1"
+	},
+	"devDependencies": {
+		"@types/express": "^4.17.21",
+		"@types/node": "^22.10.0",
+		"tsx": "^4.19.0",
+		"typescript": "^5.7.0"
+	},
+	"engines": {
+		"node": ">=20"
+	}
+}

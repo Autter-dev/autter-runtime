@@ -1,0 +1,21 @@
+{
+	"name": "autter-runtime",
+	"private": true,
+	"version": "0.0.0",
+	"description": "Open-source lightweight runtime telemetry: tiny browser error tracking, server OpenTelemetry, one OTLP ingester",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Autter-dev/autter-runtime.git"
+	},
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"build": "npm run build --workspaces --if-present",
+		"dev": "npm run dev -w @autter/otlp-ingester"
+	},
+	"engines": {
+		"node": ">=20"
+	}
+}

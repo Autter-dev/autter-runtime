@@ -28,6 +28,16 @@ npm install @autter/runtime-node      # backend (Express, Fastify, Koa, Nest, pl
 npm install @autter/runtime-next      # Next.js (both halves in one package)
 ```
 
+Prefer to have an AI agent set it up for you? Install the companion agent
+skills — they inventory your repo and wire up Autter Runtime for whatever
+language/framework each service uses, npm packages or not:
+
+```bash
+npx skills add Autter-dev/autter-skills --all
+```
+
+See [Autter-dev/autter-skills](https://github.com/Autter-dev/autter-skills).
+
 **Frontend** — errors + usage, automatic from init:
 
 ```ts

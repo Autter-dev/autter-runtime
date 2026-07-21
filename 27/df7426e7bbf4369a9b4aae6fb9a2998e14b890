@@ -1,0 +1,103 @@
+docs/INTEGRATIONS.md
+  s_b3e019178ce01d::t_b54d19db553bcc 1-123
+packages/otlp-ingester/README.md
+  s_b3e019178ce01d::t_662fb82187814c 18-21
+packages/otlp-ingester/src/server.ts
+  s_b3e019178ce01d::t_84ada5f6e38c78 21
+  s_b3e019178ce01d::t_8f7d0a0ce7aaf6 56-64
+  s_b3e019178ce01d::t_9d61f01da6c140 227,233-244,251
+  s_b3e019178ce01d::t_0b6b8039501fc0 190-199,203-214
+docs/PLAN.md
+  s_b3e019178ce01d::t_38f284ceeaf9bd 43-46
+README.md
+  s_b3e019178ce01d::t_07369f09c6623b 36-47
+packages/runtime-node/src/relay.ts
+  s_b3e019178ce01d::t_00a88faaa09e65 202-205
+  s_b3e019178ce01d::t_a64555b9e4f8ad 18-23,28-48
+  s_b3e019178ce01d::t_4628f6b7d920ec 145-148,153-160
+  s_b3e019178ce01d::t_50d8f98a3ebcf7 232-241
+packages/otlp-ingester/src/otlp-proto.ts
+  s_b3e019178ce01d::t_67d3121750aea5 1-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "27df7426e7bbf4369a9b4aae6fb9a2998e14b890",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:7475bdab5a78645ea0884e42a4e8324ce481103bdb870387de08a5045985069e",
+      "total_additions": 364,
+      "total_deletions": 13,
+      "accepted_lines": 364,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:7475bdab5a78645ea0884e42a4e8324ce481103bdb870387de08a5045985069e",
+      "stats": {
+        "total_additions": 364,
+        "total_deletions": 13,
+        "accepted_lines": 364,
+        "overriden_lines": 0,
+        "files": {
+          "README.md": {
+            "total_additions": 12,
+            "total_deletions": 0,
+            "accepted_lines": 12,
+            "overriden_lines": 0
+          },
+          "docs/INTEGRATIONS.md": {
+            "total_additions": 123,
+            "total_deletions": 0,
+            "accepted_lines": 123,
+            "overriden_lines": 0
+          },
+          "docs/PLAN.md": {
+            "total_additions": 4,
+            "total_deletions": 4,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/README.md": {
+            "total_additions": 4,
+            "total_deletions": 2,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/otlp-proto.ts": {
+            "total_additions": 119,
+            "total_deletions": 0,
+            "accepted_lines": 119,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/server.ts": {
+            "total_additions": 46,
+            "total_deletions": 7,
+            "accepted_lines": 46,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/relay.ts": {
+            "total_additions": 56,
+            "total_deletions": 0,
+            "accepted_lines": 56,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

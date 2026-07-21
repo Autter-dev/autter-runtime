@@ -1,0 +1,89 @@
+deploy/single-server/Caddyfile
+  s_b3e019178ce01d::t_51cee9c6580d8f 1-4
+deploy/single-server/.env.example
+  s_b3e019178ce01d::t_fb89832bf81d3b 1-28
+deploy/single-server/README.md
+  s_b3e019178ce01d::t_d62d200aefd5eb 1-143
+deploy/single-server/docker-compose.yml
+  s_b3e019178ce01d::t_4ae973bb9dfbff 1-65
+deploy/aws/README.md
+  s_b3e019178ce01d::t_50130c12aab450 8-11
+README.md
+  s_b3e019178ce01d::t_d99536170cc776 124-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "2a542fd030a5090a4a0211a0dfce5f1c58ef5a9f",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:8c86ea1f3d6b84c5a2013b9bd5cbde1bda2cb27759ac5ae32f0afdce5c47d9af",
+      "total_additions": 257,
+      "total_deletions": 7,
+      "accepted_lines": 251,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:8c86ea1f3d6b84c5a2013b9bd5cbde1bda2cb27759ac5ae32f0afdce5c47d9af",
+      "stats": {
+        "total_additions": 257,
+        "total_deletions": 7,
+        "accepted_lines": 251,
+        "overriden_lines": 0,
+        "files": {
+          "README.md": {
+            "total_additions": 7,
+            "total_deletions": 1,
+            "accepted_lines": 7,
+            "overriden_lines": 0
+          },
+          "deploy/aws/README.md": {
+            "total_additions": 4,
+            "total_deletions": 0,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "deploy/single-server/.env.example": {
+            "total_additions": 28,
+            "total_deletions": 0,
+            "accepted_lines": 28,
+            "overriden_lines": 0
+          },
+          "deploy/single-server/Caddyfile": {
+            "total_additions": 10,
+            "total_deletions": 6,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "deploy/single-server/README.md": {
+            "total_additions": 143,
+            "total_deletions": 0,
+            "accepted_lines": 143,
+            "overriden_lines": 0
+          },
+          "deploy/single-server/docker-compose.yml": {
+            "total_additions": 65,
+            "total_deletions": 0,
+            "accepted_lines": 65,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

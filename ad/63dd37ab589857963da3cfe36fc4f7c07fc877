@@ -1,0 +1,89 @@
+deploy/aws/README.md
+  s_b3e019178ce01d::t_90678ffc5f06c7 1-118
+deploy/aws/deploy.sh
+  s_b3e019178ce01d::t_9b97bc5b274ab3 1-149
+.github/workflows/deploy-aws.yml
+  s_b3e019178ce01d::t_0c3196ae0c7fe8 1-71
+deploy/aws/setup.sh
+  s_b3e019178ce01d::t_2001ab7d96a2ef 1-103
+.github/workflows/docker.yml
+  s_b3e019178ce01d::t_8afd9f95c8c18b 1-50
+README.md
+  s_b3e019178ce01d::t_a72c9f2cc61ee2 108-123,126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "ad63dd37ab589857963da3cfe36fc4f7c07fc877",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:32c871a6c9de336929d1262960d4bae5a6f965bc2e42d1ecda3096e8e484e07d",
+      "total_additions": 508,
+      "total_deletions": 7,
+      "accepted_lines": 508,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:32c871a6c9de336929d1262960d4bae5a6f965bc2e42d1ecda3096e8e484e07d",
+      "stats": {
+        "total_additions": 508,
+        "total_deletions": 7,
+        "accepted_lines": 508,
+        "overriden_lines": 0,
+        "files": {
+          ".github/workflows/deploy-aws.yml": {
+            "total_additions": 71,
+            "total_deletions": 0,
+            "accepted_lines": 71,
+            "overriden_lines": 0
+          },
+          ".github/workflows/docker.yml": {
+            "total_additions": 50,
+            "total_deletions": 0,
+            "accepted_lines": 50,
+            "overriden_lines": 0
+          },
+          "README.md": {
+            "total_additions": 17,
+            "total_deletions": 7,
+            "accepted_lines": 17,
+            "overriden_lines": 0
+          },
+          "deploy/aws/README.md": {
+            "total_additions": 118,
+            "total_deletions": 0,
+            "accepted_lines": 118,
+            "overriden_lines": 0
+          },
+          "deploy/aws/deploy.sh": {
+            "total_additions": 149,
+            "total_deletions": 0,
+            "accepted_lines": 149,
+            "overriden_lines": 0
+          },
+          "deploy/aws/setup.sh": {
+            "total_additions": 103,
+            "total_deletions": 0,
+            "accepted_lines": 103,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

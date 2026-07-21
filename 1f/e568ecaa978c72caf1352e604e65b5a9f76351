@@ -1,0 +1,74 @@
+docs/ARCHITECTURE.md
+  s_b3e019178ce01d::t_8a829206dcab55 57-63
+packages/otlp-ingester/README.md
+  s_b3e019178ce01d::t_c73967ec720ee2 64-87
+packages/otlp-ingester/src/clickhouse.ts
+  s_b3e019178ce01d::t_3082029cc190a5 7-11
+  s_b3e019178ce01d::t_3e326e314a46eb 133-141,145,149-171
+packages/otlp-ingester/src/migrations.ts
+  s_b3e019178ce01d::t_354f64ffdc9e92 1-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "1fe568ecaa978c72caf1352e604e65b5a9f76351",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:9b4e5c5f6138f29ac9427f2770e25f7c69c4c380be7113c988bb79e67ac825e5",
+      "total_additions": 127,
+      "total_deletions": 1,
+      "accepted_lines": 127,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:9b4e5c5f6138f29ac9427f2770e25f7c69c4c380be7113c988bb79e67ac825e5",
+      "stats": {
+        "total_additions": 127,
+        "total_deletions": 1,
+        "accepted_lines": 127,
+        "overriden_lines": 0,
+        "files": {
+          "docs/ARCHITECTURE.md": {
+            "total_additions": 7,
+            "total_deletions": 0,
+            "accepted_lines": 7,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/README.md": {
+            "total_additions": 24,
+            "total_deletions": 0,
+            "accepted_lines": 24,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/clickhouse.ts": {
+            "total_additions": 39,
+            "total_deletions": 1,
+            "accepted_lines": 39,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/migrations.ts": {
+            "total_additions": 57,
+            "total_deletions": 0,
+            "accepted_lines": 57,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

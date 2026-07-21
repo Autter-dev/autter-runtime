@@ -1,0 +1,74 @@
+docs/RELEASING.md
+  s_b3e019178ce01d::t_273f08ad2f7aa0 1-33
+README.md
+  s_b3e019178ce01d::t_175397c899e0f1 23-61,66-69
+  s_b3e019178ce01d::t_86bd4655fd6bd5 87-106,108
+.github/workflows/release.yml
+  s_b3e019178ce01d::t_d7884a168e8882 1-42
+docs/GETTING-STARTED.md
+  s_b3e019178ce01d::t_6d1491689b9178 1-246
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "8cd911a6b875440c3695a9cf2b7ea9f22a9c129e",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:d5fcd816824378e94c3eaee7c8faac89f7062a2044addcf89af9f6bec850e19a",
+      "total_additions": 385,
+      "total_deletions": 7,
+      "accepted_lines": 385,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:d5fcd816824378e94c3eaee7c8faac89f7062a2044addcf89af9f6bec850e19a",
+      "stats": {
+        "total_additions": 385,
+        "total_deletions": 7,
+        "accepted_lines": 385,
+        "overriden_lines": 0,
+        "files": {
+          ".github/workflows/release.yml": {
+            "total_additions": 42,
+            "total_deletions": 0,
+            "accepted_lines": 42,
+            "overriden_lines": 0
+          },
+          "README.md": {
+            "total_additions": 64,
+            "total_deletions": 7,
+            "accepted_lines": 64,
+            "overriden_lines": 0
+          },
+          "docs/GETTING-STARTED.md": {
+            "total_additions": 246,
+            "total_deletions": 0,
+            "accepted_lines": 246,
+            "overriden_lines": 0
+          },
+          "docs/RELEASING.md": {
+            "total_additions": 33,
+            "total_deletions": 0,
+            "accepted_lines": 33,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

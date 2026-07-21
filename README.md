@@ -20,14 +20,53 @@ flowchart TD
     F --> H["Optional sink webhook → issue grouping"]
 ```
 
+## Install
+
+```bash
+npm install @autter/runtime-browser   # frontend (React, Vue, any SPA, static sites)
+npm install @autter/runtime-node      # backend (Express, Fastify, Koa, Nest, plain Node)
+npm install @autter/runtime-next      # Next.js (both halves in one package)
+```
+
+**Frontend** — errors + usage, automatic from init:
+
+```ts
+import { initAutterBrowser, captureException, trackEvent } from "@autter/runtime-browser";
+
+initAutterBrowser({
+  endpoint: "/api/autter-runtime",   // your relay route (recommended), or
+  // endpoint: "https://otlp.autter.dev/v1/browser", clientKey: "autter_rtc_…",
+  service: "web-app",
+  release: import.meta.env.VITE_GIT_SHA,
+});
+
+captureException(err, { operation: "start-checkout" });
+trackEvent("clicked_upgrade");
+```
+
+**Backend** — one preloaded file, requests traced automatically:
+
+```js
+// instrument.cjs — run with: node --require ./instrument.cjs server.js
+const { initAutterServer } = require("@autter/runtime-node");
+initAutterServer({
+  apiKey: process.env.AUTTER_RUNTIME_KEY,   // secret server key
+  service: "payments-api",
+  release: process.env.GIT_SHA,
+});
+```
+
+Full walkthrough (keys, relay setup, Next.js, verification):
+**[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**.
+
 ## Packages
 
 | Package | Status | Description |
 | --- | --- | --- |
-| [`packages/otlp-ingester`](packages/otlp-ingester) | **v0.1** | Self-hostable ingest service: OTLP/HTTP (JSON) traces + metrics, browser error payloads → ClickHouse |
-| [`packages/runtime-browser`](packages/runtime-browser) | **v0.1** | Zero-dependency browser error + usage tracker (~1 KB brotlied) |
-| [`packages/runtime-node`](packages/runtime-node) | **v0.1** | Same-origin relay handler + curated OTel server tracker |
-| [`packages/runtime-next`](packages/runtime-next) | **v0.1** | One-command Next.js integration (relay route + error boundary) |
+| [`@autter/runtime-browser`](packages/runtime-browser) | **v0.1** | Zero-dependency browser error + usage tracker (~1 KB brotlied) |
+| [`@autter/runtime-node`](packages/runtime-node) | **v0.1** | Same-origin relay handler + curated OTel server tracker |
+| [`@autter/runtime-next`](packages/runtime-next) | **v0.1** | One-command Next.js integration (relay route + error boundary) |
+| [`@autter/otlp-ingester`](packages/otlp-ingester) | **v0.1** | Self-hostable ingest service: OTLP/HTTP (protobuf + JSON) traces + metrics, browser payloads → ClickHouse |
 
 Runnable demo: [`examples/express-app`](examples/express-app) — browser
 tracker → relay → ingester and OTel server tracker, against a compose-run
@@ -45,10 +84,28 @@ ClickHouse.
 
 Per-stack setup snippets: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
-See [`docs/PLAN.md`](docs/PLAN.md) for the detailed roadmap and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data model.
+## Keys: frontend vs backend
 
-## Quick start (ingester)
+Two credential types keep the frontend and backend cleanly separated:
+
+| | Server key (`autter_rt_…`) | Client key (`autter_rtc_…`) |
+| --- | --- | --- |
+| Secrecy | **secret** — backend env vars only | **publishable** — safe in frontend bundles |
+| Can send | OTLP traces/metrics + browser events | browser events only |
+| Protection | rate limits | origin allow-list + tighter rate limits, write-only |
+
+When your app has a backend, prefer the **relay**: the browser posts to your
+own server, which forwards with the server key — no key in the browser at
+all, and ad-blockers can't tell it apart from your own API traffic.
+
+## Docs
+
+- **[Getting started](docs/GETTING-STARTED.md)** — zero to data flowing
+- [Stack integrations](docs/INTEGRATIONS.md) — React, Node, Next.js, Go, Rust, generic OTel
+- [Architecture & data model](docs/ARCHITECTURE.md)
+- [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
+
+## Self-hosting the ingester
 
 ```bash
 docker compose up          # local ClickHouse + ingester

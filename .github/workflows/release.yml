@@ -1,0 +1,42 @@
+name: Release
+
+# Publishes all public packages to npm with provenance.
+# Trigger: push a version tag (v0.1.0) or run manually from the Actions tab.
+# Requires the NPM_TOKEN repo secret (npm automation token with publish
+# rights on the @autter scope).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm install
+      - run: npm run build
+      - run: npm run size -w @autter/runtime-browser
+      - name: Publish packages (skips versions that already exist)
+        run: |
+          for pkg in runtime-browser runtime-node runtime-next otlp-ingester; do
+            name=$(node -p "require('./packages/$pkg/package.json').name")
+            version=$(node -p "require('./packages/$pkg/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published — skipping"
+            else
+              echo "Publishing $name@$version"
+              npm publish -w "$name"
+            fi
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

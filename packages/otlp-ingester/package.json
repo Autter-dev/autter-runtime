@@ -31,5 +31,23 @@
 	},
 	"engines": {
 		"node": ">=20"
-	}
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"homepage": "https://github.com/Autter-dev/autter-runtime#readme",
+	"bugs": "https://github.com/Autter-dev/autter-runtime/issues",
+	"keywords": [
+		"opentelemetry",
+		"otlp",
+		"clickhouse",
+		"telemetry",
+		"ingest",
+		"error-tracking"
+	],
+	"files": [
+		"dist",
+		"Dockerfile"
+	]
 }

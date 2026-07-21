@@ -1,7 +1,9 @@
-import type {
-	RuntimeMetricPoint,
-	RuntimeOccurrenceInput,
-	RuntimeSpanRow,
+import {
+	asSeverity,
+	type RuntimeMetricPoint,
+	type RuntimeOccurrenceInput,
+	type RuntimeSeverity,
+	type RuntimeSpanRow,
 } from "./types.js";
 
 /**
@@ -163,6 +165,33 @@ function statusCodeOf(attrs: Map<string, string>): number | null {
 	return Number.isFinite(code) ? code : null;
 }
 
+function methodOf(attrs: Map<string, string>): string | null {
+	const raw = attrs.get("http.request.method") ?? attrs.get("http.method");
+	return raw ? raw.toUpperCase().slice(0, 16) : null;
+}
+
+/**
+ * Severity of an exception event. SDKs mark it with `autter.severity`
+ * ("fatal" | "error" | "warning" | "info"); `autter.unhandled: true` (the
+ * crash marker set by @autter/runtime-node) implies fatal. Default: error.
+ */
+function severityOf(
+	eventAttrs: Map<string, string>,
+	spanAttrs: Map<string, string>,
+): RuntimeSeverity {
+	const explicit =
+		eventAttrs.get("autter.severity") ?? spanAttrs.get("autter.severity");
+	const severity = asSeverity(explicit, "error");
+	if (
+		severity === "error" &&
+		(eventAttrs.get("autter.unhandled") === "true" ||
+			spanAttrs.get("autter.unhandled") === "true")
+	) {
+		return "fatal";
+	}
+	return severity;
+}
+
 export interface NormalizedTraces {
 	occurrences: RuntimeOccurrenceInput[];
 	spans: RuntimeSpanRow[];
@@ -221,6 +250,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					const eventAttrs = attrMap(event.attributes);
 					occurrences.push({
 						source: "server",
+						severity: severityOf(eventAttrs, attrs),
 						service: resource.service,
 						environment: resource.environment,
 						release: resource.release,
@@ -232,6 +262,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							"Unknown error",
 						stack: eventAttrs.get("exception.stacktrace") ?? null,
 						route,
+						method: methodOf(attrs),
 						statusCode,
 						traceId: span.traceId ?? null,
 						sessionId: null,
@@ -242,6 +273,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				if (exceptionEvents.length === 0 && isErrorStatus(span.status?.code)) {
 					occurrences.push({
 						source: "server",
+						severity: severityOf(new Map(), attrs),
 						service: resource.service,
 						environment: resource.environment,
 						release: resource.release,
@@ -249,6 +281,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						message: span.status?.message || `${span.name ?? "span"} failed`,
 						stack: null,
 						route,
+						method: methodOf(attrs),
 						statusCode,
 						traceId: span.traceId ?? null,
 						sessionId: null,

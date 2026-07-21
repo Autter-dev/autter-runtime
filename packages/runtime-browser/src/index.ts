@@ -35,9 +35,18 @@ export interface AutterBrowserOptions {
 	beforeSend?: (event: BrowserEvent) => BrowserEvent | null;
 }
 
+export type AutterSeverity = "fatal" | "error" | "warning" | "info";
+
 export interface BrowserEvent {
-	type: "exception" | "unhandled_rejection" | "session_start" | "track_event";
+	type:
+		| "exception"
+		| "unhandled_rejection"
+		| "message"
+		| "session_start"
+		| "track_event";
 	timestamp: string;
+	/** Signal level; the ingester defaults it per type when omitted. */
+	severity?: AutterSeverity;
 	message: string;
 	name?: string;
 	stack?: string;
@@ -191,12 +200,30 @@ export function captureException(
 		"exception",
 		isError ? error.message : String(error),
 	);
+	event.severity = "error";
 	if (isError) {
 		event.errorType = error.name;
 		if (error.stack) event.stack = String(error.stack).slice(0, 32000);
 	}
 	if (context) event.context = { ...(event.context || {}), ...context };
 	enqueue(event, true);
+}
+
+/**
+ * Report a warning (or info) without an exception — e.g. a deprecated code
+ * path, a slow resource, a recoverable failure. Grouped and aggregated
+ * exactly like errors, just with a lower severity.
+ */
+export function captureMessage(
+	message: string,
+	severity: AutterSeverity = "warning",
+	context?: Record<string, unknown>,
+): void {
+	const event = baseEvent("message", message);
+	event.severity = severity;
+	event.errorType = "Message";
+	if (context) event.context = { ...(event.context || {}), ...context };
+	enqueue(event, severity === "error" || severity === "fatal");
 }
 
 /** Coarse usage signal — counts only, no PII in `props`. */

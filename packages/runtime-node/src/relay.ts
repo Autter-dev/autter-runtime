@@ -55,9 +55,12 @@ const MAX_EVENTS = 50;
 const EVENT_TYPES = new Set([
 	"exception",
 	"unhandled_rejection",
+	"message",
 	"session_start",
 	"track_event",
 ]);
+
+const SEVERITIES = new Set(["fatal", "error", "warning", "info"]);
 
 // Whitelist sanitiser — anything not listed here is dropped, so a
 // compromised or buggy client can't smuggle cookies/DOM/bodies through the
@@ -79,6 +82,9 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 		events.push({
 			type: e.type,
 			timestamp: e.timestamp,
+			...(typeof e.severity === "string" && SEVERITIES.has(e.severity)
+				? { severity: e.severity }
+				: {}),
 			message:
 				typeof e.message === "string" ? e.message.slice(0, 4000) : "",
 			...(typeof e.name === "string" ? { name: e.name.slice(0, 200) } : {}),

@@ -61,6 +61,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
 React render errors don't reach `window.onerror` — the boundary reports
 them via `captureException` and then renders your fallback.
 
-Also re-exported for convenience: `captureException`, `trackEvent`,
-`setUser`, `setContext`, `flush` (browser) and `captureServerException`
-(server).
+Also re-exported for convenience: `captureException`, `captureMessage`,
+`trackEvent`, `setUser`, `setContext`, `flush` (browser) and
+`captureServerException`, `captureServerMessage` (server).

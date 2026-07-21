@@ -44,6 +44,27 @@ export const MIGRATIONS: Migration[] = [
 	// before the migration runner existed record it as applied without
 	// running anything (the baseline CREATEs already shaped them).
 	{ id: "0001-baseline", statements: [] },
+	// Aggregation-ready occurrence shape: severity (warnings/info share the
+	// table with errors), pre-normalised route/message, extracted stack
+	// frames, and the request method — so later aggregations GROUP BY
+	// stored columns instead of re-parsing stacks/routes in SQL.
+	{
+		id: "0002-occurrences-aggregation-columns",
+		statements: [
+			`ALTER TABLE {db}.runtime_error_occurrences
+				ADD COLUMN IF NOT EXISTS severity LowCardinality(String) DEFAULT 'error' AFTER source`,
+			`ALTER TABLE {db}.runtime_error_occurrences
+				ADD COLUMN IF NOT EXISTS message_normalized String DEFAULT '' AFTER message`,
+			`ALTER TABLE {db}.runtime_error_occurrences
+				ADD COLUMN IF NOT EXISTS top_frames Array(String) DEFAULT [] AFTER stack`,
+			`ALTER TABLE {db}.runtime_error_occurrences
+				ADD COLUMN IF NOT EXISTS first_frame String DEFAULT '' AFTER top_frames`,
+			`ALTER TABLE {db}.runtime_error_occurrences
+				ADD COLUMN IF NOT EXISTS route_normalized String DEFAULT '' AFTER route`,
+			`ALTER TABLE {db}.runtime_error_occurrences
+				ADD COLUMN IF NOT EXISTS method LowCardinality(String) DEFAULT '' AFTER route_normalized`,
+		],
+	},
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

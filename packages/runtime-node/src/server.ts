@@ -49,9 +49,21 @@ export interface AutterServerOptions {
 	instrumentations?: unknown[];
 }
 
+export type AutterSeverity = "fatal" | "error" | "warning" | "info";
+
 export interface AutterServer {
 	/** Report a handled exception. Always recorded (never sampled out). */
 	captureException(error: unknown, attributes?: Attributes): void;
+	/**
+	 * Report a warning (or info) without an exception — deprecated code
+	 * paths, recoverable failures, degraded dependencies. Stored alongside
+	 * errors with a lower severity so aggregations can slice one dataset.
+	 */
+	captureMessage(
+		message: string,
+		severity?: AutterSeverity,
+		attributes?: Attributes,
+	): void;
 	/** Flush and stop all exporters. Call on graceful shutdown. */
 	shutdown(): Promise<void>;
 }
@@ -115,7 +127,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		const isError = error instanceof Error;
 		const message = isError ? error.message : String(error);
 		const span = errorTracer.startSpan(isError ? error.name : "Error", {
-			attributes,
+			attributes: { "autter.severity": "error", ...attributes },
 		});
 		if (isError) {
 			span.recordException(error);
@@ -125,6 +137,32 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 				"exception.message": message,
 			});
 		}
+		span.setStatus({ code: SpanStatusCode.ERROR, message });
+		span.end();
+	}
+
+	function captureMessage(
+		message: string,
+		severity: AutterSeverity = "warning",
+		attributes?: Attributes,
+	): void {
+		// Same wire shape as an exception (an event named "exception" with
+		// ERROR status is what the ingester turns into an occurrence), with
+		// autter.severity carrying the level. A synthetic stack (minus this
+		// frame) marks the call site so warnings group by origin.
+		const stack = new Error().stack
+			?.split("\n")
+			.filter((line, i) => i === 0 || !line.includes("captureMessage"))
+			.join("\n");
+		const span = errorTracer.startSpan("Message", {
+			attributes: { "autter.severity": severity, ...attributes },
+		});
+		span.addEvent("exception", {
+			"exception.type": "Message",
+			"exception.message": message,
+			...(stack ? { "exception.stacktrace": stack } : {}),
+			"autter.severity": severity,
+		});
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
 		span.end();
 	}
@@ -141,6 +179,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 
 	const server: AutterServer = {
 		captureException,
+		captureMessage,
 		shutdown: async () => {
 			active = null;
 			await Promise.allSettled([errorProvider.shutdown(), sdk.shutdown()]);
@@ -168,5 +207,27 @@ export function captureException(
 		code: SpanStatusCode.ERROR,
 		message: error instanceof Error ? error.message : String(error),
 	});
+	span.end();
+}
+
+/** Module-level convenience for warnings/info — see AutterServer.captureMessage. */
+export function captureMessage(
+	message: string,
+	severity: AutterSeverity = "warning",
+	attributes?: Attributes,
+): void {
+	if (active) {
+		active.captureMessage(message, severity, attributes);
+		return;
+	}
+	const span = trace.getTracer("autter-errors").startSpan("Message", {
+		attributes: { "autter.severity": severity, ...attributes },
+	});
+	span.addEvent("exception", {
+		"exception.type": "Message",
+		"exception.message": message,
+		"autter.severity": severity,
+	});
+	span.setStatus({ code: SpanStatusCode.ERROR, message });
 	span.end();
 }

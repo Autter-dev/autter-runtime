@@ -61,6 +61,7 @@ initAutterBrowser({
 | --- | --- |
 | `initAutterBrowser(options)` | Installs `error`/`unhandledrejection` listeners, sends a session ping |
 | `captureException(error, context?)` | Handled errors; fast-flushed |
+| `captureMessage(message, severity?, context?)` | Warnings/info without an exception (`"warning"` default); grouped and aggregated like errors |
 | `trackEvent(name, props?)` | Usage counter; aggregated server-side per minute |
 | `setUser(id)` | **Opaque id only** — never an email |
 | `setContext(ctx)` | Attached to subsequent events |

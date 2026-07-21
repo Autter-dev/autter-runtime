@@ -1,0 +1,50 @@
+name: Deploy ingester (single server)
+
+# Rolls the otlp-ingester on a self-hosted EC2/Lightsail box running
+# deploy/single-server/docker-compose.yml — SSHes in, refreshes the compose
+# files, pulls the latest image, and restarts. ClickHouse and Caddy are left
+# untouched (only the otlp-ingester service is recreated).
+#
+# Repo VARIABLES required:
+#   SINGLE_SERVER_HOST          the box's IP or hostname
+#   SINGLE_SERVER_USER          SSH user (e.g. ubuntu)
+#   SINGLE_SERVER_PATH          remote directory holding docker-compose.yml + .env
+#   SINGLE_SERVER_AUTODEPLOY_ENABLED   "true" to deploy on pushes to main
+# Repo SECRETS required:
+#   SINGLE_SERVER_SSH_KEY       private key matching an authorized_keys entry on the box
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "packages/otlp-ingester/**"
+      - "deploy/single-server/**"
+      - ".github/workflows/deploy-single-server.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-single-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || vars.SINGLE_SERVER_AUTODEPLOY_ENABLED == 'true'
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.SINGLE_SERVER_HOST }}
+          username: ${{ vars.SINGLE_SERVER_USER }}
+          key: ${{ secrets.SINGLE_SERVER_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd "${{ vars.SINGLE_SERVER_PATH }}"
+            curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/deploy/single-server/docker-compose.yml
+            curl -fsSL -o Caddyfile https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/deploy/single-server/Caddyfile
+            docker compose pull otlp-ingester
+            docker compose up -d otlp-ingester caddy
+            docker image prune -f

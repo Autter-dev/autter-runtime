@@ -1,7 +1,9 @@
 import { z } from "zod";
-import type {
-	RuntimeMetricPoint,
-	RuntimeOccurrenceInput,
+import {
+	asSeverity,
+	type RuntimeMetricPoint,
+	type RuntimeOccurrenceInput,
+	type RuntimeSeverity,
 } from "./types.js";
 
 /**
@@ -16,10 +18,13 @@ const browserEventSchema = z.object({
 	type: z.enum([
 		"exception",
 		"unhandled_rejection",
+		"message",
 		"session_start",
 		"track_event",
 	]),
 	timestamp: z.string().datetime(),
+	/** exception/message events: signal level. Defaults per type. */
+	severity: z.enum(["fatal", "error", "warning", "info"]).optional(),
 	message: z.string().max(4000).default(""),
 	/** track_event only: the event name (counted, never free-form PII). */
 	name: z.string().max(200).optional(),
@@ -47,6 +52,14 @@ export type BrowserPayload = z.infer<typeof browserPayloadSchema>;
 const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 	exception: "Error",
 	unhandled_rejection: "UnhandledRejection",
+	message: "Message",
+};
+
+/** Default severity per event type when the SDK doesn't say. */
+const TYPE_TO_SEVERITY: Record<string, RuntimeSeverity> = {
+	exception: "error",
+	unhandled_rejection: "error",
+	message: "warning",
 };
 
 export interface NormalizedBrowser {
@@ -105,6 +118,10 @@ export function normalizeBrowserPayload(
 
 		occurrences.push({
 			source: "browser",
+			severity: asSeverity(
+				event.severity,
+				TYPE_TO_SEVERITY[event.type] ?? "error",
+			),
 			service: payload.service,
 			environment: payload.environment,
 			release: payload.release ?? null,
@@ -113,6 +130,7 @@ export function normalizeBrowserPayload(
 			message: event.message || "Unknown error",
 			stack: event.stack ?? null,
 			route: event.route ? (event.route.split("?")[0] ?? null) : null,
+			method: null,
 			statusCode: null,
 			traceId: null,
 			sessionId: payload.sessionId ?? null,

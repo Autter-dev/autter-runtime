@@ -39,16 +39,21 @@ import {
 export {
 	initAutterBrowser,
 	captureException,
+	captureMessage,
 	trackEvent,
 	setUser,
 	setContext,
 	flush,
+	type AutterSeverity,
 } from "@autter/runtime-browser";
 export {
 	AutterErrorBoundary,
 	type AutterErrorBoundaryProps,
 } from "./error-boundary.js";
-export { captureException as captureServerException } from "@autter/runtime-node";
+export {
+	captureException as captureServerException,
+	captureMessage as captureServerMessage,
+} from "@autter/runtime-node";
 
 /** Server OTel init for Next.js `instrumentation.ts`. */
 export function registerAutter(options: AutterServerOptions): AutterServer {

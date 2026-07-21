@@ -13,7 +13,9 @@ import type { RuntimeOccurrenceInput } from "./types.js";
 const UUID_RE =
 	/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const LONG_HEX_RE = /\b[0-9a-f]{8,}\b/gi;
-const NUMBER_RE = /\b\d+(\.\d+)?\b/g;
+// No trailing \b: numbers glued to units ("4200ms", "3.5s", "512kb") must
+// template too, or per-value messages fragment into separate fingerprints.
+const NUMBER_RE = /\b\d+(\.\d+)?/g;
 const QUOTED_RE = /(["'`])(?:\\.|(?!\1).)*\1/g;
 
 export function normalizeMessage(message: string): string {
@@ -79,4 +81,27 @@ export function fingerprintOccurrence(input: RuntimeOccurrenceInput): string {
 		normalizeRoute(input.route),
 	];
 	return createHash("sha256").update(parts.join(" ")).digest("hex").slice(0, 32);
+}
+
+/**
+ * Derived, aggregation-ready fields, computed from the SAME normalisers the
+ * fingerprint hashes — so a stored fingerprint can always be explained by
+ * the stored columns next to it. Severity is deliberately excluded from
+ * the fingerprint (a warning that escalates to an error stays one group).
+ */
+export interface DerivedFields {
+	routeNormalized: string;
+	messageNormalized: string;
+	topFrames: string[];
+	firstFrame: string;
+}
+
+export function deriveFields(input: RuntimeOccurrenceInput): DerivedFields {
+	const topFrames = normalizeStackFrames(input.stack);
+	return {
+		routeNormalized: normalizeRoute(input.route),
+		messageNormalized: normalizeMessage(input.message),
+		topFrames,
+		firstFrame: topFrames[0] ?? "",
+	};
 }

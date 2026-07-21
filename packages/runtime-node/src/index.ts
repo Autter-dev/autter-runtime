@@ -7,6 +7,8 @@ export {
 export {
 	initAutterServer,
 	captureException,
+	captureMessage,
 	type AutterServerOptions,
 	type AutterServer,
+	type AutterSeverity,
 } from "./server.js";

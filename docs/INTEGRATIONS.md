@@ -115,6 +115,17 @@ OTEL_TRACES_SAMPLER_ARG=0.01
 Errors surface as issues when spans carry `exception` events (every SDK's
 `record_exception` / `RecordError` does this) or `ERROR` status.
 
+**Warnings** (any language): add an `autter.severity` attribute to the
+exception event — `"fatal" | "error" | "warning" | "info"` (default
+`error`; the Node SDK's crash marker `autter.unhandled: true` implies
+`fatal`). Warnings share the errors table with a `severity` column, so
+they group and aggregate identically:
+
+```python
+span.record_exception(err)  # or add_event("exception", {...})
+span.set_attribute("autter.severity", "warning")
+```
+
 ## Sampling guidance (all stacks)
 
 Errors are always worth sending; keep successful-trace sampling at ~1%

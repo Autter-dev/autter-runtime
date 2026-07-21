@@ -50,6 +50,29 @@ Two key scopes separate frontend and backend credentials:
 eventually. Percentiles come from sampled spans at query time — the rollup
 table stores only counts and duration sums.
 
+### Occurrences are aggregation-ready at write time
+
+`runtime_error_occurrences` holds errors **and** warnings/info
+(`severity` column: `fatal | error | warning | info`) — one dataset,
+sliceable by severity, rather than separate pipelines. Alongside the raw
+fields, the ingester stores derived columns computed by the same
+normalisers the fingerprint hashes, so aggregations never re-parse
+stacks or routes in SQL:
+
+| Column | Derivation | Aggregation use |
+| --- | --- | --- |
+| `fingerprint` | hash of source+service+type+normalised message+top frames+normalised route | the issue group key |
+| `severity` | SDK-declared (`autter.severity`); `autter.unhandled` ⇒ `fatal` | errors vs warnings, alert thresholds |
+| `message_normalized` | ids/numbers/quoted strings templated out | "what is this group" label |
+| `route_normalized` | `/users/8812` → `/users/:id` | errors-by-endpoint, low-cardinality |
+| `top_frames` (Array) | top ≤5 normalised stack frames | "point of error" drill-down |
+| `first_frame` | `top_frames[1]` | single-column GROUP BY for hotspot files |
+| `method` | `http.request.method` | split GET vs POST failures |
+
+Severity is deliberately **not** part of the fingerprint: the same defect
+reported as a warning in one code path and an error in another stays one
+group.
+
 Retention philosophy: raw signal is short-lived; anything worth keeping
 long-term (issue summaries, incident history, learnings) is derived and
 stored by the sink consumer.

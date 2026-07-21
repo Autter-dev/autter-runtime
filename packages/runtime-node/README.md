@@ -57,6 +57,10 @@ const autter = initAutterServer({
 // handled errors — always recorded, never sampled out:
 autter.captureException(err, { "order.id": "…" });
 
+// warnings/info without an exception — same grouping+aggregation as
+// errors, just a lower severity ("fatal" | "error" | "warning" | "info"):
+autter.captureMessage("Legacy /orders lookup used", "warning");
+
 // graceful shutdown flushes exporters:
 await autter.shutdown();
 ```

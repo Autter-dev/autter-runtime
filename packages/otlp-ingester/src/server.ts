@@ -7,7 +7,7 @@ import express, {
 import { KeyResolver, RateLimiter } from "./auth.js";
 import { ClickHouseStore } from "./clickhouse.js";
 import type { IngesterConfig } from "./config.js";
-import { fingerprintOccurrence } from "./fingerprint.js";
+import { deriveFields, fingerprintOccurrence } from "./fingerprint.js";
 import {
 	browserPayloadSchema,
 	normalizeBrowserPayload,
@@ -153,6 +153,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			...input,
 			occurrenceId: randomUUID(),
 			fingerprint: fingerprintOccurrence(input),
+			...deriveFields(input),
 		}));
 	}
 

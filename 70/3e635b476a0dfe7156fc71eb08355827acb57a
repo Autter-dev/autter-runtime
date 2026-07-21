@@ -1,0 +1,189 @@
+packages/otlp-ingester/src/server.ts
+  s_b3e019178ce01d::t_a5e06cb90939fe 156
+  s_b3e019178ce01d::t_e2fca8aba76c33 10
+packages/otlp-ingester/src/types.ts
+  s_b3e019178ce01d::t_401a2bc4e2b29b 49-53,57-64
+  s_b3e019178ce01d::t_d773a69f41c567 3-28,31,40-41
+packages/runtime-node/src/relay.ts
+  s_b3e019178ce01d::t_6c8bbbeba6f018 85-87
+  s_b3e019178ce01d::t_ae2eca38cfb091 58,63
+.github/workflows/deploy-single-server.yml
+  s_b3e019178ce01d::t_35044dc375080f 1-50
+packages/otlp-ingester/src/normalize-browser.ts
+  s_b3e019178ce01d::t_bce07c34706e26 2-6
+  s_b3e019178ce01d::t_2949aa20304fe8 121-124,133
+  s_b3e019178ce01d::t_df1cc6cd0d5312 55-62
+  s_b3e019178ce01d::t_6b3a1a4f68e469 21,26-27
+packages/runtime-next/src/index.ts
+  s_b3e019178ce01d::t_dedca052c1a8a3 42,47,53-56
+packages/otlp-ingester/src/migrations.ts
+  s_b3e019178ce01d::t_4d9ca5ba15c265 47-67
+packages/runtime-node/src/index.ts
+  s_b3e019178ce01d::t_ef22bf5fccfb04 10,13
+docs/ARCHITECTURE.md
+  s_b3e019178ce01d::t_dc737bf818223d 53-75
+packages/otlp-ingester/src/fingerprint.ts
+  s_b3e019178ce01d::t_2e467becd1341b 16-18
+  s_b3e019178ce01d::t_ea2e3229e66cb1 85-107
+packages/runtime-node/src/server.ts
+  s_b3e019178ce01d::t_7ba26196a6b7cb 130,144-165
+  s_b3e019178ce01d::t_d669e8dc72d99a 52-53,57-66
+  s_b3e019178ce01d::t_97bf053df9dc19 212-233
+  s_b3e019178ce01d::t_beebe9a5d5baad 182
+docs/INTEGRATIONS.md
+  s_b3e019178ce01d::t_6de8d7b6e99eb1 118-128
+packages/runtime-browser/README.md
+  s_b3e019178ce01d::t_9d4b07a33cbbc4 64
+packages/runtime-browser/src/index.ts
+  s_b3e019178ce01d::t_0ca7c8e90f058b 38-39,41-46,48-49
+  s_b3e019178ce01d::t_d1dafb149c476b 203,212-226
+packages/runtime-node/README.md
+  s_b3e019178ce01d::t_bb7540e916ab14 60-63
+packages/runtime-next/README.md
+  s_b3e019178ce01d::t_e4f44c9ff93369 64-66
+packages/otlp-ingester/src/clickhouse.ts
+  s_b3e019178ce01d::t_91424103419519 208,214,216-217,219-220
+  s_b3e019178ce01d::t_c1e9dbb151dd16 68-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "703e635b476a0dfe7156fc71eb08355827acb57a",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:957a3ea947b1cfbea7037886dfb1229718159419d7abc153f576c8733576fbba",
+      "total_additions": 338,
+      "total_deletions": 30,
+      "accepted_lines": 338,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:957a3ea947b1cfbea7037886dfb1229718159419d7abc153f576c8733576fbba",
+      "stats": {
+        "total_additions": 338,
+        "total_deletions": 30,
+        "accepted_lines": 338,
+        "overriden_lines": 0,
+        "files": {
+          ".github/workflows/deploy-single-server.yml": {
+            "total_additions": 50,
+            "total_deletions": 0,
+            "accepted_lines": 50,
+            "overriden_lines": 0
+          },
+          "docs/ARCHITECTURE.md": {
+            "total_additions": 23,
+            "total_deletions": 0,
+            "accepted_lines": 23,
+            "overriden_lines": 0
+          },
+          "docs/INTEGRATIONS.md": {
+            "total_additions": 11,
+            "total_deletions": 0,
+            "accepted_lines": 11,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/clickhouse.ts": {
+            "total_additions": 30,
+            "total_deletions": 18,
+            "accepted_lines": 30,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/fingerprint.ts": {
+            "total_additions": 26,
+            "total_deletions": 1,
+            "accepted_lines": 26,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/migrations.ts": {
+            "total_additions": 21,
+            "total_deletions": 0,
+            "accepted_lines": 21,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/normalize-browser.ts": {
+            "total_additions": 21,
+            "total_deletions": 3,
+            "accepted_lines": 21,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/server.ts": {
+            "total_additions": 2,
+            "total_deletions": 1,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/types.ts": {
+            "total_additions": 42,
+            "total_deletions": 1,
+            "accepted_lines": 42,
+            "overriden_lines": 0
+          },
+          "packages/runtime-browser/README.md": {
+            "total_additions": 1,
+            "total_deletions": 0,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "packages/runtime-browser/src/index.ts": {
+            "total_additions": 28,
+            "total_deletions": 1,
+            "accepted_lines": 28,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/README.md": {
+            "total_additions": 3,
+            "total_deletions": 3,
+            "accepted_lines": 3,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 6,
+            "total_deletions": 1,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/README.md": {
+            "total_additions": 4,
+            "total_deletions": 0,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/index.ts": {
+            "total_additions": 2,
+            "total_deletions": 0,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/relay.ts": {
+            "total_additions": 6,
+            "total_deletions": 0,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/server.ts": {
+            "total_additions": 62,
+            "total_deletions": 1,
+            "accepted_lines": 62,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

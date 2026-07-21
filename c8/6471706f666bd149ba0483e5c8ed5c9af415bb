@@ -1,0 +1,240 @@
+README.md
+  s_b3e019178ce01d::t_ff87a610be7b87 28-34
+packages/runtime-next/src/index.ts
+  s_b3e019178ce01d::t_6e62abfae8c0ba 1-63
+packages/runtime-next/package.json
+  s_b3e019178ce01d::t_ce0efaca3602e1 1-41
+packages/runtime-browser/package.json
+  s_b3e019178ce01d::t_4db4b85d214667 1-40
+examples/express-app/server.js
+  s_b3e019178ce01d::t_e0785f12ac2b92 1-46
+package.json
+  s_b3e019178ce01d::t_ef82699729ebc2 12-13
+  s_b3e019178ce01d::t_c7d8b8f7041f1c 16
+packages/runtime-node/src/server.ts
+  s_b3e019178ce01d::t_ceb844dad9de14 5
+  s_b3e019178ce01d::t_2384753f6b12ac 1-4,6-70,72-172
+  s_b3e019178ce01d::t_0a0fd52eff9962 71
+packages/runtime-next/README.md
+  s_b3e019178ce01d::t_ede080f436a8ec 1-66
+packages/runtime-next/tsconfig.json
+  s_b3e019178ce01d::t_689e5e92bc4381 1-13
+packages/runtime-node/tsconfig.json
+  s_b3e019178ce01d::t_c8e37791430840 1-12
+packages/runtime-node/package.json
+  s_b3e019178ce01d::t_35dc58460b59e0 1-45
+packages/runtime-browser/src/index.ts
+  s_b3e019178ce01d::t_c83dde20431192 1-247
+packages/runtime-node/src/relay.ts
+  s_b3e019178ce01d::t_93d0281af674db 1-224
+packages/runtime-browser/tsconfig.json
+  s_b3e019178ce01d::t_0c5aba91a6abc4 1-12
+packages/runtime-node/src/index.ts
+  s_b3e019178ce01d::t_0fbf2a89086fae 1-12
+examples/express-app/public/index.html
+  s_b3e019178ce01d::t_91ffed91ffe574 1-49
+examples/express-app/package.json
+  s_b3e019178ce01d::t_e14e046a46e98f 1-15
+packages/runtime-next/src/error-boundary.ts
+  s_b3e019178ce01d::t_587c6e882bdb10 1-51
+.github/workflows/ci.yml
+  s_b3e019178ce01d::t_2f02ce5945cce5 18
+packages/otlp-ingester/src/normalize-browser.ts
+  s_b3e019178ce01d::t_ee147b85714e6f 129
+  s_b3e019178ce01d::t_a6b2374c3739f1 16-21,24-25
+  s_b3e019178ce01d::t_89522cbbf30dd9 61-88,94-102
+packages/runtime-browser/README.md
+  s_b3e019178ce01d::t_477446c883f647 1-67
+packages/runtime-node/README.md
+  s_b3e019178ce01d::t_3d1cfe88998681 1-90
+docs/PLAN.md
+  s_b3e019178ce01d::t_5bce59c983db89 52
+  s_b3e019178ce01d::t_adb7736d5d1848 84
+  s_b3e019178ce01d::t_4e4b6399712092 69
+docs/ARCHITECTURE.md
+  s_b3e019178ce01d::t_32918c71819d7d 105-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "c86471706f666bd149ba0483e5c8ed5c9af415bb",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:17364977dc50632b23981b679866ff0a7ed0a65d0ea00d66a1bf4063d6341aa8",
+      "total_additions": 1332,
+      "total_deletions": 33,
+      "accepted_lines": 1330,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:17364977dc50632b23981b679866ff0a7ed0a65d0ea00d66a1bf4063d6341aa8",
+      "stats": {
+        "total_additions": 1332,
+        "total_deletions": 33,
+        "accepted_lines": 1330,
+        "overriden_lines": 0,
+        "files": {
+          ".github/workflows/ci.yml": {
+            "total_additions": 1,
+            "total_deletions": 0,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "README.md": {
+            "total_additions": 7,
+            "total_deletions": 3,
+            "accepted_lines": 7,
+            "overriden_lines": 0
+          },
+          "docs/ARCHITECTURE.md": {
+            "total_additions": 5,
+            "total_deletions": 0,
+            "accepted_lines": 5,
+            "overriden_lines": 0
+          },
+          "docs/PLAN.md": {
+            "total_additions": 3,
+            "total_deletions": 3,
+            "accepted_lines": 3,
+            "overriden_lines": 0
+          },
+          "examples/express-app/package.json": {
+            "total_additions": 15,
+            "total_deletions": 0,
+            "accepted_lines": 15,
+            "overriden_lines": 0
+          },
+          "examples/express-app/public/index.html": {
+            "total_additions": 49,
+            "total_deletions": 0,
+            "accepted_lines": 49,
+            "overriden_lines": 0
+          },
+          "examples/express-app/server.js": {
+            "total_additions": 46,
+            "total_deletions": 0,
+            "accepted_lines": 46,
+            "overriden_lines": 0
+          },
+          "package.json": {
+            "total_additions": 3,
+            "total_deletions": 2,
+            "accepted_lines": 3,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/normalize-browser.ts": {
+            "total_additions": 46,
+            "total_deletions": 23,
+            "accepted_lines": 46,
+            "overriden_lines": 0
+          },
+          "packages/runtime-browser/README.md": {
+            "total_additions": 67,
+            "total_deletions": 0,
+            "accepted_lines": 67,
+            "overriden_lines": 0
+          },
+          "packages/runtime-browser/package.json": {
+            "total_additions": 40,
+            "total_deletions": 0,
+            "accepted_lines": 40,
+            "overriden_lines": 0
+          },
+          "packages/runtime-browser/src/index.ts": {
+            "total_additions": 247,
+            "total_deletions": 0,
+            "accepted_lines": 247,
+            "overriden_lines": 0
+          },
+          "packages/runtime-browser/tsconfig.json": {
+            "total_additions": 12,
+            "total_deletions": 0,
+            "accepted_lines": 12,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/README.md": {
+            "total_additions": 66,
+            "total_deletions": 0,
+            "accepted_lines": 66,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/package.json": {
+            "total_additions": 41,
+            "total_deletions": 0,
+            "accepted_lines": 41,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/error-boundary.ts": {
+            "total_additions": 51,
+            "total_deletions": 0,
+            "accepted_lines": 51,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 63,
+            "total_deletions": 0,
+            "accepted_lines": 63,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/tsconfig.json": {
+            "total_additions": 13,
+            "total_deletions": 0,
+            "accepted_lines": 13,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/README.md": {
+            "total_additions": 90,
+            "total_deletions": 0,
+            "accepted_lines": 90,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/package.json": {
+            "total_additions": 45,
+            "total_deletions": 0,
+            "accepted_lines": 45,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/index.ts": {
+            "total_additions": 12,
+            "total_deletions": 0,
+            "accepted_lines": 12,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/relay.ts": {
+            "total_additions": 224,
+            "total_deletions": 0,
+            "accepted_lines": 224,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/server.ts": {
+            "total_additions": 174,
+            "total_deletions": 2,
+            "accepted_lines": 172,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/tsconfig.json": {
+            "total_additions": 12,
+            "total_deletions": 0,
+            "accepted_lines": 12,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

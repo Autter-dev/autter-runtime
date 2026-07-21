@@ -65,6 +65,24 @@ export const MIGRATIONS: Migration[] = [
 				ADD COLUMN IF NOT EXISTS method LowCardinality(String) DEFAULT '' AFTER route_normalized`,
 		],
 	},
+	// ZSTD compression on the fat text columns — stack traces and JSON
+	// attributes compress several times better under ZSTD than the LZ4
+	// default, and these columns dominate on-disk size. MODIFY COLUMN with
+	// a codec is idempotent and cheap: new parts use it immediately, old
+	// parts recompress on background merges.
+	{
+		id: "0003-compress-fat-columns",
+		statements: [
+			`ALTER TABLE {db}.runtime_error_occurrences
+				MODIFY COLUMN stack String DEFAULT '' CODEC(ZSTD(3))`,
+			`ALTER TABLE {db}.runtime_error_occurrences
+				MODIFY COLUMN message String CODEC(ZSTD(1))`,
+			`ALTER TABLE {db}.runtime_error_occurrences
+				MODIFY COLUMN attributes String DEFAULT '{}' CODEC(ZSTD(1))`,
+			`ALTER TABLE {db}.runtime_spans
+				MODIFY COLUMN attributes String DEFAULT '{}' CODEC(ZSTD(1))`,
+		],
+	},
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

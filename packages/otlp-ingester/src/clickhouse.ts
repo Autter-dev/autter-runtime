@@ -75,9 +75,9 @@ export class ClickHouseStore {
 				environment        LowCardinality(String),
 				release            String DEFAULT '',
 				error_type         String,
-				message            String,
+				message            String CODEC(ZSTD(1)),
 				message_normalized String DEFAULT '',
-				stack              String DEFAULT '',
+				stack              String DEFAULT '' CODEC(ZSTD(3)),
 				top_frames         Array(String) DEFAULT [],
 				first_frame        String DEFAULT '',
 				route              String DEFAULT '',
@@ -86,7 +86,7 @@ export class ClickHouseStore {
 				status_code        UInt16 DEFAULT 0,
 				trace_id           String DEFAULT '',
 				session_id         String DEFAULT '',
-				attributes         String DEFAULT '{}',
+				attributes         String DEFAULT '{}' CODEC(ZSTD(1)),
 				occurred_at        DateTime64(3, 'UTC'),
 				ingested_at        DateTime64(3, 'UTC') DEFAULT now64(3)
 			)
@@ -109,7 +109,7 @@ export class ClickHouseStore {
 				route            String DEFAULT '',
 				status_code      UInt16 DEFAULT 0,
 				duration_ms      Float64,
-				attributes       String DEFAULT '{}',
+				attributes       String DEFAULT '{}' CODEC(ZSTD(1)),
 				started_at       DateTime64(3, 'UTC')
 			)
 			ENGINE = MergeTree

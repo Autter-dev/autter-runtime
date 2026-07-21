@@ -15,8 +15,10 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 
 Auth on every ingest route: `Authorization: Bearer <ingest key>`,
 `x-autter-key`, or `?key=` (query param — for sendBeacon, which cannot set
-headers). OTLP protobuf and gzip bodies are Milestone 1 (`docs/PLAN.md`);
-until then configure your exporter with `http/json`.
+headers). OTLP endpoints accept **both protobuf and JSON** (`content-type:
+application/x-protobuf` or `application/json`), gzip/deflate bodies
+included — so any OpenTelemetry SDK (Go, Rust, Python, Java, .NET, JS)
+works with its default exporter settings.
 
 ### Key scopes
 

@@ -18,6 +18,7 @@ import {
 	type OtlpMetricsRequest,
 	type OtlpTraceRequest,
 } from "./normalize-otlp.js";
+import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
 import type {
 	IngestContext,
 	RuntimeOccurrence,
@@ -50,6 +51,15 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		express.text({
 			limit: config.maxBodyBytes,
 			type: ["text/plain"],
+		}),
+	);
+	// OTLP protobuf — the default wire format of most OTel SDKs (Go, Rust,
+	// Python, Java, .NET, JS proto exporters). body-parser inflates
+	// gzip/deflate request bodies automatically for all three parsers.
+	app.use(
+		express.raw({
+			limit: config.maxBodyBytes,
+			type: ["application/x-protobuf"],
 		}),
 	);
 
@@ -177,12 +187,31 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		res.status(503).json({ error: "storage unavailable, retry later" });
 	}
 
+	/** OTLP success responses mirror the request encoding: an empty
+	 * protobuf message body for proto clients, JSON otherwise. */
+	function otlpSuccess(req: Request, res: Response): void {
+		if (req.is("application/x-protobuf")) {
+			res.status(200).type("application/x-protobuf").end();
+			return;
+		}
+		res.status(200).json({ partialSuccess: {} });
+	}
+
 	app.post("/v1/traces", async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
-		const { occurrences, spans, metricPoints } = normalizeTraces(
-			req.body as OtlpTraceRequest,
-		);
+		let request: OtlpTraceRequest;
+		if (req.is("application/x-protobuf")) {
+			try {
+				request = decodeTraceRequest(req.body as Buffer);
+			} catch {
+				res.status(400).json({ error: "invalid protobuf payload" });
+				return;
+			}
+		} else {
+			request = req.body as OtlpTraceRequest;
+		}
+		const { occurrences, spans, metricPoints } = normalizeTraces(request);
 		const fingerprinted = fingerprintAll(occurrences);
 		try {
 			await Promise.all([
@@ -195,21 +224,31 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		forwardToSink(ctx, fingerprinted);
-		// OTLP/HTTP success response: an empty partialSuccess object.
-		res.status(200).json({ partialSuccess: {} });
+		otlpSuccess(req, res);
 	});
 
 	app.post("/v1/metrics", async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
-		const metricPoints = normalizeMetrics(req.body as OtlpMetricsRequest);
+		let request: OtlpMetricsRequest;
+		if (req.is("application/x-protobuf")) {
+			try {
+				request = decodeMetricsRequest(req.body as Buffer);
+			} catch {
+				res.status(400).json({ error: "invalid protobuf payload" });
+				return;
+			}
+		} else {
+			request = req.body as OtlpMetricsRequest;
+		}
+		const metricPoints = normalizeMetrics(request);
 		try {
 			await store.insertMetricPoints(ctx, metricPoints);
 		} catch (err) {
 			storageError(res, err);
 			return;
 		}
-		res.status(200).json({ partialSuccess: {} });
+		otlpSuccess(req, res);
 	});
 
 	app.post("/v1/browser", async (req, res) => {

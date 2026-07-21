@@ -33,6 +33,18 @@ Runnable demo: [`examples/express-app`](examples/express-app) — browser
 tracker → relay → ingester and OTel server tracker, against a compose-run
 ClickHouse.
 
+## Supported stacks
+
+| Stack | How | Key type |
+| --- | --- | --- |
+| React / any SPA / static site | `@autter/runtime-browser` (direct) | client key (publishable) |
+| React/SPA with a backend | `@autter/runtime-browser` → relay | none in browser; server key in relay |
+| Next.js | `@autter/runtime-next` | server key |
+| Node (Express, Fastify, Koa, Nest) | `@autter/runtime-node` | server key |
+| Go, Rust, Python, Java, .NET, … | any OTel SDK → OTLP/HTTP (protobuf **or** JSON) | server key |
+
+Per-stack setup snippets: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
+
 See [`docs/PLAN.md`](docs/PLAN.md) for the detailed roadmap and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data model.
 

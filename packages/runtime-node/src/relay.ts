@@ -15,8 +15,37 @@ export interface RelayOptions {
 	endpoint?: string;
 	/** Max accepted request body. Default 64 KB. */
 	maxBodyBytes?: number;
+	/**
+	 * The relay route is necessarily public (browsers must reach it), so it
+	 * ships with a per-IP fixed-window limit. Default 120 req/min; set
+	 * `false` to disable (e.g. when a WAF already rate-limits).
+	 */
+	perIpRateLimit?: number | false;
 	/** Called when the async forward fails (default: console.warn). */
 	onError?: (err: unknown) => void;
+}
+
+class IpWindow {
+	private windows = new Map<string, { start: number; count: number }>();
+
+	constructor(private readonly limitPerMinute: number) {}
+
+	allow(ip: string): boolean {
+		const start = Math.floor(Date.now() / 60_000) * 60_000;
+		const entry = this.windows.get(ip);
+		if (!entry || entry.start !== start) {
+			this.windows.set(ip, { start, count: 1 });
+			if (this.windows.size > 50_000) this.windows.clear();
+			return true;
+		}
+		entry.count += 1;
+		return entry.count <= this.limitPerMinute;
+	}
+}
+
+function firstForwardedFor(value: string | string[] | undefined | null): string {
+	const raw = Array.isArray(value) ? value[0] : value;
+	return raw ? (raw.split(",")[0] ?? "").trim() : "";
 }
 
 const DEFAULT_ENDPOINT = "https://otlp.autter.dev";
@@ -113,9 +142,22 @@ export function createBrowserRelayFetchHandler(
 	opts: RelayOptions,
 ): (request: Request) => Promise<Response> {
 	const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+	const limiter =
+		opts.perIpRateLimit === false
+			? null
+			: new IpWindow(opts.perIpRateLimit ?? 120);
 	return async (request: Request): Promise<Response> => {
 		if (request.method !== "POST") {
 			return new Response(null, { status: 405 });
+		}
+		if (limiter) {
+			const ip =
+				firstForwardedFor(request.headers.get("x-forwarded-for")) || "unknown";
+			if (!limiter.allow(ip)) {
+				return new Response(JSON.stringify({ error: "rate limit exceeded" }), {
+					status: 429,
+				});
+			}
 		}
 		const text = await request.text();
 		if (text.length > maxBody) {
@@ -157,6 +199,10 @@ export function createBrowserRelayHandler(
 	res: ServerResponse,
 ) => void {
 	const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+	const limiter =
+		opts.perIpRateLimit === false
+			? null
+			: new IpWindow(opts.perIpRateLimit ?? 120);
 
 	function respond(res: ServerResponse, status: number, body?: object): void {
 		res.statusCode = status;
@@ -182,6 +228,16 @@ export function createBrowserRelayHandler(
 		if (req.method !== "POST") {
 			respond(res, 405);
 			return;
+		}
+		if (limiter) {
+			const ip =
+				firstForwardedFor(req.headers["x-forwarded-for"]) ||
+				req.socket?.remoteAddress ||
+				"unknown";
+			if (!limiter.allow(ip)) {
+				respond(res, 429, { error: "rate limit exceeded" });
+				return;
+			}
 		}
 		if (req.body !== undefined) {
 			let raw: unknown = req.body;

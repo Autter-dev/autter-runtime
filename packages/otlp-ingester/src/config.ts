@@ -2,6 +2,10 @@ export interface StaticIngestKey {
 	key: string;
 	orgId: string;
 	repositoryId: string;
+	/** "server" (default) = secret backend key; "client" = publishable browser key. */
+	scope?: "client" | "server";
+	/** client keys: exact origins allowed to send (e.g. https://app.example.com). */
+	allowedOrigins?: string[];
 }
 
 export interface IngesterConfig {
@@ -20,8 +24,10 @@ export interface IngesterConfig {
 	sinkUrl: string | null;
 	sinkToken: string | null;
 	maxBodyBytes: number;
-	/** Per-key requests per minute. */
+	/** Per-key requests per minute (server keys). */
 	rateLimitPerMinute: number;
+	/** Per-key requests per minute for publishable client keys. */
+	clientRateLimitPerMinute: number;
 	/** Retention, overridable per deployment. */
 	occurrenceTtlDays: number;
 	spanTtlDays: number;
@@ -67,6 +73,7 @@ export function loadConfig(): IngesterConfig {
 		sinkToken: process.env.AUTTER_SINK_TOKEN || null,
 		maxBodyBytes: intEnv("MAX_BODY_BYTES", 1024 * 1024),
 		rateLimitPerMinute: intEnv("RATE_LIMIT_PER_MINUTE", 300),
+		clientRateLimitPerMinute: intEnv("CLIENT_RATE_LIMIT_PER_MINUTE", 120),
 		occurrenceTtlDays: intEnv("OCCURRENCE_TTL_DAYS", 14),
 		spanTtlDays: intEnv("SPAN_TTL_DAYS", 7),
 		metricsTtlDays: intEnv("METRICS_TTL_DAYS", 90),

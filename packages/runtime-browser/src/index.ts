@@ -13,8 +13,19 @@
  */
 
 export interface AutterBrowserOptions {
-	/** Same-origin relay URL, e.g. "/api/autter-runtime". */
+	/**
+	 * Where to send events:
+	 * - same-origin relay URL, e.g. "/api/autter-runtime" (recommended), or
+	 * - the ingester's browser endpoint, e.g. "https://otlp.autter.dev/v1/browser",
+	 *   together with a publishable `clientKey`.
+	 */
 	endpoint: string;
+	/**
+	 * PUBLISHABLE client key (autter_rtc_…) for direct cross-origin ingest —
+	 * only valid on the browser endpoint, origin-restricted server-side.
+	 * Never put a secret server key here. Omit when using a relay.
+	 */
+	clientKey?: string;
 	service: string;
 	environment?: string;
 	release?: string;
@@ -141,24 +152,31 @@ export function flush(): void {
 		...(opts.release ? { release: opts.release } : {}),
 		events,
 	});
+	// Direct mode: key as query param (sendBeacon can't set headers) and
+	// text/plain content type (CORS-safelisted — no preflight round-trip).
+	const direct = !!opts.clientKey;
+	const url = direct
+		? opts.endpoint +
+			(opts.endpoint.indexOf("?") < 0 ? "?" : "&") +
+			"key=" +
+			encodeURIComponent(opts.clientKey!)
+		: opts.endpoint;
+	const contentType = direct ? "text/plain" : "application/json";
 	try {
 		if (
 			typeof navigator !== "undefined" &&
 			navigator.sendBeacon &&
-			navigator.sendBeacon(
-				opts.endpoint,
-				new Blob([body], { type: "application/json" }),
-			)
+			navigator.sendBeacon(url, new Blob([body], { type: contentType }))
 		) {
 			return;
 		}
 	} catch {
 		// fall through to fetch
 	}
-	void fetch(opts.endpoint, {
+	void fetch(url, {
 		method: "POST",
 		body,
-		headers: { "content-type": "application/json" },
+		headers: { "content-type": contentType },
 		keepalive: true,
 		credentials: "omit",
 	}).catch(() => {});

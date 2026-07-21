@@ -25,6 +25,8 @@ export class KeyResolver {
 			this.staticKeys.set(entry.key, {
 				orgId: entry.orgId,
 				repositoryId: entry.repositoryId,
+				scope: entry.scope ?? "server",
+				allowedOrigins: entry.allowedOrigins ?? [],
 			});
 		}
 	}
@@ -36,6 +38,10 @@ export class KeyResolver {
 		}
 		const alt = req.headers["x-autter-key"];
 		if (typeof alt === "string" && alt.trim()) return alt.trim();
+		// Query param — the only channel available to navigator.sendBeacon
+		// (it cannot set headers). Intended for publishable client keys.
+		const q = req.query.key;
+		if (typeof q === "string" && q.trim()) return q.trim();
 		return null;
 	}
 
@@ -64,9 +70,16 @@ export class KeyResolver {
 				const body = (await response.json()) as {
 					orgId?: string;
 					repositoryId?: string;
+					scope?: "client" | "server";
+					allowedOrigins?: string[];
 				};
 				if (body.orgId && body.repositoryId) {
-					ctx = { orgId: body.orgId, repositoryId: body.repositoryId };
+					ctx = {
+						orgId: body.orgId,
+						repositoryId: body.repositoryId,
+						scope: body.scope ?? "server",
+						allowedOrigins: body.allowedOrigins ?? [],
+					};
 				}
 			}
 		} catch {

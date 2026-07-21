@@ -36,10 +36,24 @@ try {
 trackEvent("clicked_cta");
 ```
 
-The `endpoint` should be a route on **your own backend** created with
-`createBrowserRelayHandler` from
-[`@autter/runtime-node`](../runtime-node) — the private ingest key stays
-server-side and there is nothing to configure for CORS or CSP.
+Two ways to deliver events:
+
+**Relay (recommended when you have a backend)** — `endpoint` points at a
+route on your own backend created with `createBrowserRelayHandler` from
+[`@autter/runtime-node`](../runtime-node). No key in the browser at all.
+
+**Direct (static sites, SPAs without a backend)** — point at the ingester
+with a **publishable client key** (`autter_rtc_…`, scope `client`). Client
+keys only work on the browser endpoint, are origin-restricted server-side,
+and rate-limited harder — never ship a secret `autter_rt_` server key:
+
+```ts
+initAutterBrowser({
+  endpoint: "https://otlp.autter.dev/v1/browser",
+  clientKey: "autter_rtc_xxxxxxxx",
+  service: "marketing-site",
+});
+```
 
 ## API
 

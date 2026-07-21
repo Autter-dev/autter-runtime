@@ -13,9 +13,33 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 | `POST /v1/browser` | Browser payload `version: 1` | Errors/rejections → occurrences; session pings → rollups |
 | `GET /healthz` | — | Liveness + ClickHouse reachability |
 
-Auth on every ingest route: `Authorization: Bearer <ingest key>` or
-`x-autter-key`. OTLP protobuf and gzip bodies are Milestone 1 (`docs/PLAN.md`);
+Auth on every ingest route: `Authorization: Bearer <ingest key>`,
+`x-autter-key`, or `?key=` (query param — for sendBeacon, which cannot set
+headers). OTLP protobuf and gzip bodies are Milestone 1 (`docs/PLAN.md`);
 until then configure your exporter with `http/json`.
+
+### Key scopes
+
+| Scope | Prefix convention | Valid on | Extras |
+| --- | --- | --- | --- |
+| `server` (default) | `autter_rt_…` (secret) | all endpoints | 300 req/min |
+| `client` | `autter_rtc_…` (publishable, safe in frontend bundles) | `/v1/browser` only | origin allow-list, 120 req/min |
+
+`/v1/browser` answers CORS preflights permissively; real enforcement (key +
+origin allow-list) happens on the POST. Cross-origin browsers send
+`text/plain` bodies (CORS-safelisted, no preflight per beacon) which the
+route parses as JSON.
+
+```json
+AUTTER_INGEST_KEYS='[
+  {"key":"autter_rt_…","orgId":"org1","repositoryId":"repo1"},
+  {"key":"autter_rtc_…","orgId":"org1","repositoryId":"repo1",
+   "scope":"client","allowedOrigins":["https://app.example.com"]}
+]'
+```
+
+The validator webhook may return the same extra fields:
+`{ orgId, repositoryId, scope?, allowedOrigins? }`.
 
 ## Configuration
 
@@ -31,7 +55,8 @@ until then configure your exporter with `http/json`.
 | `AUTTER_SINK_URL` | — | Webhook receiving fingerprinted occurrences for issue grouping |
 | `AUTTER_SINK_TOKEN` | — | Bearer token sent to the sink |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
-| `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window |
+| `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |
+| `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 
 ## Local development

@@ -53,8 +53,19 @@ export interface RuntimeMetricPoint {
 	sessionCount: number;
 }
 
-/** The tenant a validated ingest key resolves to. */
+/**
+ * The tenant a validated ingest key resolves to.
+ *
+ * Key scopes:
+ * - `server` — secret key for backends: all endpoints (OTLP + browser relay).
+ * - `client` — PUBLISHABLE key shipped in frontend bundles: `/v1/browser`
+ *   only, origin allow-list enforced, stricter rate limit. Leaking it can
+ *   at worst send fake browser errors for one repo — never read anything.
+ */
 export interface IngestContext {
 	orgId: string;
 	repositoryId: string;
+	scope: "client" | "server";
+	/** client keys only: exact origins allowed to send (empty = any). */
+	allowedOrigins: string[];
 }

@@ -20,11 +20,22 @@ normalisation, fingerprinting, ClickHouse writes, optional forward. Anything
 stateful (issue lifecycle, incidents, correlation, symbolication) belongs to
 the consumer of the sink webhook (Autter cloud, or your own backend).
 
-## Tenancy
+## Tenancy & key scopes
 
 Every ClickHouse row is keyed by `(org_id, repository_id)` and every query
 must filter on both. One repository = one unit of analysis; the ingest key
 carries the mapping, so a key is scoped to exactly one repo.
+
+Two key scopes separate frontend and backend credentials:
+
+- **Server keys** (`autter_rt_…`, secret): backends only — OTLP endpoints
+  and as the relay's forwarding key. Sent as a bearer header.
+- **Client keys** (`autter_rtc_…`, publishable): shipped in frontend
+  bundles for direct browser ingest. Restricted to `/v1/browser`, enforced
+  against a per-key origin allow-list, tighter rate limits, and carried as
+  a `?key=` query param because `sendBeacon` cannot set headers. A leaked
+  client key can at worst submit fake browser events for one repo — it can
+  never read data or send OTLP.
 
 ## ClickHouse tables
 

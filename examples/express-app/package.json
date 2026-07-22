@@ -8,8 +8,8 @@
 		"start": "node server.js"
 	},
 	"dependencies": {
-		"@autter/runtime-browser": "0.1.0",
-		"@autter/runtime-node": "0.1.0",
+		"@autter/runtime-browser": "^1.0.0",
+		"@autter/runtime-node": "^1.0.0",
 		"express": "^4.21.2"
 	}
 }

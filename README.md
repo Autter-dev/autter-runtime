@@ -112,8 +112,16 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 
 - **[Getting started](docs/GETTING-STARTED.md)** — zero to data flowing
 - [Stack integrations](docs/INTEGRATIONS.md) — React, Node, Next.js, Go, Rust, generic OTel
+- [Using Autter Runtime **without npm**](docs/WITHOUT-NPM.md) — any OTel SDK, an OTel Collector, or plain HTTP from any language
 - [Architecture & data model](docs/ARCHITECTURE.md)
 - [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
+
+## Contributing
+
+Contributions of every size are welcome — bug reports, docs fixes, new
+language integrations, features. We'd be more than glad to have you: see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup, ground rules, and
+good first areas to pick up.
 
 ## Hosting the ingester
 

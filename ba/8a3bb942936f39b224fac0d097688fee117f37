@@ -1,0 +1,65 @@
+CONTRIBUTING.md
+  s_b3e019178ce01d::t_0edddb8fd10d31 1-120
+README.md
+  s_b3e019178ce01d::t_10dead5f72eb29 115,119-124
+docs/WITHOUT-NPM.md
+  s_b3e019178ce01d::t_f42dcda379370b 1-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "ba8a3bb942936f39b224fac0d097688fee117f37",
+  "branch": "main",
+  "prompts": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:18a840557ea3fceb5a29dcb6a1a5be752c7debdd75cb4b81893f4072f93efdb1",
+      "total_additions": 299,
+      "total_deletions": 0,
+      "accepted_lines": 299,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_b3e019178ce01d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f83ec-87f3-7788-bf62-a1277175ba96",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:18a840557ea3fceb5a29dcb6a1a5be752c7debdd75cb4b81893f4072f93efdb1",
+      "stats": {
+        "total_additions": 299,
+        "total_deletions": 0,
+        "accepted_lines": 299,
+        "overriden_lines": 0,
+        "files": {
+          "CONTRIBUTING.md": {
+            "total_additions": 120,
+            "total_deletions": 0,
+            "accepted_lines": 120,
+            "overriden_lines": 0
+          },
+          "README.md": {
+            "total_additions": 8,
+            "total_deletions": 0,
+            "accepted_lines": 8,
+            "overriden_lines": 0
+          },
+          "docs/WITHOUT-NPM.md": {
+            "total_additions": 171,
+            "total_deletions": 0,
+            "accepted_lines": 171,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

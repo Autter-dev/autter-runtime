@@ -1,6 +1,6 @@
 {
 	"name": "@autter/otlp-ingester",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"description": "Self-hostable OTLP + browser-error ingest service for Autter Runtime: normalises telemetry into a per-repo ClickHouse data model",
 	"license": "MIT",
 	"type": "module",

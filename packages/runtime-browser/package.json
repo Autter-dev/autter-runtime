@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-browser",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"description": "Tiny, dependency-free browser error and usage tracker for Autter Runtime (<5 KB gzipped)",
 	"license": "MIT",
 	"type": "module",

@@ -73,10 +73,10 @@ Full walkthrough (keys, relay setup, Next.js, verification):
 
 | Package | Status | Description |
 | --- | --- | --- |
-| [`@autter/runtime-browser`](packages/runtime-browser) | **v0.1** | Zero-dependency browser error + usage tracker (~1 KB brotlied) |
-| [`@autter/runtime-node`](packages/runtime-node) | **v0.1** | Same-origin relay handler + curated OTel server tracker |
-| [`@autter/runtime-next`](packages/runtime-next) | **v0.1** | One-command Next.js integration (relay route + error boundary) |
-| [`@autter/otlp-ingester`](packages/otlp-ingester) | **v0.1** | Self-hostable ingest service: OTLP/HTTP (protobuf + JSON) traces + metrics, browser payloads → ClickHouse |
+| [`@autter/runtime-browser`](packages/runtime-browser) | **v1.0** | Zero-dependency browser error + usage tracker (~1 KB brotlied) |
+| [`@autter/runtime-node`](packages/runtime-node) | **v1.0** | Same-origin relay handler + curated OTel server tracker |
+| [`@autter/runtime-next`](packages/runtime-next) | **v1.0** | One-command Next.js integration (relay route + error boundary) |
+| [`@autter/otlp-ingester`](packages/otlp-ingester) | **v1.0** | Self-hostable ingest service: OTLP/HTTP (protobuf + JSON) traces + metrics, browser payloads → ClickHouse |
 
 Runnable demo: [`examples/express-app`](examples/express-app) — browser
 tracker → relay → ingester and OTel server tracker, against a compose-run

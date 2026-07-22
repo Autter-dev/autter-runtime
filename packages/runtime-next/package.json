@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-next",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"description": "One-command Autter Runtime for Next.js: server OTel, browser tracker, relay route, and React error boundary",
 	"license": "MIT",
 	"type": "module",
@@ -26,8 +26,8 @@
 		"build": "tsup src/index.ts --format esm,cjs --dts --target node20 --external react --clean"
 	},
 	"dependencies": {
-		"@autter/runtime-browser": "0.1.0",
-		"@autter/runtime-node": "0.1.0"
+		"@autter/runtime-browser": "^1.0.0",
+		"@autter/runtime-node": "^1.0.0"
 	},
 	"peerDependencies": {
 		"react": ">=18"

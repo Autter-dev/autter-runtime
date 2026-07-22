@@ -1,0 +1,49 @@
+examples/express-app/package.json
+  s_50890c54f8dabb::t_5ea795b202308c 11-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "c4546eb5d23cfde09d0f20f1d83f675330a11a2b",
+  "branch": "posthog-code/bump-express-example-versions",
+  "prompts": {
+    "s_50890c54f8dabb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f89d5-600d-7064-aeaf-2e1df5bc3abb",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:8c2810a034cdd36b4b6579421e25c846c247968cb7263873ff78d223347e2826",
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_50890c54f8dabb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f89d5-600d-7064-aeaf-2e1df5bc3abb",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:8c2810a034cdd36b4b6579421e25c846c247968cb7263873ff78d223347e2826",
+      "stats": {
+        "total_additions": 2,
+        "total_deletions": 2,
+        "accepted_lines": 2,
+        "overriden_lines": 0,
+        "files": {
+          "examples/express-app/package.json": {
+            "total_additions": 2,
+            "total_deletions": 2,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

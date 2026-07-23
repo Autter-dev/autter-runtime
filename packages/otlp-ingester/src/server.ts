@@ -21,6 +21,7 @@ import {
 import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
 import type {
 	IngestContext,
+	RuntimeMetricPoint,
 	RuntimeOccurrence,
 	RuntimeOccurrenceInput,
 } from "./types.js";
@@ -157,9 +158,17 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}));
 	}
 
-	/** Best-effort forward of fingerprinted occurrences for issue grouping. */
-	function forwardToSink(ctx: IngestContext, occurrences: RuntimeOccurrence[]) {
-		if (!config.sinkUrl || occurrences.length === 0) return;
+	/**
+	 * Best-effort forward for the cloud dashboard: fingerprinted occurrences
+	 * feed issue grouping, metric points feed the request/error-rate rollups.
+	 */
+	function forwardToSink(
+		ctx: IngestContext,
+		occurrences: RuntimeOccurrence[],
+		metricPoints: RuntimeMetricPoint[] = [],
+	) {
+		if (!config.sinkUrl) return;
+		if (occurrences.length === 0 && metricPoints.length === 0) return;
 		void fetch(config.sinkUrl, {
 			method: "POST",
 			headers: {
@@ -175,6 +184,10 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				occurrences: occurrences.map((o) => ({
 					...o,
 					occurredAt: o.occurredAt.toISOString(),
+				})),
+				metrics: metricPoints.map((p) => ({
+					...p,
+					bucketAt: p.bucketAt.toISOString(),
 				})),
 			}),
 			signal: AbortSignal.timeout(10_000),
@@ -224,7 +237,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, fingerprinted);
+		forwardToSink(ctx, fingerprinted, metricPoints);
 		otlpSuccess(req, res);
 	});
 
@@ -249,6 +262,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
+		forwardToSink(ctx, [], metricPoints);
 		otlpSuccess(req, res);
 	});
 
@@ -284,7 +298,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, fingerprinted);
+		forwardToSink(ctx, fingerprinted, metricPoints);
 		res.status(202).json({ accepted: fingerprinted.length });
 	});
 

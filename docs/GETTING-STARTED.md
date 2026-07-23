@@ -172,7 +172,7 @@ setUser("u_8f2k1");                                     // opaque id — never a
 ```
 
 React render errors don't reach `window.onerror` — add the boundary
-(exported from `@autter/runtime-next`, works in any React app):
+(exported from `@autter/runtime-next/client`, works in any React app):
 
 ```tsx
 <AutterErrorBoundary fallback={<ErrorPage />}>

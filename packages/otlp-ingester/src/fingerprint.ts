@@ -17,6 +17,14 @@ const LONG_HEX_RE = /\b[0-9a-f]{8,}\b/gi;
 // template too, or per-value messages fragment into separate fingerprints.
 const NUMBER_RE = /\b\d+(\.\d+)?/g;
 const QUOTED_RE = /(["'`])(?:\\.|(?!\1).)*\1/g;
+// `\b` never fires between `_` and a digit (both are word chars), so
+// underscore-glued ids — "prj_1013", "user_42", "order_9f3ac2d144" — escape
+// NUMBER_RE/LONG_HEX_RE entirely and fragment one defect into an issue per
+// id. Template the value after the underscore explicitly. (Letter-glued
+// digits like "sha256"/"utf8" stay literal on purpose — those are usually
+// meaningful tokens, not per-entity ids.)
+const UNDERSCORE_HEX_RE = /_[0-9a-f]{8,}\b/gi;
+const UNDERSCORE_NUMBER_RE = /_\d+(\.\d+)?\b/g;
 
 export function normalizeMessage(message: string): string {
 	return message
@@ -24,6 +32,8 @@ export function normalizeMessage(message: string): string {
 		.replace(QUOTED_RE, "<str>")
 		.replace(UUID_RE, "<uuid>")
 		.replace(LONG_HEX_RE, "<hex>")
+		.replace(UNDERSCORE_HEX_RE, "_<hex>")
+		.replace(UNDERSCORE_NUMBER_RE, "_<n>")
 		.replace(NUMBER_RE, "<n>")
 		.replace(/\s+/g, " ")
 		.trim();

@@ -1,0 +1,108 @@
+docs/INTEGRATIONS.md
+  s_e1041ce2034182::t_ee8edf8babb372 42
+packages/runtime-next/src/server.ts
+  s_e1041ce2034182::t_2ad070b67de152 1-52
+packages/runtime-next/tsup.config.ts
+  s_e1041ce2034182::t_3ff64d821202c2 1-21
+packages/runtime-next/src/client.ts
+  s_e1041ce2034182::t_dd7be0fb32a429 1-25
+packages/runtime-next/src/index.ts
+  s_e1041ce2034182::t_02aeab3aa25a7a 4-7,10
+packages/runtime-next/README.md
+  s_e1041ce2034182::t_76eb6b0a2e1c21 52
+  s_e1041ce2034182::t_42659d87af3f4e 73-79
+  s_e1041ce2034182::t_0b815ac71b9384 12-20
+docs/GETTING-STARTED.md
+  s_e1041ce2034182::t_b0c8649f36123c 175
+packages/runtime-next/package.json
+  s_e1041ce2034182::t_ffe0b3edc21dc4 36
+  s_e1041ce2034182::t_64ad8c3f8bbaf9 15-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "168dbc930808acedb8c7eafa39754ad7845a4446",
+  "branch": "posthog-code/next-client-server-split",
+  "prompts": {
+    "s_e1041ce2034182": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f90a9-0b2b-76f9-89fb-4fc7bd594d5d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:6f25054e692bd135b5b197ceb21f734004311db927646b201b6489d5de59de4d",
+      "total_additions": 133,
+      "total_deletions": 70,
+      "accepted_lines": 133,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_e1041ce2034182": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019f90a9-0b2b-76f9-89fb-4fc7bd594d5d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:6f25054e692bd135b5b197ceb21f734004311db927646b201b6489d5de59de4d",
+      "stats": {
+        "total_additions": 133,
+        "total_deletions": 70,
+        "accepted_lines": 133,
+        "overriden_lines": 0,
+        "files": {
+          "docs/GETTING-STARTED.md": {
+            "total_additions": 1,
+            "total_deletions": 1,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "docs/INTEGRATIONS.md": {
+            "total_additions": 1,
+            "total_deletions": 1,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/README.md": {
+            "total_additions": 17,
+            "total_deletions": 4,
+            "accepted_lines": 17,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/package.json": {
+            "total_additions": 11,
+            "total_deletions": 1,
+            "accepted_lines": 11,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/client.ts": {
+            "total_additions": 25,
+            "total_deletions": 0,
+            "accepted_lines": 25,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 5,
+            "total_deletions": 63,
+            "accepted_lines": 5,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/server.ts": {
+            "total_additions": 52,
+            "total_deletions": 0,
+            "accepted_lines": 52,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/tsup.config.ts": {
+            "total_additions": 21,
+            "total_deletions": 0,
+            "accepted_lines": 21,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

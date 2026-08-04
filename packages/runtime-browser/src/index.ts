@@ -276,6 +276,14 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			if (isError) {
 				e.errorType = reason.name;
 				if (reason.stack) e.stack = String(reason.stack).slice(0, 32000);
+			} else {
+				// A rejection whose reason isn't an Error carries no stack and no
+				// meaningful type. In practice most are injected third-party
+				// scripts (email/link scanners, browser extensions) rejecting a
+				// plain value, not a real app fault — so report it as a warning
+				// rather than a first-class error/issue. Still visible for
+				// debugging; `beforeSend` can drop it entirely.
+				e.severity = "warning";
 			}
 			enqueue(e, true);
 		},

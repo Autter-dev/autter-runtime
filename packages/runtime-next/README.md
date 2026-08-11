@@ -9,7 +9,15 @@ same-origin relay route, and a React error boundary.
 npm install @autter/runtime-next
 ```
 
-Set `AUTTER_RUNTIME_KEY` in your environment. Then three small files:
+Set `AUTTER_RUNTIME_KEY` in your environment. Then three small files.
+
+The package has two entry points — this split is what keeps the Node
+OpenTelemetry SDK out of your browser bundle:
+
+- `@autter/runtime-next` (or `@autter/runtime-next/server`) — server only:
+  `instrumentation.ts`, route handlers, server components.
+- `@autter/runtime-next/client` — client components: browser tracker +
+  error boundary. Never imports Node code.
 
 **1. `instrumentation.ts`** — server tracing/errors:
 
@@ -41,7 +49,7 @@ export const { POST } = createAutterRelayRoute({
 
 ```tsx
 "use client";
-import { initAutterBrowser, AutterErrorBoundary } from "@autter/runtime-next";
+import { initAutterBrowser, AutterErrorBoundary } from "@autter/runtime-next/client";
 
 initAutterBrowser({
   endpoint: "/api/autter-runtime",
@@ -62,5 +70,10 @@ React render errors don't reach `window.onerror` — the boundary reports
 them via `captureException` and then renders your fallback.
 
 Also re-exported for convenience: `captureException`, `captureMessage`,
-`trackEvent`, `setUser`, `setContext`, `flush` (browser) and
-`captureServerException`, `captureServerMessage` (server).
+`trackEvent`, `setUser`, `setContext`, `flush` (from
+`@autter/runtime-next/client`) and `captureServerException`,
+`captureServerMessage` (from the root / `@autter/runtime-next/server`).
+
+> Importing the root entry from a client component pulls the Node OTel SDK
+> into the browser bundle and fails the build (`fs` cannot be resolved).
+> Client code must always use `@autter/runtime-next/client`.

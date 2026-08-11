@@ -1,4 +1,10 @@
-import { trace, SpanStatusCode, type Attributes } from "@opentelemetry/api";
+import {
+	context,
+	trace,
+	SpanStatusCode,
+	type Attributes,
+	type Tracer,
+} from "@opentelemetry/api";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
@@ -22,6 +28,7 @@ import {
  * auto-instrumentation metapackage. Default data-volume policy:
  *
  *   errors / captured exceptions : 100%  (dedicated always-on error tracer)
+ *   named process spans          : 100%  (withProcessSpan, always-on tracer)
  *   successful traces            : 1%    (head sampling, configurable)
  *   request metrics              : aggregated every 60 s
  *   logs                         : not collected
@@ -64,8 +71,47 @@ export interface AutterServer {
 		severity?: AutterSeverity,
 		attributes?: Attributes,
 	): void;
+	/**
+	 * Wrap a named unit of work — a background job, queue consumer, cron
+	 * tick, or DB-heavy call — in an always-recorded span. Unlike regular
+	 * traces these are never head-sampled, so Autter's slow-process monitor
+	 * sees accurate run counts and durations for non-HTTP work. Nested
+	 * instrumented calls run inside the span's context, so slow traces show
+	 * where the time went. Rethrows whatever `fn` throws.
+	 */
+	withProcessSpan<T>(
+		name: string,
+		fn: () => T | Promise<T>,
+		attributes?: Attributes,
+	): Promise<T>;
 	/** Flush and stop all exporters. Call on graceful shutdown. */
 	shutdown(): Promise<void>;
+}
+
+async function runWithSpan<T>(
+	tracer: Tracer,
+	name: string,
+	fn: () => T | Promise<T>,
+	attributes?: Attributes,
+): Promise<T> {
+	const span = tracer.startSpan(name, { attributes });
+	try {
+		const result = await context.with(
+			trace.setSpan(context.active(), span),
+			fn,
+		);
+		span.setStatus({ code: SpanStatusCode.OK });
+		return result;
+	} catch (err) {
+		if (err instanceof Error) span.recordException(err);
+		span.setStatus({
+			code: SpanStatusCode.ERROR,
+			message: err instanceof Error ? err.message : String(err),
+		});
+		throw err;
+	} finally {
+		span.end();
+	}
 }
 
 let active: AutterServer | null = null;
@@ -122,6 +168,9 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		],
 	});
 	const errorTracer = errorProvider.getTracer("autter-errors");
+	// Process spans share the always-on provider (same OTLP pipe, no extra
+	// exporter) under their own scope name.
+	const processTracer = errorProvider.getTracer("autter-processes");
 
 	function captureException(error: unknown, attributes?: Attributes): void {
 		const isError = error instanceof Error;
@@ -180,6 +229,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const server: AutterServer = {
 		captureException,
 		captureMessage,
+		withProcessSpan: (name, fn, attributes) =>
+			runWithSpan(processTracer, name, fn, attributes),
 		shutdown: async () => {
 			active = null;
 			await Promise.allSettled([errorProvider.shutdown(), sdk.shutdown()]);
@@ -208,6 +259,20 @@ export function captureException(
 		message: error instanceof Error ? error.message : String(error),
 	});
 	span.end();
+}
+
+/**
+ * Module-level convenience — see AutterServer.withProcessSpan. Before
+ * initAutterServer runs it degrades to the global tracer, where the span is
+ * subject to that provider's own sampling instead of the always-on pipe.
+ */
+export function withProcessSpan<T>(
+	name: string,
+	fn: () => T | Promise<T>,
+	attributes?: Attributes,
+): Promise<T> {
+	if (active) return active.withProcessSpan(name, fn, attributes);
+	return runWithSpan(trace.getTracer("autter-processes"), name, fn, attributes);
 }
 
 /** Module-level convenience for warnings/info — see AutterServer.captureMessage. */

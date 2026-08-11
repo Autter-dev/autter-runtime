@@ -61,6 +61,14 @@ autter.captureException(err, { "order.id": "…" });
 // errors, just a lower severity ("fatal" | "error" | "warning" | "info"):
 autter.captureMessage("Legacy /orders lookup used", "warning");
 
+// named process spans — background jobs, queue consumers, cron ticks,
+// DB-heavy calls. Always recorded (never head-sampled), so Autter's
+// slow-process monitor sees accurate run counts and durations, and can
+// flag the process when it is slow and repeating a lot:
+await autter.withProcessSpan("invoice.rebuild", async () => {
+  await rebuildInvoices();
+});
+
 // graceful shutdown flushes exporters:
 await autter.shutdown();
 ```
@@ -75,6 +83,7 @@ Defaults (cheap by construction):
 | Signal | Default |
 | --- | --- |
 | Captured/unhandled exceptions | 100% (dedicated always-on tracer) |
+| `withProcessSpan` spans | 100% (same always-on tracer) |
 | Traces | 1% head sampling (`traceSampleRate`) |
 | Request metrics | exported every 60 s |
 | Logs | not collected |
@@ -92,3 +101,9 @@ Note on usage rollups: requests are counted from the `http.server.duration`
 metric (100% accurate) and additionally from sampled server spans. At the
 default 1% sampling the span contribution is negligible; if you set
 `traceSampleRate: 1` in development, expect request counts roughly doubled.
+
+Note on the slow-process monitor: Autter flags HTTP routes from the
+unsampled request metrics, so route detection works out of the box. Non-HTTP
+work (jobs, consumers, crons) is only visible where a span exists — wrap
+those units in `withProcessSpan` (always recorded) so the monitor can see
+them; relying on 1%-sampled regular traces there would undercount ~100×.

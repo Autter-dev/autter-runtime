@@ -53,6 +53,7 @@ export {
 export {
 	captureException as captureServerException,
 	captureMessage as captureServerMessage,
+	withProcessSpan,
 } from "@autter/runtime-node";
 
 /** Server OTel init for Next.js `instrumentation.ts`. */

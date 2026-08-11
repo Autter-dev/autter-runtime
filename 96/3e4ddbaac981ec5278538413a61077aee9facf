@@ -1,0 +1,88 @@
+docs/ARCHITECTURE.md
+  s_8e34ca4172ebc6::t_ad6de124bbc51f 53-63
+packages/runtime-node/src/index.ts
+  s_8e34ca4172ebc6::t_03951eddebd0a1 11
+packages/runtime-node/README.md
+  s_8e34ca4172ebc6::t_8624a7cee26e7a 64-71
+  s_8e34ca4172ebc6::t_8f6d823d4acfc6 104-109
+  s_8e34ca4172ebc6::t_19b6c4eceaf7ce 86
+packages/runtime-next/src/index.ts
+  s_8e34ca4172ebc6::t_4e2d65a9a6da07 56
+packages/runtime-node/src/server.ts
+  s_8e34ca4172ebc6::t_9b68ae391cb1c5 171-173
+  s_8e34ca4172ebc6::t_f24fce8202d984 31
+  s_8e34ca4172ebc6::t_a6917dd7ccec29 1-7
+  s_8e34ca4172ebc6::t_a8ebfbc84a75eb 74-86,91-114
+  s_8e34ca4172ebc6::t_553f2d602048a0 232-233
+  s_8e34ca4172ebc6::t_57475002ce3852 264-277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "963e4ddbaac981ec5278538413a61077aee9facf",
+  "branch": "posthog-code/with-process-span",
+  "prompts": {
+    "s_8e34ca4172ebc6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019ff179-5f71-7038-b4d3-eb1f1d29eaaa",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:da0821dbb3d524baac310265e19deba816734b1d3ab4ddb418ee161b168c9763",
+      "total_additions": 94,
+      "total_deletions": 1,
+      "accepted_lines": 94,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_8e34ca4172ebc6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019ff179-5f71-7038-b4d3-eb1f1d29eaaa",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:da0821dbb3d524baac310265e19deba816734b1d3ab4ddb418ee161b168c9763",
+      "stats": {
+        "total_additions": 94,
+        "total_deletions": 1,
+        "accepted_lines": 94,
+        "overriden_lines": 0,
+        "files": {
+          "docs/ARCHITECTURE.md": {
+            "total_additions": 11,
+            "total_deletions": 0,
+            "accepted_lines": 11,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 1,
+            "total_deletions": 0,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/README.md": {
+            "total_additions": 15,
+            "total_deletions": 0,
+            "accepted_lines": 15,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/index.ts": {
+            "total_additions": 1,
+            "total_deletions": 0,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/server.ts": {
+            "total_additions": 66,
+            "total_deletions": 1,
+            "accepted_lines": 66,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

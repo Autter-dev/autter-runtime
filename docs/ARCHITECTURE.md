@@ -50,6 +50,17 @@ Two key scopes separate frontend and backend credentials:
 eventually. Percentiles come from sampled spans at query time — the rollup
 table stores only counts and duration sums.
 
+These tables also feed the dashboard's **slow-process monitor** (in the
+Autter backend, not this repo): it flags processes that are slow AND
+repeating a lot, then runs an automated optimization analysis that can
+open a fix PR. Because regular traces are head-sampled upstream (1% by
+default), the monitor takes run counts for HTTP routes from
+`runtime_metrics_1m` (metric-fed, unsampled) and uses `runtime_spans`
+only for percentiles and trace breakdowns. Non-HTTP work is detected
+from spans alone — which is why `withProcessSpan` in
+`@autter/runtime-node` exports through the always-on pipe: manual
+process spans arrive unsampled, giving the monitor accurate counts.
+
 ### Occurrences are aggregation-ready at write time
 
 `runtime_error_occurrences` holds errors **and** warnings/info

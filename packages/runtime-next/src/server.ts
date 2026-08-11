@@ -36,6 +36,7 @@ import {
 export {
 	captureException as captureServerException,
 	captureMessage as captureServerMessage,
+	withProcessSpan,
 } from "@autter/runtime-node";
 export type { AutterServer, AutterServerOptions, RelayOptions };
 

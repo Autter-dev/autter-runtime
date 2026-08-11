@@ -8,6 +8,7 @@ export {
 	initAutterServer,
 	captureException,
 	captureMessage,
+	withProcessSpan,
 	type AutterServerOptions,
 	type AutterServer,
 	type AutterSeverity,

@@ -1,0 +1,114 @@
+packages/runtime-next/src/server.ts
+  s_edb453eb0f4581::t_4a9b712f83a642 1-38,40-53
+  s_edb453eb0f4581::t_ab47d4380b69db 39
+packages/runtime-next/src/client.ts
+  s_edb453eb0f4581::t_4a9b712f83a642 1-25
+docs/INTEGRATIONS.md
+  s_edb453eb0f4581::t_4a9b712f83a642 42
+packages/runtime-next/package.json
+  s_edb453eb0f4581::t_4a9b712f83a642 15-24,36
+packages/runtime-browser/src/index.ts
+  s_edb453eb0f4581::t_4a9b712f83a642 279-286
+packages/runtime-next/README.md
+  s_edb453eb0f4581::t_4a9b712f83a642 12-20,52,73-79
+packages/runtime-next/tsup.config.ts
+  s_edb453eb0f4581::t_4a9b712f83a642 1-21
+docs/GETTING-STARTED.md
+  s_edb453eb0f4581::t_4a9b712f83a642 175
+packages/runtime-next/src/index.ts
+  s_edb453eb0f4581::t_2aa12e41015272 4-7,10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "1769c2512fd31cb78a5a5ac97c96b99c58bb24e8",
+  "branch": "posthog-code/with-process-span",
+  "prompts": {
+    "s_edb453eb0f4581": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019ff288-f521-77ab-8121-d5d95e97097f",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:394d0651cbf7552c84b63389a20c8a6e39baebd693bc02afe29e5fea8fd3db53",
+      "total_additions": 142,
+      "total_deletions": 71,
+      "accepted_lines": 142,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_edb453eb0f4581": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "019ff288-f521-77ab-8121-d5d95e97097f",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:394d0651cbf7552c84b63389a20c8a6e39baebd693bc02afe29e5fea8fd3db53",
+      "stats": {
+        "total_additions": 142,
+        "total_deletions": 71,
+        "accepted_lines": 142,
+        "overriden_lines": 0,
+        "files": {
+          "docs/GETTING-STARTED.md": {
+            "total_additions": 1,
+            "total_deletions": 1,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "docs/INTEGRATIONS.md": {
+            "total_additions": 1,
+            "total_deletions": 1,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "packages/runtime-browser/src/index.ts": {
+            "total_additions": 8,
+            "total_deletions": 0,
+            "accepted_lines": 8,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/README.md": {
+            "total_additions": 17,
+            "total_deletions": 4,
+            "accepted_lines": 17,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/package.json": {
+            "total_additions": 11,
+            "total_deletions": 1,
+            "accepted_lines": 11,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/client.ts": {
+            "total_additions": 25,
+            "total_deletions": 0,
+            "accepted_lines": 25,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 5,
+            "total_deletions": 64,
+            "accepted_lines": 5,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/server.ts": {
+            "total_additions": 53,
+            "total_deletions": 0,
+            "accepted_lines": 53,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/tsup.config.ts": {
+            "total_additions": 21,
+            "total_deletions": 0,
+            "accepted_lines": 21,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

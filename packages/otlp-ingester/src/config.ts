@@ -32,6 +32,7 @@ export interface IngesterConfig {
 	occurrenceTtlDays: number;
 	spanTtlDays: number;
 	metricsTtlDays: number;
+	llmCallTtlDays: number;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -77,6 +78,7 @@ export function loadConfig(): IngesterConfig {
 		occurrenceTtlDays: intEnv("OCCURRENCE_TTL_DAYS", 14),
 		spanTtlDays: intEnv("SPAN_TTL_DAYS", 7),
 		metricsTtlDays: intEnv("METRICS_TTL_DAYS", 90),
+		llmCallTtlDays: intEnv("LLM_CALL_TTL_DAYS", 90),
 	};
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {
 		throw new Error(

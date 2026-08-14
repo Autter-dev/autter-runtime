@@ -1,5 +1,7 @@
+import { extractLlmCall } from "./llm.js";
 import {
 	asSeverity,
+	type RuntimeLlmCall,
 	type RuntimeMetricPoint,
 	type RuntimeOccurrenceInput,
 	type RuntimeSeverity,
@@ -196,6 +198,7 @@ export interface NormalizedTraces {
 	occurrences: RuntimeOccurrenceInput[];
 	spans: RuntimeSpanRow[];
 	metricPoints: RuntimeMetricPoint[];
+	llmCalls: RuntimeLlmCall[];
 	spanCount: number;
 }
 
@@ -204,6 +207,7 @@ const MAX_SPANS_PER_REQUEST = 5000;
 export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	const occurrences: RuntimeOccurrenceInput[] = [];
 	const spans: RuntimeSpanRow[] = [];
+	const llmCalls: RuntimeLlmCall[] = [];
 	const rollups = new Map<string, RuntimeMetricPoint>();
 	let spanCount = 0;
 
@@ -290,6 +294,21 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					});
 				}
 
+				// LLM provider calls (GenAI semconv, Vercel AI SDK telemetry,
+				// or Autter's own helpers) become usage/cost rows.
+				const llmCall = extractLlmCall(attrs, {
+					name: span.name ?? "",
+					traceId: span.traceId ?? "",
+					spanId: span.spanId ?? "",
+					isError,
+					durationMs,
+					startedAt,
+					service: resource.service,
+					environment: resource.environment,
+					release: resource.release,
+				});
+				if (llmCall) llmCalls.push(llmCall);
+
 				// Server spans fold into 1-minute usage rollups so traffic is
 				// tracked even when the metrics pipeline isn't wired.
 				if (kind === "server") {
@@ -309,7 +328,13 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 		}
 	}
 
-	return { occurrences, spans, metricPoints: [...rollups.values()], spanCount };
+	return {
+		occurrences,
+		spans,
+		metricPoints: [...rollups.values()],
+		llmCalls,
+		spanCount,
+	};
 }
 
 function minuteBucket(date: Date): Date {

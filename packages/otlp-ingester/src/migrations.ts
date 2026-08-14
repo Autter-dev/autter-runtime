@@ -83,6 +83,43 @@ export const MIGRATIONS: Migration[] = [
 				MODIFY COLUMN attributes String DEFAULT '{}' CODEC(ZSTD(1))`,
 		],
 	},
+	// LLM observability: one row per provider call (model, tokens, cost,
+	// latency, user) extracted from GenAI/Vercel-AI/Autter span attributes.
+	// TTL is fixed at the 90-day default here; deployments that override
+	// LLM_CALL_TTL_DAYS get it applied on fresh databases via the baseline.
+	{
+		id: "0004-llm-calls",
+		statements: [
+			`CREATE TABLE IF NOT EXISTS {db}.runtime_llm_calls (
+				org_id          String,
+				repository_id   String,
+				service         LowCardinality(String),
+				environment     LowCardinality(String),
+				release         String DEFAULT '',
+				trace_id        String DEFAULT '',
+				span_id         String DEFAULT '',
+				provider        LowCardinality(String) DEFAULT '',
+				model           LowCardinality(String) DEFAULT '',
+				operation       LowCardinality(String) DEFAULT '',
+				input_tokens    UInt64 DEFAULT 0,
+				output_tokens   UInt64 DEFAULT 0,
+				cost_usd        Float64 DEFAULT 0,
+				cost_source     LowCardinality(String) DEFAULT 'none',
+				duration_ms     Float64 DEFAULT 0,
+				status          LowCardinality(String) DEFAULT 'ok',
+				error_type      String DEFAULT '',
+				user_id         String DEFAULT '',
+				session_id      String DEFAULT '',
+				attributes      String DEFAULT '{}' CODEC(ZSTD(1)),
+				started_at      DateTime64(3, 'UTC'),
+				ingested_at     DateTime64(3, 'UTC') DEFAULT now64(3)
+			)
+			ENGINE = MergeTree
+			PARTITION BY toDate(started_at)
+			ORDER BY (org_id, repository_id, started_at)
+			TTL toDateTime(started_at) + INTERVAL 90 DAY`,
+		],
+	},
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

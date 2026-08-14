@@ -225,13 +225,15 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		} else {
 			request = req.body as OtlpTraceRequest;
 		}
-		const { occurrences, spans, metricPoints } = normalizeTraces(request);
+		const { occurrences, spans, metricPoints, llmCalls } =
+			normalizeTraces(request);
 		const fingerprinted = fingerprintAll(occurrences);
 		try {
 			await Promise.all([
 				store.insertOccurrences(ctx, fingerprinted),
 				store.insertSpans(ctx, spans),
 				store.insertMetricPoints(ctx, metricPoints),
+				store.insertLlmCalls(ctx, llmCalls),
 			]);
 		} catch (err) {
 			storageError(res, err);

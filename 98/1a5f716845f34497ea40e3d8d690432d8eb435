@@ -1,0 +1,152 @@
+packages/otlp-ingester/src/server.ts
+  s_4bdc5ccf291159::t_e210d67e5ca28d 228-229,236
+packages/otlp-ingester/src/llm-pricing.ts
+  s_4bdc5ccf291159::t_5ce4d0bdc8a185 1-134
+packages/otlp-ingester/src/llm.ts
+  s_4bdc5ccf291159::t_94c39d11cdf550 1-197
+packages/runtime-next/src/server.ts
+  s_4bdc5ccf291159::t_81b6c60c517c8f 40-47
+packages/otlp-ingester/src/clickhouse.ts
+  s_4bdc5ccf291159::t_0a63c5ba80adc7 138-165
+  s_4bdc5ccf291159::t_bd2de23ea81414 65-66
+  s_4bdc5ccf291159::t_115d2ea428351e 14
+  s_4bdc5ccf291159::t_a4a69c5c22f0e3 288-323
+packages/runtime-node/src/index.ts
+  s_4bdc5ccf291159::t_468b65e30c2de5 12-13,17-20
+docs/GETTING-STARTED.md
+  s_4bdc5ccf291159::t_543e8bca876a37 123-167
+  s_4bdc5ccf291159::t_90f0624c3ad531 45
+packages/runtime-node/src/server.ts
+  s_4bdc5ccf291159::t_c8724d97c33f15 450-451
+  s_4bdc5ccf291159::t_983a086ab7d390 38-40
+  s_4bdc5ccf291159::t_ebd1b161cd5d62 348-352
+  s_4bdc5ccf291159::t_5d303fb8878bf9 170-301
+  s_4bdc5ccf291159::t_6971de2d8a3cb4 137-165
+  s_4bdc5ccf291159::t_5ee0826904976b 4,7-8
+  s_4bdc5ccf291159::t_27418f851b862d 387-389
+  s_4bdc5ccf291159::t_e7f9e84a7b79f5 496-517
+  s_4bdc5ccf291159::t_0a47529a0dbcd9 23-25
+  s_4bdc5ccf291159::t_def449defd34e9 70-110
+docs/ARCHITECTURE.md
+  s_4bdc5ccf291159::t_83e724134fbb01 134-158
+  s_4bdc5ccf291159::t_cc90c8cde5eac4 47
+packages/otlp-ingester/src/migrations.ts
+  s_4bdc5ccf291159::t_6a0cbf0b566ceb 86-122
+packages/otlp-ingester/src/config.ts
+  s_4bdc5ccf291159::t_b2421bde8dbde2 81
+  s_4bdc5ccf291159::t_f1a24aa10f6429 35
+packages/otlp-ingester/src/types.ts
+  s_4bdc5ccf291159::t_4b5f5697ae14eb 84-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "981a5f716845f34497ea40e3d8d690432d8eb435",
+  "branch": "posthog/llm-observability",
+  "prompts": {
+    "s_4bdc5ccf291159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a001a5-c325-746c-b01f-c8a4f3fe1fbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:1887f5c43d74d55c1043ed866ec5dcfc1363ec4f9bc84ed9f7b7e5754e89d572",
+      "total_additions": 800,
+      "total_deletions": 5,
+      "accepted_lines": 800,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_4bdc5ccf291159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a001a5-c325-746c-b01f-c8a4f3fe1fbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:1887f5c43d74d55c1043ed866ec5dcfc1363ec4f9bc84ed9f7b7e5754e89d572",
+      "stats": {
+        "total_additions": 800,
+        "total_deletions": 5,
+        "accepted_lines": 800,
+        "overriden_lines": 0,
+        "files": {
+          "docs/ARCHITECTURE.md": {
+            "total_additions": 26,
+            "total_deletions": 0,
+            "accepted_lines": 26,
+            "overriden_lines": 0
+          },
+          "docs/GETTING-STARTED.md": {
+            "total_additions": 46,
+            "total_deletions": 0,
+            "accepted_lines": 46,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/clickhouse.ts": {
+            "total_additions": 67,
+            "total_deletions": 1,
+            "accepted_lines": 67,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/config.ts": {
+            "total_additions": 2,
+            "total_deletions": 0,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/llm-pricing.ts": {
+            "total_additions": 134,
+            "total_deletions": 0,
+            "accepted_lines": 134,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/llm.ts": {
+            "total_additions": 197,
+            "total_deletions": 0,
+            "accepted_lines": 197,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/migrations.ts": {
+            "total_additions": 37,
+            "total_deletions": 0,
+            "accepted_lines": 37,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/server.ts": {
+            "total_additions": 3,
+            "total_deletions": 1,
+            "accepted_lines": 3,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/types.ts": {
+            "total_additions": 31,
+            "total_deletions": 0,
+            "accepted_lines": 31,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/server.ts": {
+            "total_additions": 8,
+            "total_deletions": 0,
+            "accepted_lines": 8,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/index.ts": {
+            "total_additions": 6,
+            "total_deletions": 0,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/server.ts": {
+            "total_additions": 243,
+            "total_deletions": 3,
+            "accepted_lines": 243,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

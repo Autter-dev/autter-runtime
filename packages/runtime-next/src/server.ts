@@ -37,6 +37,14 @@ export {
 	captureException as captureServerException,
 	captureMessage as captureServerMessage,
 	withProcessSpan,
+	withLlmCall,
+	trackLlmCall,
+} from "@autter/runtime-node";
+export type {
+	LlmCallHandle,
+	LlmCallInfo,
+	LlmUsage,
+	TrackedLlmCall,
 } from "@autter/runtime-node";
 export type { AutterServer, AutterServerOptions, RelayOptions };
 

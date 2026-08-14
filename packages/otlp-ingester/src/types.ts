@@ -81,6 +81,37 @@ export interface RuntimeSpanRow {
 	startedAt: Date;
 }
 
+/**
+ * One LLM provider call (chat, completion, embedding, …) extracted from a
+ * span carrying GenAI/Vercel-AI/Autter attributes — see llm.ts. Tokens and
+ * cost are resolved at ingest so usage/spend queries are plain aggregates.
+ */
+export interface RuntimeLlmCall {
+	service: string;
+	environment: string;
+	release: string | null;
+	traceId: string;
+	spanId: string;
+	/** gen_ai.system / ai.model.provider — "openai", "anthropic", … */
+	provider: string;
+	model: string;
+	/** gen_ai.operation.name — "chat", "embeddings", "generateText", … */
+	operation: string;
+	inputTokens: number;
+	outputTokens: number;
+	costUsd: number;
+	/** reported = SDK sent the exact cost; estimated = built-in pricing table. */
+	costSource: "reported" | "estimated" | "none";
+	durationMs: number;
+	status: "ok" | "error";
+	errorType: string;
+	/** Opaque end-user id for per-user usage/cost attribution. */
+	userId: string;
+	sessionId: string;
+	attributes: Record<string, string> | null;
+	startedAt: Date;
+}
+
 /** One 60-second usage rollup bucket. */
 export interface RuntimeMetricPoint {
 	service: string;

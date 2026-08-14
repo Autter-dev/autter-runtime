@@ -42,6 +42,7 @@ you from zero to seeing data in ClickHouse.
 | Handled errors | `captureException(err)` | `captureException(err)` |
 | Usage | session pings + `trackEvent()` | request counts/durations per route (automatic) |
 | Traces | — (by design; no OTel in the browser) | ~1% sampled (configurable) |
+| LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% |
 
 **What is never sent:** cookies, DOM content, form values, request/response
 bodies, headers, emails, full URLs with query strings.
@@ -118,6 +119,51 @@ ESM-only app? Use `--import` plus OTel's loader hook (see the
 [package README](../packages/runtime-node)). Express route timings can be
 enriched with `@opentelemetry/instrumentation-express` via the
 `instrumentations` option.
+
+### Track LLM usage & cost
+
+Every recognised LLM call is recorded 100% (never sampled) with model,
+tokens, latency, and a USD cost — estimated from a built-in price table
+unless you report the exact figure.
+
+**Vercel AI SDK — zero extra code.** Turn on its telemetry and Autter
+picks the calls up automatically (an LLM-aware sampler keeps them even at
+1% trace sampling):
+
+```ts
+const { text } = await generateText({
+  model: openai("gpt-5-mini"),
+  prompt,
+  experimental_telemetry: {
+    isEnabled: true,
+    metadata: { userId: user.id },   // → per-user cost attribution
+  },
+});
+```
+
+**Any other client — wrap the call:**
+
+```js
+const { withLlmCall } = require("@autter/runtime-node");
+
+const res = await withLlmCall(
+  { provider: "openai", model: "gpt-5-mini", userId: user.id },
+  async (llm) => {
+    const out = await openai.chat.completions.create({ model: "gpt-5-mini", messages });
+    llm.setUsage({
+      inputTokens: out.usage?.prompt_tokens,
+      outputTokens: out.usage?.completion_tokens,
+    });
+    return out;
+  },
+);
+```
+
+Or report after the fact with
+`trackLlmCall({ provider, model, inputTokens, outputTokens, durationMs })`.
+Python/Go/etc. need no Autter package: any OTel GenAI instrumentation
+(OpenLLMetry, OpenLIT, the official contrib packages) emitting `gen_ai.*`
+spans through the OTLP endpoint is recognised the same way.
 
 ## 4. Instrument your frontend
 

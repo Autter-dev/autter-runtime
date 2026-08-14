@@ -44,6 +44,7 @@ Two key scopes separate frontend and backend credentials:
 | `runtime_error_occurrences` | MergeTree | `(org_id, repository_id, fingerprint, occurred_at)` | 14 d |
 | `runtime_spans` | MergeTree | `(org_id, repository_id, trace_id, started_at)` | 7 d |
 | `runtime_metrics_1m` | SummingMergeTree | `(org_id, repository_id, service, environment, release, route, bucket_at)` | 90 d |
+| `runtime_llm_calls` | MergeTree | `(org_id, repository_id, started_at)` | 90 d |
 
 `runtime_metrics_1m` is pre-aggregated per minute; readers must
 `SUM(...) GROUP BY` because SummingMergeTree collapses rows at merge time,
@@ -129,6 +130,31 @@ Span-level:
 - `status_code` from `http.response.status_code` / `http.status_code`.
 - Server spans aggregate into 1-minute usage rollups: `request_count`,
   `error_count` (status ≥ 500 or span error), `duration_sum_ms`.
+
+## OTLP mapping (LLM calls)
+
+Spans that identify an LLM provider call become one `runtime_llm_calls`
+row each — no Autter-specific code required. Three attribute families are
+recognised (first match wins per field):
+
+| Field | Attributes checked |
+| --- | --- |
+| `provider` | `gen_ai.system`, `ai.model.provider` |
+| `model` | `gen_ai.response.model`, `gen_ai.request.model`, `ai.response.model`, `ai.model.id` |
+| `operation` | `gen_ai.operation.name`, derived from Vercel span names |
+| `input_tokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.prompt_tokens`, `ai.usage.promptTokens`, `ai.usage.inputTokens` |
+| `output_tokens` | `gen_ai.usage.output_tokens`, `gen_ai.usage.completion_tokens`, `ai.usage.completionTokens`, `ai.usage.outputTokens` |
+| `cost_usd` | `autter.llm.cost_usd` / `gen_ai.usage.cost` (reported), else estimated from a built-in per-model price table (`cost_source` records which) |
+| `user_id` | `autter.user_id`, `ai.telemetry.metadata.userId`, `enduser.id`, `user.id` |
+| `session_id` | `autter.session_id`, `ai.telemetry.metadata.sessionId`, `session.id` |
+
+A span qualifies when it carries a model or provider attribute. Vercel AI
+SDK umbrella spans (`ai.generateText`, `ai.streamText`, …) are skipped —
+only their provider-level `.doGenerate`/`.doStream`/`.doEmbed` children
+count, so retries are counted individually and nothing double-counts.
+Failed calls keep `status = 'error'` (+ `error.type`), and any `exception`
+events on the span still produce regular error occurrences, so LLM
+failures group into issues like any other error.
 
 ## Browser payload (v1)
 

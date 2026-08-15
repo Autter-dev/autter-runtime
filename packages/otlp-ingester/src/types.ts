@@ -81,6 +81,36 @@ export interface RuntimeSpanRow {
 	startedAt: Date;
 }
 
+/**
+ * One recognised LLM/GenAI call — a span following the OTel GenAI semconv
+ * (`gen_ai.*` attributes; the Vercel AI SDK's inner `.doGenerate`/`.doEmbed`
+ * spans qualify too). Stored per call: LLM traffic is inherently low-volume
+ * relative to HTTP, and cost analysis needs every call, not a sample.
+ */
+export interface RuntimeLlmCall {
+	service: string;
+	environment: string;
+	release: string | null;
+	traceId: string;
+	spanId: string;
+	/** "openai", "anthropic", … — from gen_ai.provider.name / gen_ai.system. */
+	provider: string;
+	/** Requested model id (falls back to the response model). */
+	model: string;
+	/** "chat", "embeddings", … — from gen_ai.operation.name. */
+	operation: string;
+	status: "ok" | "error";
+	inputTokens: number;
+	outputTokens: number;
+	/** USD. Exact when the SDK reported autter.llm.cost_usd, else estimated. */
+	costUsd: number;
+	costSource: "reported" | "estimated" | "unpriced";
+	/** Opaque end-user id (autter.user_id / AI SDK metadata.userId), if any. */
+	userId: string | null;
+	durationMs: number;
+	startedAt: Date;
+}
+
 /** One 60-second usage rollup bucket. */
 export interface RuntimeMetricPoint {
 	service: string;

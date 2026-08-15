@@ -83,6 +83,41 @@ export const MIGRATIONS: Migration[] = [
 				MODIFY COLUMN attributes String DEFAULT '{}' CODEC(ZSTD(1))`,
 		],
 	},
+	// Per-call LLM/GenAI usage: model, tokens, USD cost (reported via
+	// autter.llm.cost_usd or estimated from the built-in price table), the
+	// calling user, and ok/error status — extracted at ingest from gen_ai.*
+	// spans. `{llm_call_ttl_days}` is replaced with the configured retention
+	// (LLM_CALL_TTL_DAYS, default 90) when the migration runs.
+	{
+		id: "0004-llm-calls",
+		statements: [
+			`CREATE TABLE IF NOT EXISTS {db}.runtime_llm_calls (
+				org_id           String,
+				repository_id    String,
+				service          LowCardinality(String),
+				environment      LowCardinality(String),
+				release          String DEFAULT '',
+				trace_id         String,
+				span_id          String,
+				provider         LowCardinality(String) DEFAULT 'unknown',
+				model            LowCardinality(String) DEFAULT 'unknown',
+				operation        LowCardinality(String) DEFAULT 'chat',
+				status           LowCardinality(String) DEFAULT 'ok',
+				input_tokens     UInt64 DEFAULT 0,
+				output_tokens    UInt64 DEFAULT 0,
+				cost_usd         Float64 DEFAULT 0,
+				cost_source      LowCardinality(String) DEFAULT 'unpriced',
+				user_id          String DEFAULT '',
+				duration_ms      Float64,
+				started_at       DateTime64(3, 'UTC'),
+				ingested_at      DateTime64(3, 'UTC') DEFAULT now64(3)
+			)
+			ENGINE = MergeTree
+			PARTITION BY toDate(started_at)
+			ORDER BY (org_id, repository_id, service, started_at)
+			TTL toDateTime(started_at) + INTERVAL {llm_call_ttl_days} DAY`,
+		],
+	},
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

@@ -11,6 +11,7 @@ import {
 } from "./migrations.js";
 import type {
 	IngestContext,
+	RuntimeLlmCall,
 	RuntimeMetricPoint,
 	RuntimeOccurrence,
 	RuntimeSpanRow,
@@ -61,7 +62,8 @@ export class ClickHouseStore {
 
 	private schemaStatements(): string[] {
 		const db = this.config.clickhouseDatabase;
-		const { occurrenceTtlDays, spanTtlDays, metricsTtlDays } = this.config;
+		const { occurrenceTtlDays, spanTtlDays, metricsTtlDays, llmCallTtlDays } =
+			this.config;
 		return [
 			`CREATE DATABASE IF NOT EXISTS ${db}`,
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
@@ -116,6 +118,31 @@ export class ClickHouseStore {
 			PARTITION BY toDate(started_at)
 			ORDER BY (org_id, repository_id, trace_id, started_at)
 			TTL toDateTime(started_at) + INTERVAL ${spanTtlDays} DAY`,
+			`CREATE TABLE IF NOT EXISTS ${db}.runtime_llm_calls (
+				org_id           String,
+				repository_id    String,
+				service          LowCardinality(String),
+				environment      LowCardinality(String),
+				release          String DEFAULT '',
+				trace_id         String,
+				span_id          String,
+				provider         LowCardinality(String) DEFAULT 'unknown',
+				model            LowCardinality(String) DEFAULT 'unknown',
+				operation        LowCardinality(String) DEFAULT 'chat',
+				status           LowCardinality(String) DEFAULT 'ok',
+				input_tokens     UInt64 DEFAULT 0,
+				output_tokens    UInt64 DEFAULT 0,
+				cost_usd         Float64 DEFAULT 0,
+				cost_source      LowCardinality(String) DEFAULT 'unpriced',
+				user_id          String DEFAULT '',
+				duration_ms      Float64,
+				started_at       DateTime64(3, 'UTC'),
+				ingested_at      DateTime64(3, 'UTC') DEFAULT now64(3)
+			)
+			ENGINE = MergeTree
+			PARTITION BY toDate(started_at)
+			ORDER BY (org_id, repository_id, service, started_at)
+			TTL toDateTime(started_at) + INTERVAL ${llmCallTtlDays} DAY`,
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_metrics_1m (
 				org_id           String,
 				repository_id    String,
@@ -166,7 +193,12 @@ export class ClickHouseStore {
 				if (applied.has(migration.id)) continue;
 				for (const statement of migration.statements) {
 					await client.command({
-						query: statement.replaceAll("{db}", db),
+						query: statement
+							.replaceAll("{db}", db)
+							.replaceAll(
+								"{llm_call_ttl_days}",
+								String(this.config.llmCallTtlDays),
+							),
 					});
 				}
 				await client.insert({
@@ -251,6 +283,39 @@ export class ClickHouseStore {
 				duration_ms: s.durationMs,
 				attributes: JSON.stringify(s.attributes ?? {}),
 				started_at: s.startedAt.toISOString(),
+			})),
+		});
+	}
+
+	async insertLlmCalls(
+		ctx: IngestContext,
+		calls: RuntimeLlmCall[],
+	): Promise<void> {
+		if (calls.length === 0 || !this.configured) return;
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_llm_calls"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: calls.map((c) => ({
+				org_id: ctx.orgId,
+				repository_id: ctx.repositoryId,
+				service: c.service,
+				environment: c.environment,
+				release: c.release ?? "",
+				trace_id: c.traceId,
+				span_id: c.spanId,
+				provider: c.provider,
+				model: c.model,
+				operation: c.operation,
+				status: c.status,
+				input_tokens: Math.max(0, Math.round(c.inputTokens)),
+				output_tokens: Math.max(0, Math.round(c.outputTokens)),
+				cost_usd: c.costUsd,
+				cost_source: c.costSource,
+				user_id: c.userId ?? "",
+				duration_ms: c.durationMs,
+				started_at: c.startedAt.toISOString(),
 			})),
 		});
 	}

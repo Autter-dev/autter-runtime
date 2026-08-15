@@ -75,6 +75,7 @@ Defaults (cheap by construction):
 | Signal | Default |
 | --- | --- |
 | Captured/unhandled exceptions | 100% (dedicated always-on tracer) |
+| LLM/GenAI call spans | 100% (`llmTracing`, on by default) |
 | Traces | 1% head sampling (`traceSampleRate`) |
 | Request metrics | exported every 60 s |
 | Logs | not collected |
@@ -92,3 +93,70 @@ Note on usage rollups: requests are counted from the `http.server.duration`
 metric (100% accurate) and additionally from sampled server spans. At the
 default 1% sampling the span contribution is negligible; if you set
 `traceSampleRate: 1` in development, expect request counts roughly doubled.
+
+## 3. LLM tracing
+
+`initAutterServer` initialises LLM tracing automatically: any GenAI span —
+`gen_ai.*` semconv attributes or the Vercel AI SDK's `ai.*` spans — bypasses
+head sampling, so **every** model call is recorded with model, tokens,
+latency, and a USD cost. Opt out with `llmTracing: false`.
+
+**Vercel AI SDK** — just turn on its telemetry, nothing else:
+
+```ts
+const { text } = await generateText({
+  model: openai("gpt-5-mini"),
+  prompt,
+  experimental_telemetry: { isEnabled: true, metadata: { userId: user.id } },
+});
+```
+
+**Any other client** (OpenAI, Anthropic, raw fetch, …) — wrap the call:
+
+```ts
+import { withLlmCall } from "@autter/runtime-node";
+
+const res = await withLlmCall(
+  { provider: "openai", model: "gpt-5-mini", userId: user.id },
+  async (llm) => {
+    const out = await openai.chat.completions.create({ ... });
+    llm.setUsage({
+      inputTokens: out.usage?.prompt_tokens,
+      outputTokens: out.usage?.completion_tokens,
+    });
+    return out;
+  },
+);
+```
+
+Errors thrown inside are rethrown after marking the span failed — failing
+model calls surface both as error issues and as `status: "error"` LLM calls.
+Costs are estimated ingest-side from a built-in price table; report exact
+figures with `llm.setCost(usd)` (the `autter.llm.cost_usd` attribute).
+
+To verify the pipe end-to-end without calling a real model:
+
+```ts
+import { emitLlmSelftestTrace } from "@autter/runtime-node";
+
+const { traceId } = await emitLlmSelftestTrace();
+// one fake "autter-selftest" call is flushed to the ingester; look it up by
+// traceId in the dashboard's LLM tab (or runtime_llm_calls when self-hosting)
+```
+
+## 4. Process spans (jobs, consumers, crons)
+
+Non-HTTP work is only visible to the slow-process monitor where a span
+exists — and regular traces are 1% sampled. `withProcessSpan` records a
+span **always**:
+
+```ts
+import { withProcessSpan } from "@autter/runtime-node";
+
+await withProcessSpan("invoice.rebuild", async () => {
+  await rebuildInvoices();
+});
+```
+
+Use stable, low-cardinality names; put ids in attributes
+(`withProcessSpan("email.digest", fn, { "user.id": id })`).

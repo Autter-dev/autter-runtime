@@ -96,6 +96,21 @@ CI source-map upload helper (maps upload to the Autter backend, not here).
 - CONTRIBUTING.md, issue templates, examples/ (next-app, express-app,
   static-site).
 
+## Milestone 6 — LLM/GenAI observability (shipped)
+
+Every model call recorded — tokens, latency, USD cost — with zero-config
+initialisation in the Node SDKs:
+
+- `@autter/runtime-node`: `initAutterServer` exempts GenAI spans (`gen_ai.*`
+  attrs, Vercel AI SDK `ai.*` names) from head sampling; `withLlmCall()`
+  wraps arbitrary clients; `withProcessSpan()` for always-recorded job
+  spans; `emitLlmSelftestTrace()` proves the pipe without spending a token.
+- Ingester: gen_ai spans → `runtime_llm_calls` (90-day TTL, per call, cost
+  reported via `autter.llm.cost_usd` or estimated from a built-in price
+  table) and forwarded on the sink webhook as `llmCalls`.
+- Non-Node stacks: any OTel GenAI instrumentation works — see
+  INTEGRATIONS.md for the sampling exemption they must add.
+
 ## Later / explicitly deferred
 
 - Opt-in same-origin network tracing (`traceparent` propagation) in the
@@ -113,4 +128,4 @@ CI source-map upload helper (maps upload to the Autter backend, not here).
 | `/v1/traces`, `/v1/metrics` OTLP/HTTP | OTLP spec-stable |
 | `/v1/browser` payload (`version: 1`) | additive-only changes |
 | ClickHouse table schemas | additive-only; TTLs configurable via env |
-| Sink webhook payload (`version: 1`) | additive-only changes |
+| Sink webhook payload (`version: 1`) | additive-only changes (`llmCalls` added additively) |

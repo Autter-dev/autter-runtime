@@ -44,6 +44,12 @@ Two key scopes separate frontend and backend credentials:
 | `runtime_error_occurrences` | MergeTree | `(org_id, repository_id, fingerprint, occurred_at)` | 14 d |
 | `runtime_spans` | MergeTree | `(org_id, repository_id, trace_id, started_at)` | 7 d |
 | `runtime_metrics_1m` | SummingMergeTree | `(org_id, repository_id, service, environment, release, route, bucket_at)` | 90 d |
+| `runtime_llm_calls` | MergeTree | `(org_id, repository_id, service, started_at)` | 90 d |
+
+`runtime_llm_calls` is per-call, not rolled up: LLM traffic is orders of
+magnitude smaller than HTTP, spend analysis needs per-call granularity
+(model, tokens, `cost_usd`, `cost_source`, user), and SDKs send GenAI spans
+unsampled (the errors-are-100% rule applies to money too).
 
 `runtime_metrics_1m` is pre-aggregated per minute; readers must
 `SUM(...) GROUP BY` because SummingMergeTree collapses rows at merge time,
@@ -118,6 +124,11 @@ Span-level:
 - `status_code` from `http.response.status_code` / `http.status_code`.
 - Server spans aggregate into 1-minute usage rollups: `request_count`,
   `error_count` (status ≥ 500 or span error), `duration_sum_ms`.
+- GenAI spans (`gen_ai.*` attributes; Vercel AI SDK inner `.doGenerate` /
+  `.doStream` / `.doEmbed` spans) additionally produce a `runtime_llm_calls`
+  row — provider, model, operation, token counts, and cost
+  (`autter.llm.cost_usd` if reported, else estimated from the built-in
+  price table). Outer AI SDK spans are skipped to avoid double counting.
 
 ## Browser payload (v1)
 
@@ -180,6 +191,11 @@ When `AUTTER_SINK_URL` is set, each ingest batch POSTs:
   ]
 }
 ```
+
+Batches also carry `metrics` (1-minute usage rollup points) and `llmCalls`
+(per-call LLM usage — provider, model, tokens, `costUsd`, `costSource`,
+`userId`, `status`, `startedAt`) whenever the ingest produced them — same
+shapes as their ClickHouse rows, additive to the v1 payload.
 
 Delivery is best-effort fire-and-forget (the ingester is not a queue); the
 consumer should treat ClickHouse as the recovery source for missed batches.

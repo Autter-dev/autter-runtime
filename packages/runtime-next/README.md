@@ -63,4 +63,11 @@ them via `captureException` and then renders your fallback.
 
 Also re-exported for convenience: `captureException`, `captureMessage`,
 `trackEvent`, `setUser`, `setContext`, `flush` (browser) and
-`captureServerException`, `captureServerMessage` (server).
+`captureServerException`, `captureServerMessage`, `withLlmCall`,
+`withProcessSpan`, `emitLlmSelftestTrace` (server).
+
+LLM tracing is on automatically once `registerAutter` runs: Vercel AI SDK
+calls with `experimental_telemetry: { isEnabled: true }` (and anything
+wrapped in `withLlmCall`) are recorded at 100% — every call, with model,
+tokens, latency, and cost. See the
+[`@autter/runtime-node` README](../runtime-node) for the API.

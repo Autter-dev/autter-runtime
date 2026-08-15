@@ -8,7 +8,12 @@ export {
 	initAutterServer,
 	captureException,
 	captureMessage,
+	withLlmCall,
+	withProcessSpan,
+	emitLlmSelftestTrace,
 	type AutterServerOptions,
 	type AutterServer,
 	type AutterSeverity,
+	type LlmCallOptions,
+	type LlmCall,
 } from "./server.js";

@@ -48,8 +48,9 @@ Two key scopes separate frontend and backend credentials:
 
 `runtime_llm_calls` is per-call, not rolled up: LLM traffic is orders of
 magnitude smaller than HTTP, spend analysis needs per-call granularity
-(model, tokens, `cost_usd`, `cost_source`, user), and SDKs send GenAI spans
-unsampled (the errors-are-100% rule applies to money too).
+(model, tokens, `cost_usd`, `cost_source`, user, and `error_type` for
+failed calls), and SDKs send GenAI spans unsampled (the errors-are-100%
+rule applies to money too).
 
 `runtime_metrics_1m` is pre-aggregated per minute; readers must
 `SUM(...) GROUP BY` because SummingMergeTree collapses rows at merge time,

@@ -280,6 +280,21 @@ function llmCallOf(
 		),
 	);
 
+	// Failed calls carry the provider exception type so spend dashboards can
+	// say "RateLimitError" instead of just "error". Same source as the
+	// occurrence pipeline: the span's exception event, else a generic Error.
+	let errorType = "";
+	if (isError) {
+		const exceptionEvent = (span.events ?? []).find(
+			(event) => event.name === "exception",
+		);
+		errorType = (
+			(exceptionEvent
+				? attrMap(exceptionEvent.attributes).get("exception.type")
+				: undefined) ?? "Error"
+		).slice(0, 128);
+	}
+
 	const reportedCost = numOf(attrs, "autter.llm.cost_usd");
 	let costUsd: number;
 	let costSource: RuntimeLlmCall["costSource"];
@@ -302,6 +317,7 @@ function llmCallOf(
 		model: model.slice(0, 256),
 		operation: operation.slice(0, 64),
 		status: isError ? "error" : "ok",
+		errorType,
 		inputTokens,
 		outputTokens,
 		costUsd,

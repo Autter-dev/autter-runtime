@@ -69,7 +69,8 @@ Spans following the [OTel GenAI semconv](https://opentelemetry.io/docs/specs/sem
 the Vercel AI SDK with telemetry enabled, and the GenAI instrumentations for
 Python/Go/etc.) are recognised automatically on `/v1/traces` and additionally
 stored per call in `runtime_llm_calls`: provider, model, operation, input/
-output tokens, duration, ok/error status, and a USD cost. The cost is taken
+output tokens, duration, ok/error status (with the provider exception type
+in `error_type` for failed calls), and a USD cost. The cost is taken
 from the `autter.llm.cost_usd` span attribute when reported; otherwise it's
 estimated from the built-in price table in `src/llm-pricing.ts`
 (`cost_source` records which: `reported` / `estimated` / `unpriced`). An

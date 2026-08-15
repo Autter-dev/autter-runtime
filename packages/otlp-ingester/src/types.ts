@@ -100,6 +100,8 @@ export interface RuntimeLlmCall {
 	/** "chat", "embeddings", … — from gen_ai.operation.name. */
 	operation: string;
 	status: "ok" | "error";
+	/** Provider exception type for failed calls ("RateLimitError", …); "" when ok. */
+	errorType: string;
 	inputTokens: number;
 	outputTokens: number;
 	/** USD. Exact when the SDK reported autter.llm.cost_usd, else estimated. */

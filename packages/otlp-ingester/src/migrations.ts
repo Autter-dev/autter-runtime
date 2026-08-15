@@ -103,6 +103,7 @@ export const MIGRATIONS: Migration[] = [
 				model            LowCardinality(String) DEFAULT 'unknown',
 				operation        LowCardinality(String) DEFAULT 'chat',
 				status           LowCardinality(String) DEFAULT 'ok',
+				error_type       String DEFAULT '',
 				input_tokens     UInt64 DEFAULT 0,
 				output_tokens    UInt64 DEFAULT 0,
 				cost_usd         Float64 DEFAULT 0,

@@ -1,0 +1,224 @@
+packages/runtime-node/src/server.ts
+  s_493feb443518cc::t_a7e4eda3d1a8f6 317-320
+  s_493feb443518cc::t_9c873f8528c297 1-8,10,23-25
+  s_493feb443518cc::t_1b26cdcd749496 188-191,201
+  s_493feb443518cc::t_d71d347a8824e3 37
+  s_493feb443518cc::t_eca131641e84ac 9
+  s_493feb443518cc::t_e4eff9e4912af9 61-66
+  s_493feb443518cc::t_68885c9b1b1601 313-316,321-476
+  s_493feb443518cc::t_5c4cc56d06bb59 253,262-263,267
+  s_493feb443518cc::t_98849723a176c5 91-140
+  s_493feb443518cc::t_a444bcf9bf117f 158-160,163-169
+README.md
+  s_493feb443518cc::t_59201549caa4b5 69-87
+docs/PLAN.md
+  s_493feb443518cc::t_7378c6b55c94ad 99-113
+  s_493feb443518cc::t_1f3319c3ea48f4 131
+packages/runtime-next/README.md
+  s_493feb443518cc::t_2140093b9d7c88 66-73
+packages/runtime-node/src/index.ts
+  s_493feb443518cc::t_f9df7f53b51bc4 11-13,17-18
+packages/runtime-next/src/index.ts
+  s_493feb443518cc::t_6aa1c95cfd1086 56-60
+packages/runtime-node/README.md
+  s_493feb443518cc::t_7ce37a641fac9b 78
+  s_493feb443518cc::t_122d1f802a71d5 96-162
+docs/INTEGRATIONS.md
+  s_493feb443518cc::t_986e23e76e01bb 129-160,166
+packages/otlp-ingester/src/server.ts
+  s_493feb443518cc::t_d78635f3493943 24
+  s_493feb443518cc::t_ff35dbca95127b 164-165,171,174-180,201-203
+  s_493feb443518cc::t_7f4e38dad2384d 241-242,249,255
+docs/GETTING-STARTED.md
+  s_493feb443518cc::t_10b9f11db95102 45
+  s_493feb443518cc::t_a3d69c50864b17 123-158
+  s_493feb443518cc::t_7bd79b4eff89e1 251-258
+  s_493feb443518cc::t_01767c6c346cb3 272-277
+packages/otlp-ingester/src/types.ts
+  s_493feb443518cc::t_9d7617f5ee87d2 84-113
+docs/ARCHITECTURE.md
+  s_493feb443518cc::t_2fd1a7aca57023 127-131
+  s_493feb443518cc::t_31f5feac74936d 47-52
+  s_493feb443518cc::t_ab3ba7a35935cb 195-199
+packages/otlp-ingester/README.md
+  s_493feb443518cc::t_727941cf2e0dfe 63-79
+  s_493feb443518cc::t_df3d57f7d68886 11
+packages/otlp-ingester/src/normalize-otlp.ts
+  s_493feb443518cc::t_3199d63ab56da7 1,4,197-320,325,334,421-432,452-458
+packages/otlp-ingester/src/clickhouse.ts
+  s_493feb443518cc::t_80485daaa38226 290-322
+  s_493feb443518cc::t_0afb07614da9ec 196-201
+  s_493feb443518cc::t_0846fdf3da6101 121-145
+  s_493feb443518cc::t_ba967c1da27ea1 14
+  s_493feb443518cc::t_790adf78ca0826 65-66
+examples/express-app/server.js
+  s_493feb443518cc::t_9eb870974277bf 50-69
+  s_493feb443518cc::t_7340da460d342d 9-15
+packages/otlp-ingester/src/llm-pricing.ts
+  s_493feb443518cc::t_9b6fa4c59118c3 1-76
+packages/otlp-ingester/src/migrations.ts
+  s_493feb443518cc::t_3223ae5d7b6e8e 86-120
+packages/otlp-ingester/src/config.ts
+  s_493feb443518cc::t_ea98d4aae17d96 35
+  s_493feb443518cc::t_bd5e3ab2fe3af2 81-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "8e0d24aee061a3261ccddfc59d9adf1628c5fd18",
+  "branch": "posthog/llm-tracing",
+  "prompts": {
+    "s_493feb443518cc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a005ea-a5cd-77ca-942e-ed93589fdcbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:4fcaa4032a633b5b3b4d43b344ecf7bd9bc0bd3f08f6929f8d9d38a2593d8275",
+      "total_additions": 961,
+      "total_deletions": 86,
+      "accepted_lines": 897,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_493feb443518cc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a005ea-a5cd-77ca-942e-ed93589fdcbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:4fcaa4032a633b5b3b4d43b344ecf7bd9bc0bd3f08f6929f8d9d38a2593d8275",
+      "stats": {
+        "total_additions": 961,
+        "total_deletions": 86,
+        "accepted_lines": 897,
+        "overriden_lines": 0,
+        "files": {
+          "README.md": {
+            "total_additions": 19,
+            "total_deletions": 0,
+            "accepted_lines": 19,
+            "overriden_lines": 0
+          },
+          "docs/ARCHITECTURE.md": {
+            "total_additions": 16,
+            "total_deletions": 0,
+            "accepted_lines": 16,
+            "overriden_lines": 0
+          },
+          "docs/GETTING-STARTED.md": {
+            "total_additions": 51,
+            "total_deletions": 0,
+            "accepted_lines": 51,
+            "overriden_lines": 0
+          },
+          "docs/INTEGRATIONS.md": {
+            "total_additions": 33,
+            "total_deletions": 1,
+            "accepted_lines": 33,
+            "overriden_lines": 0
+          },
+          "docs/PLAN.md": {
+            "total_additions": 16,
+            "total_deletions": 1,
+            "accepted_lines": 16,
+            "overriden_lines": 0
+          },
+          "e2e-llm-test.mjs": {
+            "total_additions": 62,
+            "total_deletions": 62,
+            "accepted_lines": 0,
+            "overriden_lines": 0
+          },
+          "examples/express-app/server.js": {
+            "total_additions": 27,
+            "total_deletions": 1,
+            "accepted_lines": 27,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/README.md": {
+            "total_additions": 18,
+            "total_deletions": 1,
+            "accepted_lines": 18,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/clickhouse.ts": {
+            "total_additions": 67,
+            "total_deletions": 2,
+            "accepted_lines": 67,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/config.ts": {
+            "total_additions": 4,
+            "total_deletions": 0,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/llm-pricing.ts": {
+            "total_additions": 76,
+            "total_deletions": 0,
+            "accepted_lines": 76,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/migrations.ts": {
+            "total_additions": 35,
+            "total_deletions": 0,
+            "accepted_lines": 35,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/normalize-otlp.ts": {
+            "total_additions": 147,
+            "total_deletions": 1,
+            "accepted_lines": 147,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/server.ts": {
+            "total_additions": 19,
+            "total_deletions": 4,
+            "accepted_lines": 19,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/types.ts": {
+            "total_additions": 30,
+            "total_deletions": 0,
+            "accepted_lines": 30,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/README.md": {
+            "total_additions": 8,
+            "total_deletions": 1,
+            "accepted_lines": 8,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 5,
+            "total_deletions": 0,
+            "accepted_lines": 5,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/README.md": {
+            "total_additions": 68,
+            "total_deletions": 0,
+            "accepted_lines": 68,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/index.ts": {
+            "total_additions": 5,
+            "total_deletions": 0,
+            "accepted_lines": 5,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/server.ts": {
+            "total_additions": 255,
+            "total_deletions": 12,
+            "accepted_lines": 253,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

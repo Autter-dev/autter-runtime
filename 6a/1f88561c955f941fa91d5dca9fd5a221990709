@@ -1,0 +1,96 @@
+packages/otlp-ingester/src/clickhouse.ts
+  s_493feb443518cc::t_524ae3fce60f71 313
+  s_493feb443518cc::t_dbd1cc4d2f7ccf 133
+packages/otlp-ingester/src/migrations.ts
+  s_493feb443518cc::t_dbd1cc4d2f7ccf 106
+packages/otlp-ingester/README.md
+  s_493feb443518cc::t_54e37c65785b20 72-73
+docs/ARCHITECTURE.md
+  s_493feb443518cc::t_f16eada279b7d9 51-53
+packages/otlp-ingester/src/normalize-otlp.ts
+  s_493feb443518cc::t_8e2875ad13417b 283-297,320
+packages/otlp-ingester/src/types.ts
+  s_493feb443518cc::t_5655fc5c328ae3 103-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "6a1f88561c955f941fa91d5dca9fd5a221990709",
+  "branch": "posthog/llm-tracing",
+  "prompts": {
+    "s_493feb443518cc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a005ea-a5cd-77ca-942e-ed93589fdcbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:93bd4eafb829ce9e759cec6aa01fadd4f2ca18e4a35b148558ab31d153b02daa",
+      "total_additions": 74,
+      "total_deletions": 51,
+      "accepted_lines": 26,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_493feb443518cc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a005ea-a5cd-77ca-942e-ed93589fdcbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:93bd4eafb829ce9e759cec6aa01fadd4f2ca18e4a35b148558ab31d153b02daa",
+      "stats": {
+        "total_additions": 74,
+        "total_deletions": 51,
+        "accepted_lines": 26,
+        "overriden_lines": 0,
+        "files": {
+          "docs/ARCHITECTURE.md": {
+            "total_additions": 3,
+            "total_deletions": 2,
+            "accepted_lines": 3,
+            "overriden_lines": 0
+          },
+          "e2e-llm-test2.mjs": {
+            "total_additions": 48,
+            "total_deletions": 48,
+            "accepted_lines": 0,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/README.md": {
+            "total_additions": 2,
+            "total_deletions": 1,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/clickhouse.ts": {
+            "total_additions": 2,
+            "total_deletions": 0,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/migrations.ts": {
+            "total_additions": 1,
+            "total_deletions": 0,
+            "accepted_lines": 1,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/normalize-otlp.ts": {
+            "total_additions": 16,
+            "total_deletions": 0,
+            "accepted_lines": 16,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/types.ts": {
+            "total_additions": 2,
+            "total_deletions": 0,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

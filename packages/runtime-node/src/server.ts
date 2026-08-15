@@ -394,12 +394,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		const span = errorTracer.startSpan(isError ? error.name : "Error", {
 			attributes: { "autter.severity": "error", ...attributes },
 		});
-		if (isError) {
+		if (isError && error.stack) {
 			span.recordException(error);
 		} else {
+			// No usable stack — an Error thrown without one, or a non-Error
+			// value. Synthesize the call site (minus this frame) so the
+			// occurrence keeps a code location instead of grouping every
+			// stackless error onto one exception-type + message fingerprint.
+			const stack = new Error().stack
+				?.split("\n")
+				.filter((line, i) => i === 0 || !line.includes("captureException"))
+				.join("\n");
 			span.addEvent("exception", {
-				"exception.type": "Error",
+				"exception.type": isError ? error.name : "Error",
 				"exception.message": message,
+				...(stack ? { "exception.stacktrace": stack } : {}),
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -439,6 +448,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		process.on("uncaughtExceptionMonitor", (err) => {
 			captureException(err, { "autter.unhandled": true });
 			void errorProvider.forceFlush().catch(() => {});
+		});
+		// The async twin of an uncaught exception: a rejected promise with no
+		// `.catch`. Registering this listener also stops Node's default
+		// `throw` mode from crashing the process, so — unlike the monitor
+		// above — execution continues and the batch exporter flushes on its
+		// normal schedule.
+		process.on("unhandledRejection", (reason: unknown) => {
+			// A non-Error reason has no stack and no real type — usually
+			// injected junk rather than an app fault. Report it as a warning so
+			// it does not open a first-class issue. Mirrors the browser SDK's
+			// `unhandledrejection` handling.
+			captureException(reason, {
+				"autter.unhandled": true,
+				...(reason instanceof Error ? {} : { "autter.severity": "warning" }),
+			});
 		});
 	}
 

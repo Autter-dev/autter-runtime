@@ -39,12 +39,15 @@ export {
 	withProcessSpan,
 	withLlmCall,
 	trackLlmCall,
+	instrumentLlmClient,
+	emitLlmSelftestTrace,
 } from "@autter/runtime-node";
 export type {
 	LlmCallHandle,
 	LlmCallInfo,
 	LlmUsage,
 	TrackedLlmCall,
+	InstrumentLlmOptions,
 } from "@autter/runtime-node";
 export type { AutterServer, AutterServerOptions, RelayOptions };
 

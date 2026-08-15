@@ -78,6 +78,8 @@ export function loadConfig(): IngesterConfig {
 		occurrenceTtlDays: intEnv("OCCURRENCE_TTL_DAYS", 14),
 		spanTtlDays: intEnv("SPAN_TTL_DAYS", 7),
 		metricsTtlDays: intEnv("METRICS_TTL_DAYS", 90),
+		// LLM calls keep the metrics horizon, not the span one — cost trends
+		// need months, and per-call volume is small next to HTTP spans.
 		llmCallTtlDays: intEnv("LLM_CALL_TTL_DAYS", 90),
 	};
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {

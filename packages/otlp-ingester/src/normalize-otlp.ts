@@ -295,12 +295,18 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				}
 
 				// LLM provider calls (GenAI semconv, Vercel AI SDK telemetry,
-				// or Autter's own helpers) become usage/cost rows.
+				// or Autter's own helpers) become usage/cost rows. The first
+				// exception event's type rides along so failed calls keep the
+				// provider error class even without an `error.type` attribute.
 				const llmCall = extractLlmCall(attrs, {
 					name: span.name ?? "",
 					traceId: span.traceId ?? "",
 					spanId: span.spanId ?? "",
 					isError,
+					exceptionType: exceptionEvents[0]
+						? (attrMap(exceptionEvents[0].attributes).get("exception.type") ??
+							null)
+						: null,
 					durationMs,
 					startedAt,
 					service: resource.service,

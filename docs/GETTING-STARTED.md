@@ -42,7 +42,7 @@ you from zero to seeing data in ClickHouse.
 | Handled errors | `captureException(err)` | `captureException(err)` |
 | Usage | session pings + `trackEvent()` | request counts/durations per route (automatic) |
 | Traces | — (by design; no OTel in the browser) | ~1% sampled (configurable) |
-| LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% |
+| LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% (model, tokens, cost) |
 
 **What is never sent:** cookies, DOM content, form values, request/response
 bodies, headers, emails, full URLs with query strings.
@@ -122,15 +122,18 @@ enriched with `@opentelemetry/instrumentation-express` via the
 
 ### Track LLM usage & cost
 
-Every recognised LLM call is recorded 100% (never sampled) with model,
-tokens, latency, and a USD cost — estimated from a built-in price table
-unless you report the exact figure.
-
-**Vercel AI SDK — zero extra code.** Turn on its telemetry and Autter
-picks the calls up automatically (an LLM-aware sampler keeps them even at
-1% trace sampling):
+`initAutterServer` initialises LLM tracing too: every recognised LLM call
+is recorded 100% (an LLM-aware sampler keeps GenAI spans even at 1% trace
+sampling) with model, tokens, latency, and a USD cost — estimated from a
+built-in price table unless you report the exact figure. Three ways to emit
+calls, easiest first:
 
 ```ts
+// 1. Wrap the client once — OpenAI/Anthropic/Google SDKs, streaming included:
+import { instrumentLlmClient } from "@autter/runtime-node";
+const openai = instrumentLlmClient(new OpenAI());
+
+// 2. Vercel AI SDK — turn on its telemetry, nothing else:
 const { text } = await generateText({
   model: openai("gpt-5-mini"),
   prompt,
@@ -139,21 +142,15 @@ const { text } = await generateText({
     metadata: { userId: user.id },   // → per-user cost attribution
   },
 });
-```
 
-**Any other client — wrap the call:**
-
-```js
-const { withLlmCall } = require("@autter/runtime-node");
-
+// 3. Raw fetch / anything else — wrap the call manually:
+import { withLlmCall } from "@autter/runtime-node";
 const res = await withLlmCall(
   { provider: "openai", model: "gpt-5-mini", userId: user.id },
   async (llm) => {
-    const out = await openai.chat.completions.create({ model: "gpt-5-mini", messages });
-    llm.setUsage({
-      inputTokens: out.usage?.prompt_tokens,
-      outputTokens: out.usage?.completion_tokens,
-    });
+    const out = await openai.chat.completions.create({ ... });
+    llm.setUsage({ inputTokens: out.usage?.prompt_tokens,
+                   outputTokens: out.usage?.completion_tokens });
     return out;
   },
 );
@@ -164,6 +161,15 @@ Or report after the fact with
 Python/Go/etc. need no Autter package: any OTel GenAI instrumentation
 (OpenLLMetry, OpenLIT, the official contrib packages) emitting `gen_ai.*`
 spans through the OTLP endpoint is recognised the same way.
+
+Verify the pipe without spending a token — `emitLlmSelftestTrace()` sends
+one clearly-named fake call, flushes it, and returns the `traceId` to look
+up:
+
+```ts
+import { emitLlmSelftestTrace } from "@autter/runtime-node";
+console.log(await emitLlmSelftestTrace()); // { traceId: "…" }
+```
 
 ## 4. Instrument your frontend
 
@@ -257,6 +263,14 @@ Errors become issues when spans record exceptions
 (`span.RecordError(err)` in Go, `record_exception` in Python, …) or carry
 `ERROR` status. Per-language snippets: [INTEGRATIONS.md](INTEGRATIONS.md).
 
+LLM calls need no Autter package either: any OTel GenAI instrumentation
+(`gen_ai.*` spans — e.g. `opentelemetry-instrumentation-openai-v2` in
+Python) is recognised automatically. One caveat: make sure your sampler
+doesn't drop them — the 1% ratio above applies to everything, so either
+exempt GenAI spans in a custom sampler or route them through an always-on
+tracer provider. See
+[INTEGRATIONS.md § LLM / GenAI calls](INTEGRATIONS.md#llm--genai-calls-any-language).
+
 ## 7. Verify data is flowing
 
 Trigger a test error, then query ClickHouse:
@@ -270,6 +284,12 @@ SELECT service, route, sum(request_count) AS requests, sum(error_count) AS error
 FROM autter_runtime.runtime_metrics_1m
 WHERE bucket_at > now() - INTERVAL 1 HOUR
 GROUP BY service, route;
+
+-- LLM calls (after emitLlmSelftestTrace() or a real traced model call)
+SELECT service, provider, model, input_tokens, output_tokens,
+       cost_usd, cost_source, status, started_at
+FROM autter_runtime.runtime_llm_calls
+ORDER BY started_at DESC LIMIT 10;
 ```
 
 With the local compose setup: `docker compose exec clickhouse

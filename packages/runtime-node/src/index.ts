@@ -11,6 +11,7 @@ export {
 	withProcessSpan,
 	withLlmCall,
 	trackLlmCall,
+	emitLlmSelftestTrace,
 	type AutterServerOptions,
 	type AutterServer,
 	type AutterSeverity,
@@ -19,3 +20,7 @@ export {
 	type LlmUsage,
 	type TrackedLlmCall,
 } from "./server.js";
+export {
+	instrumentLlmClient,
+	type InstrumentLlmOptions,
+} from "./llm-instrument.js";

@@ -21,6 +21,7 @@ import {
 import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
 import type {
 	IngestContext,
+	RuntimeLlmCall,
 	RuntimeMetricPoint,
 	RuntimeOccurrence,
 	RuntimeOccurrenceInput,
@@ -160,15 +161,23 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 
 	/**
 	 * Best-effort forward for the cloud dashboard: fingerprinted occurrences
-	 * feed issue grouping, metric points feed the request/error-rate rollups.
+	 * feed issue grouping, metric points feed the request/error-rate rollups,
+	 * LLM calls feed spend/anomaly watching.
 	 */
 	function forwardToSink(
 		ctx: IngestContext,
 		occurrences: RuntimeOccurrence[],
 		metricPoints: RuntimeMetricPoint[] = [],
+		llmCalls: RuntimeLlmCall[] = [],
 	) {
 		if (!config.sinkUrl) return;
-		if (occurrences.length === 0 && metricPoints.length === 0) return;
+		if (
+			occurrences.length === 0 &&
+			metricPoints.length === 0 &&
+			llmCalls.length === 0
+		) {
+			return;
+		}
 		void fetch(config.sinkUrl, {
 			method: "POST",
 			headers: {
@@ -188,6 +197,10 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				metrics: metricPoints.map((p) => ({
 					...p,
 					bucketAt: p.bucketAt.toISOString(),
+				})),
+				llmCalls: llmCalls.map((c) => ({
+					...c,
+					startedAt: c.startedAt.toISOString(),
 				})),
 			}),
 			signal: AbortSignal.timeout(10_000),
@@ -239,7 +252,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, fingerprinted, metricPoints);
+		forwardToSink(ctx, fingerprinted, metricPoints, llmCalls);
 		otlpSuccess(req, res);
 	});
 

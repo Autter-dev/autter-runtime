@@ -56,6 +56,8 @@ export interface LlmSpanFacts {
 	traceId: string;
 	spanId: string;
 	isError: boolean;
+	/** exception.type from the span's exception event, if it had one. */
+	exceptionType: string | null;
 	durationMs: number;
 	startedAt: Date;
 	service: string;
@@ -84,7 +86,13 @@ export function extractLlmCall(
 		"ai.response.model",
 		"ai.model.id",
 	);
-	const provider = strAttr(attrs, "gen_ai.system", "ai.model.provider");
+	// gen_ai.provider.name is the current semconv key, gen_ai.system the
+	// pre-1.37 one. Vercel's ai.model.provider looks like "openai.chat" —
+	// keep the provider segment, the mode is already in `operation`.
+	const provider =
+		strAttr(attrs, "gen_ai.provider.name", "gen_ai.system") ??
+		strAttr(attrs, "ai.model.provider")?.toLowerCase().split(".")[0] ??
+		null;
 	// A call must identify at least a model or a provider system — this is
 	// what keeps ordinary spans (HTTP, DB, tool calls) out of the table.
 	if (!model && !provider) return null;
@@ -96,6 +104,8 @@ export function extractLlmCall(
 			"gen_ai.usage.prompt_tokens",
 			"ai.usage.promptTokens",
 			"ai.usage.inputTokens",
+			// Vercel .doEmbed spans report a single total under ai.usage.tokens.
+			"ai.usage.tokens",
 		) ?? 0;
 	const outputTokens =
 		numAttr(
@@ -145,7 +155,10 @@ export function extractLlmCall(
 		durationMs: facts.durationMs,
 		status: facts.isError ? "error" : "ok",
 		errorType: facts.isError
-			? (strAttr(attrs, "error.type") ?? "Error").slice(0, 200)
+			? (strAttr(attrs, "error.type") ?? facts.exceptionType ?? "Error").slice(
+					0,
+					200,
+				)
 			: "",
 		userId: (
 			strAttr(

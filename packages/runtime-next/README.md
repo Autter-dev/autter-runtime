@@ -72,8 +72,16 @@ them via `captureException` and then renders your fallback.
 Also re-exported for convenience: `captureException`, `captureMessage`,
 `trackEvent`, `setUser`, `setContext`, `flush` (from
 `@autter/runtime-next/client`) and `captureServerException`,
-`captureServerMessage` (from the root / `@autter/runtime-next/server`).
+`captureServerMessage`, `withProcessSpan`, `withLlmCall`, `trackLlmCall`,
+`instrumentLlmClient`, `emitLlmSelftestTrace` (from the root /
+`@autter/runtime-next/server`).
 
 > Importing the root entry from a client component pulls the Node OTel SDK
 > into the browser bundle and fails the build (`fs` cannot be resolved).
 > Client code must always use `@autter/runtime-next/client`.
+
+LLM tracing is on automatically once `registerAutter` runs: Vercel AI SDK
+calls with `experimental_telemetry: { isEnabled: true }` (and anything
+wrapped in `withLlmCall` or an `instrumentLlmClient` client) are recorded at
+100% — every call, with model, tokens, latency, and cost. See the
+[`@autter/runtime-node` README](../runtime-node) for the API.

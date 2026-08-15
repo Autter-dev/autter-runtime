@@ -66,6 +66,21 @@ initAutterServer({
 });
 ```
 
+**LLM calls** — initialised with the server tracker, recorded at 100%
+(model, tokens, latency, USD cost). One line per client:
+
+```js
+const { instrumentLlmClient } = require("@autter/runtime-node");
+
+const openai = instrumentLlmClient(new OpenAI());   // that's it — every
+// chat/embedding/stream call through this client is traced automatically
+```
+
+Vercel AI SDK users don't even need that — set
+`experimental_telemetry: { isEnabled: true }` on the call. For raw-fetch
+clients there's a manual `withLlmCall` wrapper (see
+[`@autter/runtime-node`](packages/runtime-node)).
+
 Full walkthrough (keys, relay setup, Next.js, verification):
 **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**.
 

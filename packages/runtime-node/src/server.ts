@@ -320,6 +320,11 @@ function alwaysOnTracer(name: string): Tracer {
 		: trace.getTracer(name);
 }
 
+/** @internal Tracer used by the LLM wrappers — always-on once initialised. */
+export function autterLlmTracer(): Tracer {
+	return alwaysOnTracer("autter-llm");
+}
+
 async function runInSpan<T>(span: Span, fn: () => T | Promise<T>): Promise<T> {
 	try {
 		const result = await fn();

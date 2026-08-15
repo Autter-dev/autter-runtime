@@ -101,6 +101,24 @@ default 1% sampling the span contribution is negligible; if you set
 head sampling, so **every** model call is recorded with model, tokens,
 latency, and a USD cost. Opt out with `llmTracing: false`.
 
+**Easiest: wrap the client once** — works with the OpenAI, Anthropic, and
+Google GenAI SDKs (or anything with the same call shapes), streaming
+included; every call through it is traced with no per-call code:
+
+```ts
+import { instrumentLlmClient } from "@autter/runtime-node";
+
+const openai = instrumentLlmClient(new OpenAI());
+// use it exactly as before — chat, embeddings, streams are all recorded
+const out = await openai.chat.completions.create({ model: "gpt-5-mini", ... });
+```
+
+Provider is detected from the client (override with
+`{ provider, userId, attributes }` as the second argument). For streamed
+responses the span closes when the stream is consumed; OpenAI streams only
+report token usage when you pass
+`stream_options: { include_usage: true }`.
+
 **Vercel AI SDK** — just turn on its telemetry, nothing else:
 
 ```ts
@@ -111,7 +129,7 @@ const { text } = await generateText({
 });
 ```
 
-**Any other client** (OpenAI, Anthropic, raw fetch, …) — wrap the call:
+**Manual control** (raw fetch, unusual clients) — wrap the call:
 
 ```ts
 import { withLlmCall } from "@autter/runtime-node";

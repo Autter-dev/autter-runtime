@@ -56,8 +56,10 @@ export {
 	withLlmCall,
 	withProcessSpan,
 	emitLlmSelftestTrace,
+	instrumentLlmClient,
 	type LlmCallOptions,
 	type LlmCall,
+	type InstrumentLlmOptions,
 } from "@autter/runtime-node";
 
 /** Server OTel init for Next.js `instrumentation.ts`. */

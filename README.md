@@ -67,23 +67,19 @@ initAutterServer({
 ```
 
 **LLM calls** — initialised with the server tracker, recorded at 100%
-(model, tokens, latency, USD cost). Vercel AI SDK: just set
-`experimental_telemetry: { isEnabled: true }` on the call. Any other
-client:
+(model, tokens, latency, USD cost). One line per client:
 
 ```js
-const { withLlmCall } = require("@autter/runtime-node");
+const { instrumentLlmClient } = require("@autter/runtime-node");
 
-const res = await withLlmCall(
-  { provider: "openai", model: "gpt-5-mini", userId: user.id },
-  async (llm) => {
-    const out = await openai.chat.completions.create({ /* … */ });
-    llm.setUsage({ inputTokens: out.usage?.prompt_tokens,
-                   outputTokens: out.usage?.completion_tokens });
-    return out;
-  },
-);
+const openai = instrumentLlmClient(new OpenAI());   // that's it — every
+// chat/embedding/stream call through this client is traced automatically
 ```
+
+Vercel AI SDK users don't even need that — set
+`experimental_telemetry: { isEnabled: true }` on the call. For raw-fetch
+clients there's a manual `withLlmCall` wrapper (see
+[`@autter/runtime-node`](packages/runtime-node)).
 
 Full walkthrough (keys, relay setup, Next.js, verification):
 **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**.

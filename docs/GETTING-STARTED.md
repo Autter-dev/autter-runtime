@@ -124,17 +124,21 @@ enriched with `@opentelemetry/instrumentation-express` via the
 
 `initAutterServer` initialises LLM tracing too — GenAI spans skip the 1%
 sampling, so every model call lands with model, tokens, latency, and cost.
-Two ways to emit them:
+Three ways to emit them, easiest first:
 
 ```ts
-// Vercel AI SDK — turn on telemetry, nothing else:
+// 1. Wrap the client once — OpenAI/Anthropic/Google SDKs, streaming included:
+import { instrumentLlmClient } from "@autter/runtime-node";
+const openai = instrumentLlmClient(new OpenAI());
+
+// 2. Vercel AI SDK — turn on telemetry, nothing else:
 const { text } = await generateText({
   model: openai("gpt-5-mini"),
   prompt,
   experimental_telemetry: { isEnabled: true, metadata: { userId: user.id } },
 });
 
-// Any other client — wrap the call:
+// 3. Raw fetch / anything else — wrap the call manually:
 import { withLlmCall } from "@autter/runtime-node";
 const res = await withLlmCall(
   { provider: "openai", model: "gpt-5-mini", userId: user.id },

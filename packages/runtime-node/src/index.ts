@@ -17,3 +17,7 @@ export {
 	type LlmCallOptions,
 	type LlmCall,
 } from "./server.js";
+export {
+	instrumentLlmClient,
+	type InstrumentLlmOptions,
+} from "./llm-instrument.js";

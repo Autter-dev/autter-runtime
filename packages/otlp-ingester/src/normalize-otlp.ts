@@ -1,4 +1,4 @@
-import { estimateLlmCostUsd } from "./llm-pricing.js";
+import { extractLlmCall } from "./llm.js";
 import {
 	asSeverity,
 	type RuntimeLlmCall,
@@ -194,146 +194,6 @@ function severityOf(
 	return severity;
 }
 
-function firstOf(
-	attrs: Map<string, string>,
-	...keys: string[]
-): string | null {
-	for (const key of keys) {
-		const value = attrs.get(key);
-		if (value !== undefined && value !== "") return value;
-	}
-	return null;
-}
-
-function numOf(attrs: Map<string, string>, ...keys: string[]): number | null {
-	const raw = firstOf(attrs, ...keys);
-	if (raw === null) return null;
-	const value = Number(raw);
-	return Number.isFinite(value) ? value : null;
-}
-
-/**
- * Recognise a span as an LLM/GenAI call and extract the usage fields. Any
- * OTel GenAI instrumentation qualifies via its `gen_ai.*` attributes; the
- * Vercel AI SDK's inner provider-call spans (`ai.*.doGenerate`/`.doStream`/
- * `.doEmbed`) qualify even when only `ai.*` attributes are present (older
- * SDKs). Outer AI SDK spans (`ai.generateText`, …) are deliberately NOT
- * counted — their inner call spans carry the usage, and counting both would
- * double the tokens.
- */
-function llmCallOf(
-	span: OtlpSpan,
-	attrs: Map<string, string>,
-	resource: ResourceInfo,
-	isError: boolean,
-	durationMs: number,
-	startedAt: Date,
-): RuntimeLlmCall | null {
-	const name = span.name ?? "";
-	const hasGenAi =
-		attrs.has("gen_ai.request.model") ||
-		attrs.has("gen_ai.response.model") ||
-		attrs.has("gen_ai.usage.input_tokens") ||
-		attrs.has("gen_ai.usage.output_tokens") ||
-		attrs.has("gen_ai.usage.prompt_tokens") ||
-		attrs.has("gen_ai.usage.completion_tokens");
-	const isVercelCallSpan =
-		attrs.has("ai.model.id") && /\.do(Generate|Stream|Embed)$/.test(name);
-	if (!hasGenAi && !isVercelCallSpan) return null;
-
-	const model =
-		firstOf(attrs, "gen_ai.request.model", "ai.model.id", "gen_ai.response.model") ??
-		"unknown";
-	// Vercel providers look like "openai.chat" — keep the first segment.
-	const provider = (
-		firstOf(attrs, "gen_ai.provider.name", "gen_ai.system", "ai.model.provider") ??
-		"unknown"
-	)
-		.toLowerCase()
-		.split(".")[0] as string;
-	const operation =
-		firstOf(attrs, "gen_ai.operation.name") ??
-		(name.endsWith(".doEmbed") ? "embeddings" : "chat");
-	const inputTokens = Math.max(
-		0,
-		Math.round(
-			numOf(
-				attrs,
-				"gen_ai.usage.input_tokens",
-				"gen_ai.usage.prompt_tokens",
-				"ai.usage.promptTokens",
-				"ai.usage.inputTokens",
-				"ai.usage.tokens",
-			) ?? 0,
-		),
-	);
-	const outputTokens = Math.max(
-		0,
-		Math.round(
-			numOf(
-				attrs,
-				"gen_ai.usage.output_tokens",
-				"gen_ai.usage.completion_tokens",
-				"ai.usage.completionTokens",
-				"ai.usage.outputTokens",
-			) ?? 0,
-		),
-	);
-
-	// Failed calls carry the provider exception type so spend dashboards can
-	// say "RateLimitError" instead of just "error". Same source as the
-	// occurrence pipeline: the span's exception event, else a generic Error.
-	let errorType = "";
-	if (isError) {
-		const exceptionEvent = (span.events ?? []).find(
-			(event) => event.name === "exception",
-		);
-		errorType = (
-			(exceptionEvent
-				? attrMap(exceptionEvent.attributes).get("exception.type")
-				: undefined) ?? "Error"
-		).slice(0, 128);
-	}
-
-	const reportedCost = numOf(attrs, "autter.llm.cost_usd");
-	let costUsd: number;
-	let costSource: RuntimeLlmCall["costSource"];
-	if (reportedCost !== null && reportedCost >= 0) {
-		costUsd = reportedCost;
-		costSource = "reported";
-	} else {
-		const estimate = estimateLlmCostUsd(model, inputTokens, outputTokens);
-		costUsd = estimate ?? 0;
-		costSource = estimate === null ? "unpriced" : "estimated";
-	}
-
-	return {
-		service: resource.service,
-		environment: resource.environment,
-		release: resource.release,
-		traceId: span.traceId ?? "",
-		spanId: span.spanId ?? "",
-		provider: provider || "unknown",
-		model: model.slice(0, 256),
-		operation: operation.slice(0, 64),
-		status: isError ? "error" : "ok",
-		errorType,
-		inputTokens,
-		outputTokens,
-		costUsd,
-		costSource,
-		userId:
-			firstOf(
-				attrs,
-				"autter.user_id",
-				"ai.telemetry.metadata.userId",
-				"enduser.id",
-			)?.slice(0, 256) ?? null,
-		durationMs,
-		startedAt,
-	};
-}
-
 export interface NormalizedTraces {
 	occurrences: RuntimeOccurrenceInput[];
 	spans: RuntimeSpanRow[];
@@ -434,16 +294,25 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					});
 				}
 
-				// LLM/GenAI call spans additionally land in runtime_llm_calls
-				// with model/tokens/cost extracted for spend analysis.
-				const llmCall = llmCallOf(
-					span,
-					attrs,
-					resource,
+				// LLM provider calls (GenAI semconv, Vercel AI SDK telemetry,
+				// or Autter's own helpers) become usage/cost rows. The first
+				// exception event's type rides along so failed calls keep the
+				// provider error class even without an `error.type` attribute.
+				const llmCall = extractLlmCall(attrs, {
+					name: span.name ?? "",
+					traceId: span.traceId ?? "",
+					spanId: span.spanId ?? "",
 					isError,
+					exceptionType: exceptionEvents[0]
+						? (attrMap(exceptionEvents[0].attributes).get("exception.type") ??
+							null)
+						: null,
 					durationMs,
 					startedAt,
-				);
+					service: resource.service,
+					environment: resource.environment,
+					release: resource.release,
+				});
 				if (llmCall) llmCalls.push(llmCall);
 
 				// Server spans fold into 1-minute usage rollups so traffic is

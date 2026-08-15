@@ -82,10 +82,11 @@ export interface RuntimeSpanRow {
 }
 
 /**
- * One recognised LLM/GenAI call — a span following the OTel GenAI semconv
- * (`gen_ai.*` attributes; the Vercel AI SDK's inner `.doGenerate`/`.doEmbed`
- * spans qualify too). Stored per call: LLM traffic is inherently low-volume
- * relative to HTTP, and cost analysis needs every call, not a sample.
+ * One LLM provider call (chat, completion, embedding, …) extracted from a
+ * span carrying GenAI/Vercel-AI/Autter attributes — see llm.ts. Stored per
+ * call, not rolled up: LLM traffic is orders of magnitude smaller than
+ * HTTP, and spend analysis needs every call. Tokens and cost are resolved
+ * at ingest so usage/spend queries are plain aggregates.
  */
 export interface RuntimeLlmCall {
 	service: string;
@@ -93,23 +94,24 @@ export interface RuntimeLlmCall {
 	release: string | null;
 	traceId: string;
 	spanId: string;
-	/** "openai", "anthropic", … — from gen_ai.provider.name / gen_ai.system. */
+	/** gen_ai.provider.name / gen_ai.system / ai.model.provider — "openai", … */
 	provider: string;
-	/** Requested model id (falls back to the response model). */
 	model: string;
-	/** "chat", "embeddings", … — from gen_ai.operation.name. */
+	/** gen_ai.operation.name — "chat", "embeddings", "generateText", … */
 	operation: string;
+	inputTokens: number;
+	outputTokens: number;
+	costUsd: number;
+	/** reported = SDK sent the exact cost; estimated = built-in pricing table. */
+	costSource: "reported" | "estimated" | "none";
+	durationMs: number;
 	status: "ok" | "error";
 	/** Provider exception type for failed calls ("RateLimitError", …); "" when ok. */
 	errorType: string;
-	inputTokens: number;
-	outputTokens: number;
-	/** USD. Exact when the SDK reported autter.llm.cost_usd, else estimated. */
-	costUsd: number;
-	costSource: "reported" | "estimated" | "unpriced";
-	/** Opaque end-user id (autter.user_id / AI SDK metadata.userId), if any. */
-	userId: string | null;
-	durationMs: number;
+	/** Opaque end-user id for per-user usage/cost attribution. */
+	userId: string;
+	sessionId: string;
+	attributes: Record<string, string> | null;
 	startedAt: Date;
 }
 

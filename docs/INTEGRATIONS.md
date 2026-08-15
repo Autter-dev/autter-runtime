@@ -39,7 +39,7 @@ initAutterBrowser({
 ```
 
 React render errors: wrap with `<AutterErrorBoundary>` (from
-`@autter/runtime-next`, works in any React app). Vue/Svelte/Angular: call
+`@autter/runtime-next/client`, works in any React app). Vue/Svelte/Angular: call
 `captureException(err)` from the framework's error hook
 (`app.config.errorHandler`, `handleError`, `ErrorHandler`).
 

@@ -1,9 +1,11 @@
 name: Deploy ingester (single server)
 
 # Rolls the otlp-ingester on a self-hosted EC2/Lightsail box running
-# deploy/single-server/docker-compose.yml — SSHes in, refreshes the compose
-# files, pulls the latest image, and restarts. ClickHouse and Caddy are left
-# untouched (only the otlp-ingester service is recreated).
+# deploy/single-server/docker-compose.yml — SSHes in, refreshes
+# docker-compose.yml, pulls the image, and recreates the service. ClickHouse
+# and Caddy are left untouched (only the otlp-ingester service is recreated);
+# in particular the Caddyfile is never overwritten — boxes customize it with
+# extra routes, and a routine ingester roll must not clobber that.
 #
 # Repo VARIABLES required:
 #   SINGLE_SERVER_HOST          the box's IP or hostname
@@ -44,7 +46,6 @@ jobs:
             set -euo pipefail
             cd "${{ vars.SINGLE_SERVER_PATH }}"
             curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/deploy/single-server/docker-compose.yml
-            curl -fsSL -o Caddyfile https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/deploy/single-server/Caddyfile
             docker compose pull otlp-ingester
-            docker compose up -d otlp-ingester caddy
+            docker compose up -d otlp-ingester
             docker image prune -f

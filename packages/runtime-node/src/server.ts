@@ -1,11 +1,11 @@
 import {
+	context,
 	trace,
 	SpanKind,
 	SpanStatusCode,
 	type Attributes,
 	type Context,
 	type Link,
-	type Span,
 	type Tracer,
 } from "@opentelemetry/api";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
@@ -34,7 +34,12 @@ import {
  * auto-instrumentation metapackage. Default data-volume policy:
  *
  *   errors / captured exceptions : 100%  (dedicated always-on error tracer)
- *   LLM / GenAI call spans       : 100%  (cost tracking needs every call)
+ *   named process spans          : 100%  (withProcessSpan, always-on tracer)
+ *   LLM / GenAI call spans       : 100%  (withLlmCall/trackLlmCall/
+ *                                         instrumentLlmClient + an LLM-aware
+ *                                         sampler that keeps GenAI/Vercel-AI
+ *                                         spans — cost tracking needs every
+ *                                         call)
  *   successful traces            : 1%    (head sampling, configurable)
  *   request metrics              : aggregated every 60 s
  *   logs                         : not collected
@@ -70,6 +75,53 @@ export interface AutterServerOptions {
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
 
+/** Token usage (and optionally exact cost) of one LLM call. */
+export interface LlmUsage {
+	inputTokens?: number;
+	outputTokens?: number;
+	/**
+	 * Exact cost in USD, if the provider reports it. Overrides Autter's
+	 * built-in per-model price estimate.
+	 */
+	costUsd?: number;
+}
+
+export interface LlmCallInfo {
+	/** Provider system: "openai", "anthropic", "google", "mistral_ai", … */
+	provider: string;
+	/** Requested model id, e.g. "gpt-5-mini" or "claude-sonnet-4". */
+	model: string;
+	/** "chat" (default), "embeddings", "text_completion", … */
+	operation?: string;
+	/** Opaque end-user id for per-user cost attribution — never an email. */
+	userId?: string;
+	sessionId?: string;
+	/** Extra span attributes (kept under the gen_ai./autter.llm. families). */
+	attributes?: Attributes;
+}
+
+/** Reporting surface handed to the `withLlmCall` callback. */
+export interface LlmCallHandle {
+	/** Report token usage / exact cost from the provider response. */
+	setUsage(usage: LlmUsage): void;
+	/** Exact cost in USD; without it the ingester estimates from its price table. */
+	setCost(usd: number): void;
+	/** Record the model the provider actually served (gen_ai.response.model). */
+	setResponseModel(model: string): void;
+	/** Alias of setResponseModel. */
+	setModel(model: string): void;
+	/** Extra span attributes reported mid-call. */
+	setAttributes(attributes: Attributes): void;
+}
+
+/** A completed LLM call reported after the fact via `trackLlmCall`. */
+export interface TrackedLlmCall extends LlmCallInfo, LlmUsage {
+	/** Wall-clock duration of the call, if measured. */
+	durationMs?: number;
+	/** Pass the thrown error to record the call as failed. */
+	error?: unknown;
+}
+
 export interface AutterServer {
 	/** Report a handled exception. Always recorded (never sampled out). */
 	captureException(error: unknown, attributes?: Attributes): void;
@@ -83,14 +135,51 @@ export interface AutterServer {
 		severity?: AutterSeverity,
 		attributes?: Attributes,
 	): void;
+	/**
+	 * Wrap a named unit of work — a background job, queue consumer, cron
+	 * tick, or DB-heavy call — in an always-recorded span. Unlike regular
+	 * traces these are never head-sampled, so Autter's slow-process monitor
+	 * sees accurate run counts and durations for non-HTTP work. Nested
+	 * instrumented calls run inside the span's context, so slow traces show
+	 * where the time went. Rethrows whatever `fn` throws.
+	 */
+	withProcessSpan<T>(
+		name: string,
+		fn: () => T | Promise<T>,
+		attributes?: Attributes,
+	): Promise<T>;
+	/**
+	 * Wrap one LLM provider call. Always recorded (never head-sampled), so
+	 * Autter's LLM usage/cost dashboards and anomaly monitor see every call.
+	 * Report tokens via the handle once the response arrives; cost is
+	 * estimated from the model id unless `setCost(usd)` (or
+	 * `setUsage({ costUsd })`) reports the exact figure. Rethrows whatever
+	 * `fn` throws (failed calls are recorded with the error attached).
+	 *
+	 *   const reply = await autter.withLlmCall(
+	 *     { provider: "openai", model: "gpt-5-mini", userId: user.id },
+	 *     async (llm) => {
+	 *       const res = await openai.chat.completions.create({ ... });
+	 *       llm.setUsage({
+	 *         inputTokens: res.usage?.prompt_tokens,
+	 *         outputTokens: res.usage?.completion_tokens,
+	 *       });
+	 *       return res;
+	 *     },
+	 *   );
+	 */
+	withLlmCall<T>(
+		info: LlmCallInfo,
+		fn: (llm: LlmCallHandle) => T | Promise<T>,
+	): Promise<T>;
+	/**
+	 * Report an already-completed LLM call — for codepaths where wrapping is
+	 * awkward (queues, callbacks, batch results). Fire-and-forget.
+	 */
+	trackLlmCall(call: TrackedLlmCall): void;
 	/** Flush and stop all exporters. Call on graceful shutdown. */
 	shutdown(): Promise<void>;
 }
-
-let active: AutterServer | null = null;
-/** Always-on provider shared by error, LLM, and process spans — set while a
- * server is active so withLlmCall/withProcessSpan bypass head sampling. */
-let activeAlwaysOnProvider: BasicTracerProvider | null = null;
 
 // Marks a span as an LLM/GenAI call: OTel GenAI semconv attributes, or the
 // span names the Vercel AI SDK and GenAI instrumentations use. Attributes
@@ -101,6 +190,7 @@ const LLM_MARKER_ATTRIBUTES = [
 	"gen_ai.system",
 	"gen_ai.provider.name",
 	"gen_ai.request.model",
+	"autter.llm.provider",
 ];
 
 function isLlmSpan(name: string, attributes: Attributes): boolean {
@@ -108,13 +198,18 @@ function isLlmSpan(name: string, attributes: Attributes): boolean {
 	return LLM_MARKER_ATTRIBUTES.some((key) => attributes[key] !== undefined);
 }
 
-/** Delegates to the regular head sampler except for LLM/GenAI spans, which
- * are always recorded — 1% of model calls is useless for cost tracking. */
+/**
+ * Delegates to the regular head sampler except for LLM/GenAI spans, which
+ * are always recorded: Vercel AI SDK telemetry (`ai.*` spans) and any
+ * GenAI-semconv instrumentation ride the global provider, and at a 1% ratio
+ * they would effectively vanish — useless for cost tracking. LLM calls are
+ * low-volume and high-value; record them all.
+ */
 class LlmAwareSampler implements Sampler {
 	constructor(private readonly delegate: Sampler) {}
 
 	shouldSample(
-		context: Context,
+		ctx: Context,
 		traceId: string,
 		spanName: string,
 		spanKind: SpanKind,
@@ -125,7 +220,7 @@ class LlmAwareSampler implements Sampler {
 			return { decision: SamplingDecision.RECORD_AND_SAMPLED };
 		}
 		return this.delegate.shouldSample(
-			context,
+			ctx,
 			traceId,
 			spanName,
 			spanKind,
@@ -138,6 +233,136 @@ class LlmAwareSampler implements Sampler {
 		return `LlmAware(${this.delegate.toString()})`;
 	}
 }
+
+function llmBaseAttributes(info: LlmCallInfo): Attributes {
+	return {
+		"gen_ai.operation.name": info.operation ?? "chat",
+		// Both keys: gen_ai.system is the pre-1.37 semconv name and what
+		// most tooling still matches on.
+		"gen_ai.provider.name": info.provider,
+		"gen_ai.system": info.provider,
+		"gen_ai.request.model": info.model,
+		...(info.userId ? { "autter.user_id": info.userId } : {}),
+		...(info.sessionId ? { "autter.session_id": info.sessionId } : {}),
+		...info.attributes,
+	};
+}
+
+function usageAttributes(usage: LlmUsage): Attributes {
+	const attrs: Attributes = {};
+	if (usage.inputTokens !== undefined) {
+		attrs["gen_ai.usage.input_tokens"] = Math.max(0, Math.round(usage.inputTokens));
+	}
+	if (usage.outputTokens !== undefined) {
+		attrs["gen_ai.usage.output_tokens"] = Math.max(
+			0,
+			Math.round(usage.outputTokens),
+		);
+	}
+	if (usage.costUsd !== undefined) {
+		attrs["autter.llm.cost_usd"] = usage.costUsd;
+	}
+	return attrs;
+}
+
+async function runLlmSpan<T>(
+	tracer: Tracer,
+	info: LlmCallInfo,
+	fn: (llm: LlmCallHandle) => T | Promise<T>,
+): Promise<T> {
+	const span = tracer.startSpan(`${info.operation ?? "chat"} ${info.model}`, {
+		kind: SpanKind.CLIENT,
+		attributes: llmBaseAttributes(info),
+	});
+	const setResponseModel = (model: string) =>
+		span.setAttribute("gen_ai.response.model", model);
+	const handle: LlmCallHandle = {
+		setUsage: (usage) => span.setAttributes(usageAttributes(usage)),
+		setCost: (usd) => span.setAttribute("autter.llm.cost_usd", usd),
+		setResponseModel,
+		setModel: setResponseModel,
+		setAttributes: (attributes) => span.setAttributes(attributes),
+	};
+	try {
+		const result = await context.with(
+			trace.setSpan(context.active(), span),
+			() => fn(handle),
+		);
+		span.setStatus({ code: SpanStatusCode.OK });
+		return result;
+	} catch (err) {
+		if (err instanceof Error) {
+			span.recordException(err);
+			span.setAttribute("error.type", err.name);
+		}
+		span.setStatus({
+			code: SpanStatusCode.ERROR,
+			message: err instanceof Error ? err.message : String(err),
+		});
+		throw err;
+	} finally {
+		span.end();
+	}
+}
+
+function recordLlmCall(tracer: Tracer, call: TrackedLlmCall): void {
+	const durationMs = Math.max(0, call.durationMs ?? 0);
+	const endTime = new Date();
+	const startTime = new Date(endTime.getTime() - durationMs);
+	const span = tracer.startSpan(
+		`${call.operation ?? "chat"} ${call.model}`,
+		{
+			kind: SpanKind.CLIENT,
+			startTime,
+			attributes: { ...llmBaseAttributes(call), ...usageAttributes(call) },
+		},
+	);
+	if (call.error !== undefined && call.error !== null) {
+		if (call.error instanceof Error) {
+			span.recordException(call.error);
+			span.setAttribute("error.type", call.error.name);
+		}
+		span.setStatus({
+			code: SpanStatusCode.ERROR,
+			message:
+				call.error instanceof Error ? call.error.message : String(call.error),
+		});
+	} else {
+		span.setStatus({ code: SpanStatusCode.OK });
+	}
+	span.end(endTime);
+}
+
+async function runWithSpan<T>(
+	tracer: Tracer,
+	name: string,
+	fn: () => T | Promise<T>,
+	attributes?: Attributes,
+): Promise<T> {
+	const span = tracer.startSpan(name, { attributes });
+	try {
+		const result = await context.with(
+			trace.setSpan(context.active(), span),
+			fn,
+		);
+		span.setStatus({ code: SpanStatusCode.OK });
+		return result;
+	} catch (err) {
+		if (err instanceof Error) span.recordException(err);
+		span.setStatus({
+			code: SpanStatusCode.ERROR,
+			message: err instanceof Error ? err.message : String(err),
+		});
+		throw err;
+	} finally {
+		span.end();
+	}
+}
+
+let active: AutterServer | null = null;
+/** Always-on provider shared by error, LLM, and process spans — set while a
+ * server is active so withLlmCall/withProcessSpan bypass head sampling. */
+let activeAlwaysOnProvider: BasicTracerProvider | null = null;
 
 export function initAutterServer(options: AutterServerOptions): AutterServer {
 	if (active) return active;
@@ -199,6 +424,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		],
 	});
 	const errorTracer = alwaysOnProvider.getTracer("autter-errors");
+	// Process spans share the always-on provider (same OTLP pipe, no extra
+	// exporter) under their own scope name.
+	const processTracer = alwaysOnProvider.getTracer("autter-processes");
+	// LLM calls likewise ride the always-on pipe — usage/cost accounting
+	// cannot tolerate head sampling.
+	const llmTracer = alwaysOnProvider.getTracer("autter-llm");
 
 	function captureException(error: unknown, attributes?: Attributes): void {
 		const isError = error instanceof Error;
@@ -206,12 +437,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		const span = errorTracer.startSpan(isError ? error.name : "Error", {
 			attributes: { "autter.severity": "error", ...attributes },
 		});
-		if (isError) {
+		if (isError && error.stack) {
 			span.recordException(error);
 		} else {
+			// No usable stack — an Error thrown without one, or a non-Error
+			// value. Synthesize the call site (minus this frame) so the
+			// occurrence keeps a code location instead of grouping every
+			// stackless error onto one exception-type + message fingerprint.
+			const stack = new Error().stack
+				?.split("\n")
+				.filter((line, i) => i === 0 || !line.includes("captureException"))
+				.join("\n");
 			span.addEvent("exception", {
-				"exception.type": "Error",
+				"exception.type": isError ? error.name : "Error",
 				"exception.message": message,
+				...(stack ? { "exception.stacktrace": stack } : {}),
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -252,11 +492,30 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			captureException(err, { "autter.unhandled": true });
 			void alwaysOnProvider.forceFlush().catch(() => {});
 		});
+		// The async twin of an uncaught exception: a rejected promise with no
+		// `.catch`. Registering this listener also stops Node's default
+		// `throw` mode from crashing the process, so — unlike the monitor
+		// above — execution continues and the batch exporter flushes on its
+		// normal schedule.
+		process.on("unhandledRejection", (reason: unknown) => {
+			// A non-Error reason has no stack and no real type — usually
+			// injected junk rather than an app fault. Report it as a warning so
+			// it does not open a first-class issue. Mirrors the browser SDK's
+			// `unhandledrejection` handling.
+			captureException(reason, {
+				"autter.unhandled": true,
+				...(reason instanceof Error ? {} : { "autter.severity": "warning" }),
+			});
+		});
 	}
 
 	const server: AutterServer = {
 		captureException,
 		captureMessage,
+		withProcessSpan: (name, fn, attributes) =>
+			runWithSpan(processTracer, name, fn, attributes),
+		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
+		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
 			active = null;
 			activeAlwaysOnProvider = null;
@@ -287,6 +546,42 @@ export function captureException(
 		message: error instanceof Error ? error.message : String(error),
 	});
 	span.end();
+}
+
+/**
+ * Module-level convenience — see AutterServer.withProcessSpan. Before
+ * initAutterServer runs it degrades to the global tracer, where the span is
+ * subject to that provider's own sampling instead of the always-on pipe.
+ */
+export function withProcessSpan<T>(
+	name: string,
+	fn: () => T | Promise<T>,
+	attributes?: Attributes,
+): Promise<T> {
+	if (active) return active.withProcessSpan(name, fn, attributes);
+	return runWithSpan(trace.getTracer("autter-processes"), name, fn, attributes);
+}
+
+/**
+ * Module-level convenience — see AutterServer.withLlmCall. Before
+ * initAutterServer runs it degrades to the global tracer, where the span is
+ * subject to that provider's own sampling instead of the always-on pipe.
+ */
+export function withLlmCall<T>(
+	info: LlmCallInfo,
+	fn: (llm: LlmCallHandle) => T | Promise<T>,
+): Promise<T> {
+	if (active) return active.withLlmCall(info, fn);
+	return runLlmSpan(trace.getTracer("autter-llm"), info, fn);
+}
+
+/** Module-level convenience — see AutterServer.trackLlmCall. */
+export function trackLlmCall(call: TrackedLlmCall): void {
+	if (active) {
+		active.trackLlmCall(call);
+		return;
+	}
+	recordLlmCall(trace.getTracer("autter-llm"), call);
 }
 
 /** Module-level convenience for warnings/info — see AutterServer.captureMessage. */
@@ -323,131 +618,6 @@ function alwaysOnTracer(name: string): Tracer {
 /** @internal Tracer used by the LLM wrappers — always-on once initialised. */
 export function autterLlmTracer(): Tracer {
 	return alwaysOnTracer("autter-llm");
-}
-
-async function runInSpan<T>(span: Span, fn: () => T | Promise<T>): Promise<T> {
-	try {
-		const result = await fn();
-		span.setStatus({ code: SpanStatusCode.OK });
-		return result;
-	} catch (err) {
-		if (err instanceof Error) span.recordException(err);
-		span.setStatus({
-			code: SpanStatusCode.ERROR,
-			message: err instanceof Error ? err.message : String(err),
-		});
-		throw err;
-	} finally {
-		span.end();
-	}
-}
-
-export interface LlmCallOptions {
-	/** Provider id — "openai", "anthropic", "google", … (gen_ai.provider.name). */
-	provider: string;
-	/** Requested model id, e.g. "gpt-5-mini" (gen_ai.request.model). */
-	model: string;
-	/** gen_ai.operation.name — "chat" (default), "embeddings", … */
-	operation?: string;
-	/** Opaque end-user id, never an email (autter.user_id). */
-	userId?: string;
-	/** Extra span attributes. */
-	attributes?: Attributes;
-}
-
-export interface LlmCall {
-	/** Token counts from the provider response — powers cost estimation. */
-	setUsage(usage: { inputTokens?: number; outputTokens?: number }): void;
-	/** Exact cost in USD; without it the ingester estimates from its price table. */
-	setCost(usd: number): void;
-	/** Model the provider actually served (gen_ai.response.model). */
-	setResponseModel(model: string): void;
-	setAttributes(attributes: Attributes): void;
-}
-
-/**
- * Wrap a call to any LLM client so it is recorded as a GenAI span — always
- * exported (never head-sampled), tracked for tokens, latency, cost, and
- * failures. Errors are rethrown after marking the span (and surface as
- * error occurrences, so failing models show up as issues too).
- *
- *   const res = await withLlmCall(
- *     { provider: "openai", model: "gpt-5-mini", userId: user.id },
- *     async (llm) => {
- *       const out = await openai.chat.completions.create({ ... });
- *       llm.setUsage({
- *         inputTokens: out.usage?.prompt_tokens,
- *         outputTokens: out.usage?.completion_tokens,
- *       });
- *       return out;
- *     },
- *   );
- *
- * Vercel AI SDK users don't need this — `experimental_telemetry:
- * { isEnabled: true }` emits gen_ai spans that are captured automatically.
- */
-export async function withLlmCall<T>(
-	call: LlmCallOptions,
-	fn: (llm: LlmCall) => T | Promise<T>,
-): Promise<T> {
-	const operation = call.operation ?? "chat";
-	return alwaysOnTracer("autter-llm").startActiveSpan(
-		`${operation} ${call.model}`,
-		{
-			kind: SpanKind.CLIENT,
-			attributes: {
-				"gen_ai.operation.name": operation,
-				// Both keys: gen_ai.system is the pre-1.37 semconv name and
-				// what most tooling still matches on.
-				"gen_ai.provider.name": call.provider,
-				"gen_ai.system": call.provider,
-				"gen_ai.request.model": call.model,
-				...(call.userId ? { "autter.user_id": call.userId } : {}),
-				...call.attributes,
-			},
-		},
-		(span) =>
-			runInSpan(span, () =>
-				fn({
-					setUsage: (usage) => {
-						if (usage.inputTokens !== undefined) {
-							span.setAttribute(
-								"gen_ai.usage.input_tokens",
-								Math.max(0, Math.round(usage.inputTokens)),
-							);
-						}
-						if (usage.outputTokens !== undefined) {
-							span.setAttribute(
-								"gen_ai.usage.output_tokens",
-								Math.max(0, Math.round(usage.outputTokens)),
-							);
-						}
-					},
-					setCost: (usd) => span.setAttribute("autter.llm.cost_usd", usd),
-					setResponseModel: (model) =>
-						span.setAttribute("gen_ai.response.model", model),
-					setAttributes: (attributes) => span.setAttributes(attributes),
-				}),
-			),
-	);
-}
-
-/**
- * Wrap a recurring unit of non-HTTP work (queue consumer, cron tick, batch
- * job) in an always-recorded span so the slow-process monitor can see it.
- * Use stable, low-cardinality names ("invoice.rebuild"); ids go in
- * attributes. Errors are rethrown after marking the span failed.
- */
-export async function withProcessSpan<T>(
-	name: string,
-	fn: () => T | Promise<T>,
-	attributes?: Attributes,
-): Promise<T> {
-	return alwaysOnTracer("autter-process").startActiveSpan(
-		name,
-		{ kind: SpanKind.INTERNAL, attributes },
-		(span) => runInSpan(span, fn),
-	);
 }
 
 /**

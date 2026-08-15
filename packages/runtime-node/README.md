@@ -61,6 +61,14 @@ autter.captureException(err, { "order.id": "…" });
 // errors, just a lower severity ("fatal" | "error" | "warning" | "info"):
 autter.captureMessage("Legacy /orders lookup used", "warning");
 
+// named process spans — background jobs, queue consumers, cron ticks,
+// DB-heavy calls. Always recorded (never head-sampled), so Autter's
+// slow-process monitor sees accurate run counts and durations, and can
+// flag the process when it is slow and repeating a lot:
+await autter.withProcessSpan("invoice.rebuild", async () => {
+  await rebuildInvoices();
+});
+
 // graceful shutdown flushes exporters:
 await autter.shutdown();
 ```
@@ -75,6 +83,7 @@ Defaults (cheap by construction):
 | Signal | Default |
 | --- | --- |
 | Captured/unhandled exceptions | 100% (dedicated always-on tracer) |
+| `withProcessSpan` spans | 100% (same always-on tracer) |
 | LLM/GenAI call spans | 100% (`llmTracing`, on by default) |
 | Traces | 1% head sampling (`traceSampleRate`) |
 | Request metrics | exported every 60 s |
@@ -152,6 +161,10 @@ model calls surface both as error issues and as `status: "error"` LLM calls.
 Costs are estimated ingest-side from a built-in price table; report exact
 figures with `llm.setCost(usd)` (the `autter.llm.cost_usd` attribute).
 
+Where wrapping is awkward (queues, callbacks, batch results), report after
+the fact with
+`trackLlmCall({ provider, model, inputTokens, outputTokens, durationMs })`.
+
 To verify the pipe end-to-end without calling a real model:
 
 ```ts
@@ -178,3 +191,9 @@ await withProcessSpan("invoice.rebuild", async () => {
 
 Use stable, low-cardinality names; put ids in attributes
 (`withProcessSpan("email.digest", fn, { "user.id": id })`).
+
+Note on the slow-process monitor: Autter flags HTTP routes from the
+unsampled request metrics, so route detection works out of the box. Non-HTTP
+work is only visible where a span exists — relying on 1%-sampled regular
+traces there would undercount ~100×, which is why these spans skip head
+sampling.

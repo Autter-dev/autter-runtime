@@ -42,7 +42,7 @@ you from zero to seeing data in ClickHouse.
 | Handled errors | `captureException(err)` | `captureException(err)` |
 | Usage | session pings + `trackEvent()` | request counts/durations per route (automatic) |
 | Traces | — (by design; no OTel in the browser) | ~1% sampled (configurable) |
-| LLM calls | — | ✅ always recorded (`gen_ai` spans — model, tokens, cost) |
+| LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% (model, tokens, cost) |
 
 **What is never sent:** cookies, DOM content, form values, request/response
 bodies, headers, emails, full URLs with query strings.
@@ -120,22 +120,27 @@ ESM-only app? Use `--import` plus OTel's loader hook (see the
 enriched with `@opentelemetry/instrumentation-express` via the
 `instrumentations` option.
 
-### LLM calls
+### Track LLM usage & cost
 
-`initAutterServer` initialises LLM tracing too — GenAI spans skip the 1%
-sampling, so every model call lands with model, tokens, latency, and cost.
-Three ways to emit them, easiest first:
+`initAutterServer` initialises LLM tracing too: every recognised LLM call
+is recorded 100% (an LLM-aware sampler keeps GenAI spans even at 1% trace
+sampling) with model, tokens, latency, and a USD cost — estimated from a
+built-in price table unless you report the exact figure. Three ways to emit
+calls, easiest first:
 
 ```ts
 // 1. Wrap the client once — OpenAI/Anthropic/Google SDKs, streaming included:
 import { instrumentLlmClient } from "@autter/runtime-node";
 const openai = instrumentLlmClient(new OpenAI());
 
-// 2. Vercel AI SDK — turn on telemetry, nothing else:
+// 2. Vercel AI SDK — turn on its telemetry, nothing else:
 const { text } = await generateText({
   model: openai("gpt-5-mini"),
   prompt,
-  experimental_telemetry: { isEnabled: true, metadata: { userId: user.id } },
+  experimental_telemetry: {
+    isEnabled: true,
+    metadata: { userId: user.id },   // → per-user cost attribution
+  },
 });
 
 // 3. Raw fetch / anything else — wrap the call manually:
@@ -150,6 +155,12 @@ const res = await withLlmCall(
   },
 );
 ```
+
+Or report after the fact with
+`trackLlmCall({ provider, model, inputTokens, outputTokens, durationMs })`.
+Python/Go/etc. need no Autter package: any OTel GenAI instrumentation
+(OpenLLMetry, OpenLIT, the official contrib packages) emitting `gen_ai.*`
+spans through the OTLP endpoint is recognised the same way.
 
 Verify the pipe without spending a token — `emitLlmSelftestTrace()` sends
 one clearly-named fake call, flushes it, and returns the `traceId` to look
@@ -213,7 +224,7 @@ setUser("u_8f2k1");                                     // opaque id — never a
 ```
 
 React render errors don't reach `window.onerror` — add the boundary
-(exported from `@autter/runtime-next`, works in any React app):
+(exported from `@autter/runtime-next/client`, works in any React app):
 
 ```tsx
 <AutterErrorBoundary fallback={<ErrorPage />}>

@@ -118,32 +118,6 @@ export class ClickHouseStore {
 			PARTITION BY toDate(started_at)
 			ORDER BY (org_id, repository_id, trace_id, started_at)
 			TTL toDateTime(started_at) + INTERVAL ${spanTtlDays} DAY`,
-			`CREATE TABLE IF NOT EXISTS ${db}.runtime_llm_calls (
-				org_id           String,
-				repository_id    String,
-				service          LowCardinality(String),
-				environment      LowCardinality(String),
-				release          String DEFAULT '',
-				trace_id         String,
-				span_id          String,
-				provider         LowCardinality(String) DEFAULT 'unknown',
-				model            LowCardinality(String) DEFAULT 'unknown',
-				operation        LowCardinality(String) DEFAULT 'chat',
-				status           LowCardinality(String) DEFAULT 'ok',
-				error_type       String DEFAULT '',
-				input_tokens     UInt64 DEFAULT 0,
-				output_tokens    UInt64 DEFAULT 0,
-				cost_usd         Float64 DEFAULT 0,
-				cost_source      LowCardinality(String) DEFAULT 'unpriced',
-				user_id          String DEFAULT '',
-				duration_ms      Float64,
-				started_at       DateTime64(3, 'UTC'),
-				ingested_at      DateTime64(3, 'UTC') DEFAULT now64(3)
-			)
-			ENGINE = MergeTree
-			PARTITION BY toDate(started_at)
-			ORDER BY (org_id, repository_id, service, started_at)
-			TTL toDateTime(started_at) + INTERVAL ${llmCallTtlDays} DAY`,
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_metrics_1m (
 				org_id           String,
 				repository_id    String,
@@ -161,6 +135,34 @@ export class ClickHouseStore {
 			PARTITION BY toYYYYMM(bucket_at)
 			ORDER BY (org_id, repository_id, service, environment, release, route, bucket_at)
 			TTL bucket_at + INTERVAL ${metricsTtlDays} DAY`,
+			`CREATE TABLE IF NOT EXISTS ${db}.runtime_llm_calls (
+				org_id          String,
+				repository_id   String,
+				service         LowCardinality(String),
+				environment     LowCardinality(String),
+				release         String DEFAULT '',
+				trace_id        String DEFAULT '',
+				span_id         String DEFAULT '',
+				provider        LowCardinality(String) DEFAULT '',
+				model           LowCardinality(String) DEFAULT '',
+				operation       LowCardinality(String) DEFAULT '',
+				input_tokens    UInt64 DEFAULT 0,
+				output_tokens   UInt64 DEFAULT 0,
+				cost_usd        Float64 DEFAULT 0,
+				cost_source     LowCardinality(String) DEFAULT 'none',
+				duration_ms     Float64 DEFAULT 0,
+				status          LowCardinality(String) DEFAULT 'ok',
+				error_type      String DEFAULT '',
+				user_id         String DEFAULT '',
+				session_id      String DEFAULT '',
+				attributes      String DEFAULT '{}' CODEC(ZSTD(1)),
+				started_at      DateTime64(3, 'UTC'),
+				ingested_at     DateTime64(3, 'UTC') DEFAULT now64(3)
+			)
+			ENGINE = MergeTree
+			PARTITION BY toDate(started_at)
+			ORDER BY (org_id, repository_id, started_at)
+			TTL toDateTime(started_at) + INTERVAL ${llmCallTtlDays} DAY`,
 		];
 	}
 
@@ -194,12 +196,7 @@ export class ClickHouseStore {
 				if (applied.has(migration.id)) continue;
 				for (const statement of migration.statements) {
 					await client.command({
-						query: statement
-							.replaceAll("{db}", db)
-							.replaceAll(
-								"{llm_call_ttl_days}",
-								String(this.config.llmCallTtlDays),
-							),
+						query: statement.replaceAll("{db}", db),
 					});
 				}
 				await client.insert({
@@ -309,14 +306,16 @@ export class ClickHouseStore {
 				provider: c.provider,
 				model: c.model,
 				operation: c.operation,
-				status: c.status,
-				error_type: c.errorType,
 				input_tokens: Math.max(0, Math.round(c.inputTokens)),
 				output_tokens: Math.max(0, Math.round(c.outputTokens)),
 				cost_usd: c.costUsd,
 				cost_source: c.costSource,
-				user_id: c.userId ?? "",
 				duration_ms: c.durationMs,
+				status: c.status,
+				error_type: c.errorType,
+				user_id: c.userId,
+				session_id: c.sessionId,
+				attributes: JSON.stringify(c.attributes ?? {}),
 				started_at: c.startedAt.toISOString(),
 			})),
 		});

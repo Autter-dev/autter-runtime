@@ -1,76 +1,134 @@
 /**
- * Built-in LLM price table — USD per 1M tokens, `[prefix, input, output]`,
- * matched against a normalised model id (longest prefix wins). Used only
- * when a call doesn't report its exact cost via the `autter.llm.cost_usd`
- * span attribute; rows written from here are marked `cost_source =
- * 'estimated'` so consumers can tell the two apart.
+ * Built-in USD price estimates for common LLM models, per 1M tokens.
  *
- * Deliberately compact: the common OpenAI / Anthropic / Google models.
- * Prices drift — PRs updating this table are welcome.
+ * Estimation happens once at ingest so cost queries never re-price history
+ * (a price change should not rewrite last month's spend). The table is a
+ * best-effort default: SDKs can always report the exact figure via the
+ * `autter.llm.cost_usd` span attribute, which takes precedence.
+ *
+ * Matching is longest-prefix-wins on a normalised model id (lowercased,
+ * provider/router prefixes stripped), so `claude-sonnet-4-20250514` matches
+ * the `claude-sonnet-4` entry and gateway ids like `openai/gpt-5-mini`
+ * match `gpt-5-mini`. Unknown models estimate to 0 with costSource "none" —
+ * tokens are still tracked, and dashboards can flag unpriced volume.
  */
-const PRICES_PER_MILLION: Array<[prefix: string, input: number, output: number]> = [
+
+interface ModelPricing {
+	/** Normalised model-id prefix. */
+	prefix: string;
+	/** USD per 1M input tokens. */
+	inputPerMTok: number;
+	/** USD per 1M output tokens. */
+	outputPerMTok: number;
+}
+
+// Keep more-specific prefixes ABOVE their generic fallback (the list is
+// scanned for the longest match, but equal-length ties resolve by order).
+const MODEL_PRICING: ModelPricing[] = [
 	// OpenAI
-	["gpt-5-nano", 0.05, 0.4],
-	["gpt-5-mini", 0.25, 2],
-	["gpt-5", 1.25, 10],
-	["gpt-4.1-nano", 0.1, 0.4],
-	["gpt-4.1-mini", 0.4, 1.6],
-	["gpt-4.1", 2, 8],
-	["gpt-4o-mini", 0.15, 0.6],
-	["gpt-4o", 2.5, 10],
-	["o3-mini", 1.1, 4.4],
-	["o3", 2, 8],
-	["o4-mini", 1.1, 4.4],
-	["text-embedding-3-small", 0.02, 0],
-	["text-embedding-3-large", 0.13, 0],
+	{ prefix: "gpt-5-nano", inputPerMTok: 0.05, outputPerMTok: 0.4 },
+	{ prefix: "gpt-5-mini", inputPerMTok: 0.25, outputPerMTok: 2 },
+	{ prefix: "gpt-5", inputPerMTok: 1.25, outputPerMTok: 10 },
+	{ prefix: "gpt-4.1-nano", inputPerMTok: 0.1, outputPerMTok: 0.4 },
+	{ prefix: "gpt-4.1-mini", inputPerMTok: 0.4, outputPerMTok: 1.6 },
+	{ prefix: "gpt-4.1", inputPerMTok: 2, outputPerMTok: 8 },
+	{ prefix: "gpt-4o-mini", inputPerMTok: 0.15, outputPerMTok: 0.6 },
+	{ prefix: "gpt-4o", inputPerMTok: 2.5, outputPerMTok: 10 },
+	{ prefix: "o3-mini", inputPerMTok: 1.1, outputPerMTok: 4.4 },
+	{ prefix: "o3", inputPerMTok: 2, outputPerMTok: 8 },
+	{ prefix: "o4-mini", inputPerMTok: 1.1, outputPerMTok: 4.4 },
+	{ prefix: "text-embedding-3-small", inputPerMTok: 0.02, outputPerMTok: 0 },
+	{ prefix: "text-embedding-3-large", inputPerMTok: 0.13, outputPerMTok: 0 },
 	// Anthropic
-	["claude-opus-4-5", 5, 25],
-	["claude-opus-4", 15, 75],
-	["claude-sonnet-4", 3, 15],
-	["claude-haiku-4-5", 1, 5],
-	["claude-3-7-sonnet", 3, 15],
-	["claude-3-5-haiku", 0.8, 4],
-	["claude-3-haiku", 0.25, 1.25],
+	{ prefix: "claude-opus-4-5", inputPerMTok: 5, outputPerMTok: 25 },
+	{ prefix: "claude-opus-4-8", inputPerMTok: 5, outputPerMTok: 25 },
+	{ prefix: "claude-opus-4", inputPerMTok: 15, outputPerMTok: 75 },
+	{ prefix: "claude-sonnet-4", inputPerMTok: 3, outputPerMTok: 15 },
+	{ prefix: "claude-sonnet", inputPerMTok: 3, outputPerMTok: 15 },
+	{ prefix: "claude-haiku-4", inputPerMTok: 1, outputPerMTok: 5 },
+	{ prefix: "claude-3-5-haiku", inputPerMTok: 0.8, outputPerMTok: 4 },
+	{ prefix: "claude-haiku", inputPerMTok: 1, outputPerMTok: 5 },
 	// Google
-	["gemini-2.5-flash-lite", 0.1, 0.4],
-	["gemini-2.5-flash", 0.3, 2.5],
-	["gemini-2.5-pro", 1.25, 10],
-	["gemini-2.0-flash-lite", 0.075, 0.3],
-	["gemini-2.0-flash", 0.1, 0.4],
+	{ prefix: "gemini-2.5-pro", inputPerMTok: 1.25, outputPerMTok: 10 },
+	{ prefix: "gemini-2.5-flash-lite", inputPerMTok: 0.1, outputPerMTok: 0.4 },
+	{ prefix: "gemini-2.5-flash", inputPerMTok: 0.3, outputPerMTok: 2.5 },
+	{ prefix: "gemini-2.0-flash", inputPerMTok: 0.1, outputPerMTok: 0.4 },
+	// DeepSeek
+	{ prefix: "deepseek-chat", inputPerMTok: 0.27, outputPerMTok: 1.1 },
+	{ prefix: "deepseek-reasoner", inputPerMTok: 0.55, outputPerMTok: 2.19 },
+	// Mistral
+	{ prefix: "mistral-large", inputPerMTok: 2, outputPerMTok: 6 },
+	{ prefix: "mistral-small", inputPerMTok: 0.1, outputPerMTok: 0.3 },
+	// Meta (typical hosted-inference rates)
+	{ prefix: "llama-3.1-405b", inputPerMTok: 3, outputPerMTok: 3 },
+	{ prefix: "llama-3.1-70b", inputPerMTok: 0.6, outputPerMTok: 0.6 },
+	{ prefix: "llama-3.1-8b", inputPerMTok: 0.1, outputPerMTok: 0.1 },
+	{ prefix: "llama-3.3-70b", inputPerMTok: 0.6, outputPerMTok: 0.6 },
+	// xAI
+	{ prefix: "grok-4", inputPerMTok: 3, outputPerMTok: 15 },
+	{ prefix: "grok-3-mini", inputPerMTok: 0.3, outputPerMTok: 0.5 },
+	{ prefix: "grok-3", inputPerMTok: 3, outputPerMTok: 15 },
 ];
 
-// Longest prefix first so "gpt-5-mini" never falls through to "gpt-5".
-const SORTED = [...PRICES_PER_MILLION].sort(
-	(a, b) => b[0].length - a[0].length,
-);
+// Router/provider prefixes seen in the wild ahead of the bare model id:
+// gateway ids ("openai/gpt-5"), Azure deployments ("azure/gpt-4o"), Bedrock
+// ("us.anthropic.claude-sonnet-4-...-v1:0"), Vertex ("models/gemini-2.5-pro").
+const STRIP_PREFIXES = [
+	"openai/",
+	"azure/",
+	"anthropic/",
+	"google/",
+	"vertex_ai/",
+	"vertex/",
+	"bedrock/",
+	"groq/",
+	"xai/",
+	"mistral/",
+	"meta/",
+	"meta-llama/",
+	"deepseek/",
+	"models/",
+	"us.",
+	"eu.",
+	"apac.",
+	"anthropic.",
+	"amazon.",
+];
 
-/**
- * Model ids arrive in provider-specific shapes: "gpt-4o-2024-08-06",
- * "models/gemini-2.5-pro", "openai/gpt-4o" (routers), "us.anthropic.claude-…"
- * (Bedrock). Lowercase and strip any path/namespace prefix; date suffixes
- * are handled by prefix matching.
- */
-function normalizeModelId(model: string): string {
+export function normalizeModelId(model: string): string {
 	let id = model.trim().toLowerCase();
-	const slash = id.lastIndexOf("/");
-	if (slash !== -1) id = id.slice(slash + 1);
-	// Bedrock-style "us.anthropic.claude-sonnet-4-…" → "claude-sonnet-4-…"
-	const match = id.match(/(?:^|\.)((?:gpt|o\d|claude|gemini|text-embedding)[^.]*)$/);
-	if (match?.[1]) id = match[1];
+	let stripped = true;
+	while (stripped) {
+		stripped = false;
+		for (const prefix of STRIP_PREFIXES) {
+			if (id.length > prefix.length && id.startsWith(prefix)) {
+				id = id.slice(prefix.length);
+				stripped = true;
+			}
+		}
+	}
 	return id;
 }
 
-/** Estimated USD cost for a call, or null when the model isn't in the table. */
+/**
+ * Estimate the USD cost of one call, or null when the model is unknown.
+ * Rates are per 1M tokens; token counts of 0 legitimately price to 0.
+ */
 export function estimateLlmCostUsd(
 	model: string,
 	inputTokens: number,
 	outputTokens: number,
 ): number | null {
+	if (!model) return null;
 	const id = normalizeModelId(model);
-	for (const [prefix, input, output] of SORTED) {
-		if (id.startsWith(prefix)) {
-			return (inputTokens * input + outputTokens * output) / 1_000_000;
-		}
+	let best: ModelPricing | null = null;
+	for (const entry of MODEL_PRICING) {
+		if (!id.startsWith(entry.prefix)) continue;
+		if (!best || entry.prefix.length > best.prefix.length) best = entry;
 	}
-	return null;
+	if (!best) return null;
+	const cost =
+		(inputTokens / 1_000_000) * best.inputPerMTok +
+		(outputTokens / 1_000_000) * best.outputPerMTok;
+	return Math.round(cost * 1e6) / 1e6;
 }

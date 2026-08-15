@@ -1,0 +1,50 @@
+.github/workflows/deploy-single-server.yml
+  s_65c766296fdac0::t_91beab6160fb03 50
+  s_65c766296fdac0::t_9c57f21b821db2 4-8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "0dc7ae19bcaf66d246ac3e586be1ceadfb541d36",
+  "branch": "posthog/deploy-preserve-caddyfile",
+  "prompts": {
+    "s_65c766296fdac0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a0059b-b03d-751f-bd46-48c7b0453d1b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:60a6bf24df1521c40cfc2613758db2cf23cb582a8d11c2e46b519ef9dd9184e7",
+      "total_additions": 6,
+      "total_deletions": 5,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_65c766296fdac0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a0059b-b03d-751f-bd46-48c7b0453d1b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:60a6bf24df1521c40cfc2613758db2cf23cb582a8d11c2e46b519ef9dd9184e7",
+      "stats": {
+        "total_additions": 6,
+        "total_deletions": 5,
+        "accepted_lines": 6,
+        "overriden_lines": 0,
+        "files": {
+          ".github/workflows/deploy-single-server.yml": {
+            "total_additions": 6,
+            "total_deletions": 5,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

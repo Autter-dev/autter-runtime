@@ -1,0 +1,124 @@
+packages/runtime-node/src/server.ts
+  s_99c18f5d0842f5::t_4e421bfe4f9adb 2,37-42,78-124,138-179,193,201-207,212,223,237-366,427-432,440,443-450,452,454,495-509,515-518,551-584
+packages/otlp-ingester/src/llm-pricing.ts
+  s_99c18f5d0842f5::t_14ff471fa60282 2,4-13,15-27,29-41,43-50,52-70,73-96,98,100-109,113-116,122,124-127,129-133
+packages/runtime-next/src/index.ts
+  s_99c18f5d0842f5::t_4e421bfe4f9adb 4-7,10
+packages/otlp-ingester/src/migrations.ts
+  s_99c18f5d0842f5::t_4e421bfe4f9adb 86-89,94-115,119-120
+packages/otlp-ingester/src/normalize-otlp.ts
+  s_99c18f5d0842f5::t_4e421bfe4f9adb 1,297-304,306-309,312-315
+packages/runtime-node/src/index.ts
+  s_99c18f5d0842f5::t_4e421bfe4f9adb 12-13,18-21
+packages/runtime-next/src/server.ts
+  s_99c18f5d0842f5::t_701a827dd37944 42-50
+packages/otlp-ingester/src/llm.ts
+  s_99c18f5d0842f5::t_96595df0f98628 107-108
+  s_99c18f5d0842f5::t_00081c1469ac8e 59-60
+  s_99c18f5d0842f5::t_d601369c58d386 158-161
+  s_99c18f5d0842f5::t_f6cd4776971c15 89-95
+packages/otlp-ingester/src/clickhouse.ts
+  s_99c18f5d0842f5::t_4e421bfe4f9adb 138-165,199,314-318
+packages/otlp-ingester/src/types.ts
+  s_99c18f5d0842f5::t_4e421bfe4f9adb 85-89,97,100,105-106,108-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "53242259cb03943a99d7f15c7a32524578d8656c",
+  "branch": "posthog/llm-tracing",
+  "prompts": {
+    "s_99c18f5d0842f5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a006a2-26ef-7563-880c-9568b67de61d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:fe479b19abd0b3f2d73191cfce4eb5954a2dd94645ce6de03201656a10f9435d",
+      "total_additions": 545,
+      "total_deletions": 492,
+      "accepted_lines": 545,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_99c18f5d0842f5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a006a2-26ef-7563-880c-9568b67de61d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:fe479b19abd0b3f2d73191cfce4eb5954a2dd94645ce6de03201656a10f9435d",
+      "stats": {
+        "total_additions": 545,
+        "total_deletions": 492,
+        "accepted_lines": 545,
+        "overriden_lines": 0,
+        "files": {
+          "packages/otlp-ingester/src/clickhouse.ts": {
+            "total_additions": 34,
+            "total_deletions": 35,
+            "accepted_lines": 34,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/llm-pricing.ts": {
+            "total_additions": 113,
+            "total_deletions": 55,
+            "accepted_lines": 113,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/llm.ts": {
+            "total_additions": 15,
+            "total_deletions": 2,
+            "accepted_lines": 15,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/migrations.ts": {
+            "total_additions": 28,
+            "total_deletions": 27,
+            "accepted_lines": 28,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/normalize-otlp.ts": {
+            "total_additions": 17,
+            "total_deletions": 148,
+            "accepted_lines": 17,
+            "overriden_lines": 0
+          },
+          "packages/otlp-ingester/src/types.ts": {
+            "total_additions": 16,
+            "total_deletions": 14,
+            "accepted_lines": 16,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 5,
+            "total_deletions": 70,
+            "accepted_lines": 5,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/server.ts": {
+            "total_additions": 3,
+            "total_deletions": 0,
+            "accepted_lines": 3,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/index.ts": {
+            "total_additions": 6,
+            "total_deletions": 3,
+            "accepted_lines": 6,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/server.ts": {
+            "total_additions": 308,
+            "total_deletions": 138,
+            "accepted_lines": 308,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

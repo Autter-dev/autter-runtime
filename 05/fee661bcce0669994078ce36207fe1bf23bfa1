@@ -1,0 +1,105 @@
+packages/runtime-node/src/llm-instrument.ts
+  s_493feb443518cc::t_8c6b0499ad0a04 212,216,267,274,285,299
+  s_493feb443518cc::t_fcdcd8d2d183b8 1-211,213-215,217-266,268-273,275-284,286-298,300-309
+packages/runtime-next/src/index.ts
+  s_493feb443518cc::t_546d6c67805e81 59,62
+packages/runtime-node/src/server.ts
+  s_493feb443518cc::t_127c72ec83e434 323-327
+docs/GETTING-STARTED.md
+  s_493feb443518cc::t_93a532e20f0132 127,130-134,141
+README.md
+  s_493feb443518cc::t_407115a9418077 70,73-76,79-82
+packages/runtime-node/src/index.ts
+  s_493feb443518cc::t_35d8b405524749 20-23
+packages/runtime-node/README.md
+  s_493feb443518cc::t_096eae8a3e088e 132
+  s_493feb443518cc::t_65d0a33e2ea7b6 104-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "autter_version": "development:1.6.7",
+  "base_commit_sha": "05fee661bcce0669994078ce36207fe1bf23bfa1",
+  "branch": "posthog/llm-tracing",
+  "prompts": {
+    "s_493feb443518cc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a005ea-a5cd-77ca-942e-ed93589fdcbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:85f65c65d6e830d220d786f339e1faa983f476e02d29551676bef018fbc29f17",
+      "total_additions": 436,
+      "total_deletions": 98,
+      "accepted_lines": 355,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_493feb443518cc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01a005ea-a5cd-77ca-942e-ed93589fdcbe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sagnik Ghosh <sagnik@worqhat.com>",
+      "messages_url": "cas:85f65c65d6e830d220d786f339e1faa983f476e02d29551676bef018fbc29f17",
+      "stats": {
+        "total_additions": 436,
+        "total_deletions": 98,
+        "accepted_lines": 355,
+        "overriden_lines": 0,
+        "files": {
+          "README.md": {
+            "total_additions": 9,
+            "total_deletions": 13,
+            "accepted_lines": 9,
+            "overriden_lines": 0
+          },
+          "docs/GETTING-STARTED.md": {
+            "total_additions": 7,
+            "total_deletions": 3,
+            "accepted_lines": 7,
+            "overriden_lines": 0
+          },
+          "e2e-instrument-test.mjs": {
+            "total_additions": 76,
+            "total_deletions": 76,
+            "accepted_lines": 0,
+            "overriden_lines": 0
+          },
+          "packages/runtime-next/src/index.ts": {
+            "total_additions": 2,
+            "total_deletions": 0,
+            "accepted_lines": 2,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/README.md": {
+            "total_additions": 19,
+            "total_deletions": 1,
+            "accepted_lines": 19,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/index.ts": {
+            "total_additions": 4,
+            "total_deletions": 0,
+            "accepted_lines": 4,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/llm-instrument.ts": {
+            "total_additions": 314,
+            "total_deletions": 5,
+            "accepted_lines": 309,
+            "overriden_lines": 0
+          },
+          "packages/runtime-node/src/server.ts": {
+            "total_additions": 5,
+            "total_deletions": 0,
+            "accepted_lines": 5,
+            "overriden_lines": 0
+          }
+        }
+      }
+    }
+  }
+}

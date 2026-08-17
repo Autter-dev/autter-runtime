@@ -19,10 +19,9 @@ import {
 	type OtlpTraceRequest,
 } from "./normalize-otlp.js";
 import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
+import { SinkForwarder } from "./sink.js";
 import type {
 	IngestContext,
-	RuntimeLlmCall,
-	RuntimeMetricPoint,
 	RuntimeOccurrence,
 	RuntimeOccurrenceInput,
 } from "./types.js";
@@ -30,10 +29,16 @@ import type {
 export interface IngesterApp {
 	app: Express;
 	store: ClickHouseStore;
+	/** Present when AUTTER_SINK_URL is configured. */
+	sink: SinkForwarder | null;
 }
 
 export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	const store = new ClickHouseStore(config);
+	// Fingerprinted occurrences feed the consumer's issue grouping, metric
+	// points feed the request/error-rate rollups, LLM calls feed spend
+	// watching. Delivery is at-least-once with bounded retries — see sink.ts.
+	const sink = config.sinkUrl ? new SinkForwarder(config) : null;
 	const keys = new KeyResolver(config);
 	const serverRateLimiter = new RateLimiter(config.rateLimitPerMinute);
 	const clientRateLimiter = new RateLimiter(config.clientRateLimitPerMinute);
@@ -84,15 +89,18 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	});
 
 	app.get("/healthz", async (_req, res) => {
+		const sinkStats = sink ? { sink: sink.stats() } : {};
 		if (!store.configured) {
-			res.status(200).json({ ok: true, clickhouse: "unconfigured" });
+			res.status(200).json({ ok: true, clickhouse: "unconfigured", ...sinkStats });
 			return;
 		}
 		try {
 			const ok = await store.ping();
-			res.status(ok ? 200 : 503).json({ ok, clickhouse: ok ? "up" : "down" });
+			res
+				.status(ok ? 200 : 503)
+				.json({ ok, clickhouse: ok ? "up" : "down", ...sinkStats });
 		} catch {
-			res.status(503).json({ ok: false, clickhouse: "down" });
+			res.status(503).json({ ok: false, clickhouse: "down", ...sinkStats });
 		}
 	});
 
@@ -159,56 +167,6 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}));
 	}
 
-	/**
-	 * Best-effort forward for the cloud dashboard: fingerprinted occurrences
-	 * feed issue grouping, metric points feed the request/error-rate rollups,
-	 * LLM calls feed spend/anomaly watching.
-	 */
-	function forwardToSink(
-		ctx: IngestContext,
-		occurrences: RuntimeOccurrence[],
-		metricPoints: RuntimeMetricPoint[] = [],
-		llmCalls: RuntimeLlmCall[] = [],
-	) {
-		if (!config.sinkUrl) return;
-		if (
-			occurrences.length === 0 &&
-			metricPoints.length === 0 &&
-			llmCalls.length === 0
-		) {
-			return;
-		}
-		void fetch(config.sinkUrl, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				...(config.sinkToken
-					? { authorization: `Bearer ${config.sinkToken}` }
-					: {}),
-			},
-			body: JSON.stringify({
-				version: 1,
-				orgId: ctx.orgId,
-				repositoryId: ctx.repositoryId,
-				occurrences: occurrences.map((o) => ({
-					...o,
-					occurredAt: o.occurredAt.toISOString(),
-				})),
-				metrics: metricPoints.map((p) => ({
-					...p,
-					bucketAt: p.bucketAt.toISOString(),
-				})),
-				llmCalls: llmCalls.map((c) => ({
-					...c,
-					startedAt: c.startedAt.toISOString(),
-				})),
-			}),
-			signal: AbortSignal.timeout(10_000),
-		}).catch((err) => {
-			console.warn("sink forward failed (non-fatal):", err?.message ?? err);
-		});
-	}
-
 	function storageError(res: Response, err: unknown): void {
 		console.error("clickhouse write failed:", err);
 		res.status(503).json({ error: "storage unavailable, retry later" });
@@ -252,7 +210,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, fingerprinted, metricPoints, llmCalls);
+		sink?.enqueue(ctx, fingerprinted, metricPoints, llmCalls);
 		otlpSuccess(req, res);
 	});
 
@@ -277,7 +235,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, [], metricPoints);
+		sink?.enqueue(ctx, [], metricPoints);
 		otlpSuccess(req, res);
 	});
 
@@ -313,7 +271,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, fingerprinted, metricPoints);
+		sink?.enqueue(ctx, fingerprinted, metricPoints);
 		res.status(202).json({ accepted: fingerprinted.length });
 	});
 
@@ -339,5 +297,5 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		},
 	);
 
-	return { app, store };
+	return { app, store, sink };
 }

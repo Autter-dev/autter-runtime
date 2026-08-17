@@ -2,7 +2,7 @@ import { loadConfig } from "./config.js";
 import { createIngesterApp } from "./server.js";
 
 const config = loadConfig();
-const { app, store } = createIngesterApp(config);
+const { app, store, sink } = createIngesterApp(config);
 
 const server = app.listen(config.port, () => {
 	console.log(
@@ -23,6 +23,18 @@ if (store.configured) {
 
 async function shutdown(signal: string) {
 	console.log(`${signal} received, shutting down`);
+	if (sink) {
+		const pending = sink.pendingCount();
+		sink.stop();
+		if (pending > 0) {
+			// The retry buffer is memory-only; everything in it is already in
+			// ClickHouse, so the consumer's reconciliation replays it.
+			console.warn(
+				`${pending} sink batch(es) undelivered at shutdown — ` +
+					`recoverable via ClickHouse replay`,
+			);
+		}
+	}
 	server.close(() => {
 		void store.close().finally(() => process.exit(0));
 	});
@@ -34,4 +46,5 @@ process.on("SIGINT", () => void shutdown("SIGINT"));
 
 export { createIngesterApp } from "./server.js";
 export { loadConfig } from "./config.js";
+export { SinkForwarder, type SinkStats } from "./sink.js";
 export * from "./types.js";

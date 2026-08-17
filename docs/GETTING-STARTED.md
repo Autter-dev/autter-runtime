@@ -81,7 +81,10 @@ Full config reference: [`packages/otlp-ingester`](../packages/otlp-ingester).
 npm install @autter/runtime-node
 ```
 
-Create `instrument.cjs` — it must load **before** your app:
+In **your application's repository** — a separate codebase from the
+`autter-runtime` repo you cloned in step 2 — create `instrument.cjs` next to
+the entry point of the service you are instrumenting (one file per service in
+a monorepo). It must load **before** your app:
 
 ```js
 const { initAutterServer } = require("@autter/runtime-node");

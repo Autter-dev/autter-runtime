@@ -8,7 +8,10 @@ services:
     ulimits:
       nofile: 262144
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      # 127.0.0.1, not localhost: in-container localhost resolves to ::1, but
+      # ClickHouse's IPv6 bind can silently fail (listen_try) — e.g. on Docker
+      # Desktop for Mac — leaving only 0.0.0.0 listening and the check refused.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
       interval: 5s
       retries: 10
 

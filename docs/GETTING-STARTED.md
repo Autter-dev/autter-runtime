@@ -58,6 +58,11 @@ cd autter-runtime
 docker compose up   # ClickHouse + ingester on :4318, key "dev-key"
 ```
 
+> **That's all the clone is for.** It runs the ingester — you never add
+> code to this checkout. Every step from here on (installing packages,
+> creating `instrument.cjs`, …) happens in **your application's
+> repository**, the app you want to monitor.
+
 For real deployments, configure keys via env (or point
 `AUTTER_KEY_VALIDATOR_URL` at your own key service):
 
@@ -78,11 +83,15 @@ Full config reference: [`packages/otlp-ingester`](../packages/otlp-ingester).
 
 ## 3. Instrument your backend
 
+In **your app's repository** (not the `autter-runtime` checkout from
+step 2):
+
 ```bash
 npm install @autter/runtime-node
 ```
 
-Create `instrument.cjs` — it must load **before** your app:
+Create `instrument.cjs` in your app's root, next to its entry point — it
+must load **before** your app:
 
 ```js
 const { initAutterServer } = require("@autter/runtime-node");

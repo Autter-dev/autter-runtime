@@ -41,7 +41,7 @@ you from zero to seeing data in ClickHouse.
 | Unhandled errors / rejections | ✅ automatic | ✅ automatic |
 | Handled errors | `captureException(err)` | `captureException(err)` |
 | Usage | session pings + `trackEvent()` | request counts/durations per route (automatic) |
-| Traces | — (by design; no OTel in the browser) | ~1% sampled (configurable) |
+| Traces | — (by design; no OTel in the browser) | ~1% sampled, plus **every erroring trace kept in full** |
 | LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% (model, tokens, cost) |
 
 **What is never sent:** cookies, DOM content, form values, request/response
@@ -110,8 +110,10 @@ node --require ./instrument.cjs server.js
 ```
 
 That alone gives you: every incoming HTTP request traced-and-sampled,
-request/error/duration rollups per route, and crashes captured. For
-handled errors:
+request/error/duration rollups per route, crashes captured, and the full
+trace of any request that errors — erroring traces are retained even when
+the sampler wouldn't have kept them, so every issue keeps the trace that
+explains it. For handled errors:
 
 ```js
 const { captureException } = require("@autter/runtime-node");
@@ -312,7 +314,9 @@ clickhouse-client --password dev`.
 - [ ] `release` is wired to your git SHA in **both** frontend and backend —
       it's what powers regression detection ("broke in release X").
 - [ ] Keep trace sampling at ~1% (`traceSampleRate`) — errors are always
-      captured regardless.
+      captured regardless, and the full trace of an erroring request is
+      retained (`retainTracesOnError`, on by default), so cheap sampling
+      doesn't cost you debugging context.
 - [ ] The relay route keeps its built-in per-IP rate limit (or your WAF
       covers it: `perIpRateLimit: false`).
 - [ ] Direct browser ingest: your CSP includes

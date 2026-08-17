@@ -316,8 +316,12 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				if (llmCall) llmCalls.push(llmCall);
 
 				// Server spans fold into 1-minute usage rollups so traffic is
-				// tracked even when the metrics pipeline isn't wired.
-				if (kind === "server") {
+				// tracked even when the metrics pipeline isn't wired. Spans
+				// exported by error-linked tail retention are skipped: the SDK
+				// ships those at ~100% alongside a metrics pipeline that already
+				// counts every request, so folding them in would double-count
+				// erroring routes.
+				if (kind === "server" && attrs.get("autter.tail_retained") !== "true") {
 					addToRollup(rollups, {
 						service: resource.service,
 						environment: resource.environment,

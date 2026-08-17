@@ -243,13 +243,23 @@ tries, ~8 min by default) on network errors, timeouts, 408/429, and 5xx.
 Other 4xx responses mean the consumer rejected the batch — those drop
 immediately and are logged. The retry buffer is bounded
 (`SINK_MAX_BUFFERED_BATCHES` / `SINK_MAX_BUFFERED_MB`); on overflow the
-oldest batches drop first, each logged with its signal time range.
+oldest batch of the tenant holding the most buffered bytes drops first —
+one flooding org cannot evict everyone else — and every drop is logged
+with its signal time range. A single batch larger than the whole buffer
+is dropped alone rather than flushing the queue. Retrying batches keep
+their enqueue-age position, so eviction order stays oldest-first even
+under sustained failure.
 
 Consequences for consumers:
 
 - **Deduplicate on `batchId`** (and per-occurrence on `occurrenceId`):
   a batch can arrive more than once — e.g. the consumer processed it but
   the 2xx response was lost, so the ingester retried.
+- **`occurrenceId` is content-derived, not random.** An OTLP exporter
+  that retries an export (after a 503 from a partially-failed ClickHouse
+  write, or a lost 2xx) reproduces the same ids, so per-occurrence dedupe
+  holds across transport retries too — and duplicated ClickHouse rows
+  share an id, so replays and row counts should use distinct ids.
 - **ClickHouse is the recovery source.** Every forwarded signal was
   written to ClickHouse before it was queued (ingest returns 503
   otherwise), so a crashed ingester, an exhausted retry budget, or a
@@ -260,3 +270,7 @@ Consequences for consumers:
 - `/healthz` exposes delivery counters (`sink.queued`, `sink.delivered`,
   `sink.retried`, `sink.droppedOverflow`, `sink.droppedPermanent`,
   `sink.lastFailureAt`, …) for missed-batch monitoring and alerting.
+  Failure detail is a fixed category (`sink.lastFailureReason`:
+  `timeout`, `connection_error`, `http_<status>`, `error`) — raw
+  transport errors stay in server logs, never in the unauthenticated
+  health response.

@@ -130,5 +130,5 @@ initialisation in the Node SDKs:
 | `/v1/traces`, `/v1/metrics` OTLP/HTTP | OTLP spec-stable |
 | `/v1/browser` payload (`version: 1`) | additive-only changes |
 | ClickHouse table schemas | additive-only; TTLs configurable via env |
-| Sink webhook payload (`version: 1`) | additive-only changes (`llmCalls`, then `batchId`, added additively) |
-| Sink webhook delivery | at-least-once with bounded retries — consumers must dedupe on `batchId`/`occurrenceId` |
+| Sink webhook payload (`version: 1`) | additive-only (`llmCalls`, `batchId`) |
+| Sink webhook delivery | at-least-once; dedupe on `batchId`/`occurrenceId` |

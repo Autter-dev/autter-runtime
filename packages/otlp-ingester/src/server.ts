@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import express, {
 	type Express,
 	type Request,
@@ -7,7 +6,11 @@ import express, {
 import { KeyResolver, RateLimiter } from "./auth.js";
 import { ClickHouseStore } from "./clickhouse.js";
 import type { IngesterConfig } from "./config.js";
-import { deriveFields, fingerprintOccurrence } from "./fingerprint.js";
+import {
+	deriveFields,
+	fingerprintOccurrence,
+	occurrenceIdFor,
+} from "./fingerprint.js";
 import {
 	browserPayloadSchema,
 	normalizeBrowserPayload,
@@ -156,15 +159,24 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		return ctx;
 	}
 
+	/** Ids are content-derived (occurrenceIdFor), NOT random: an exporter
+	 * that retries a batch — after a 503 from a partially-failed ClickHouse
+	 * write, or when only our 2xx got lost — must produce the same ids, so
+	 * the sink consumer's per-occurrence dedupe holds across transport
+	 * retries and duplicated ClickHouse rows stay identifiable. */
 	function fingerprintAll(
+		ctx: IngestContext,
 		inputs: RuntimeOccurrenceInput[],
 	): RuntimeOccurrence[] {
-		return inputs.map((input) => ({
-			...input,
-			occurrenceId: randomUUID(),
-			fingerprint: fingerprintOccurrence(input),
-			...deriveFields(input),
-		}));
+		return inputs.map((input, index) => {
+			const fingerprint = fingerprintOccurrence(input);
+			return {
+				...input,
+				occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
+				fingerprint,
+				...deriveFields(input),
+			};
+		});
 	}
 
 	function storageError(res: Response, err: unknown): void {
@@ -198,7 +210,15 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}
 		const { occurrences, spans, metricPoints, llmCalls } =
 			normalizeTraces(request);
-		const fingerprinted = fingerprintAll(occurrences);
+		const fingerprinted = fingerprintAll(ctx, occurrences);
+		// ClickHouse has no cross-table transaction, so these four inserts can
+		// partially commit. Recovery boundary: any failure → 503 → the exporter
+		// retries the whole batch. Deterministic occurrence ids make the retry
+		// idempotent downstream (consumer dedupes per id; duplicate ClickHouse
+		// rows share an id, and the consumer's reconciler counts distinct ids),
+		// and nothing reaches the sink queue unless every insert succeeded —
+		// signals persisted by a partial write are picked up by the consumer's
+		// ClickHouse reconciliation instead.
 		try {
 			await Promise.all([
 				store.insertOccurrences(ctx, fingerprinted),
@@ -261,7 +281,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		const { occurrences, metricPoints } = normalizeBrowserPayload(parsed.data);
-		const fingerprinted = fingerprintAll(occurrences);
+		const fingerprinted = fingerprintAll(ctx, occurrences);
 		try {
 			await Promise.all([
 				store.insertOccurrences(ctx, fingerprinted),

@@ -94,6 +94,48 @@ export function fingerprintOccurrence(input: RuntimeOccurrenceInput): string {
 }
 
 /**
+ * Deterministic per-occurrence identity (as opposed to the fingerprint,
+ * which is the per-ISSUE identity shared by every occurrence of a defect).
+ *
+ * The id must be a pure function of the signal, not a fresh UUID per
+ * request: OTLP exporters retry whole batches (after a 503 from a partial
+ * ClickHouse write, or when only the 2xx was lost), and both the ClickHouse
+ * rows and the sink consumer's dedupe ledger key on this id — random ids
+ * would turn every transport retry into a duplicate error downstream.
+ *
+ * Identical signals within one batch stay distinct through their batch
+ * position, which is stable across retries because exporters re-send the
+ * same serialized batch. Residual coalescing risk: two occurrences from
+ * DIFFERENT requests that share the same millisecond, message, and batch
+ * position while carrying neither a traceId nor a sessionId — accepted, as
+ * server signals virtually always carry a traceId and browser signals a
+ * sessionId.
+ */
+export function occurrenceIdFor(
+	scope: { orgId: string; repositoryId: string },
+	input: RuntimeOccurrenceInput,
+	fingerprint: string,
+	batchIndex: number,
+): string {
+	const parts = [
+		"v1",
+		scope.orgId,
+		scope.repositoryId,
+		fingerprint,
+		String(input.occurredAt.getTime()),
+		input.traceId ?? "",
+		input.sessionId ?? "",
+		input.message.slice(0, 1000),
+		String(batchIndex),
+	];
+	// NUL-joined so a free-text field can never bleed into its neighbour.
+	return createHash("sha256")
+		.update(parts.join("\u0000"))
+		.digest("hex")
+		.slice(0, 32);
+}
+
+/**
  * Derived, aggregation-ready fields, computed from the SAME normalisers the
  * fingerprint hashes — so a stored fingerprint can always be explained by
  * the stored columns next to it. Severity is deliberately excluded from

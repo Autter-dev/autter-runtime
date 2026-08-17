@@ -54,10 +54,10 @@ The validator webhook may return the same extra fields:
 | `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` |
 | `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId}` (60 s cache) |
 | `AUTTER_KEY_VALIDATOR_TOKEN` | — | Bearer token sent to the validator |
-| `AUTTER_SINK_URL` | — | Webhook receiving fingerprinted occurrences for issue grouping (at-least-once delivery — see `docs/ARCHITECTURE.md`) |
+| `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once (`docs/ARCHITECTURE.md`) |
 | `AUTTER_SINK_TOKEN` | — | Bearer token sent to the sink |
-| `SINK_MAX_ATTEMPTS` | `12` | Delivery attempts per sink batch (1 s → 60 s backoff, ~8 min total) |
-| `SINK_MAX_BUFFERED_BATCHES` | `1000` | Sink retry buffer cap (batches); oldest drop first, logged with their time range |
+| `SINK_MAX_ATTEMPTS` | `12` | Delivery attempts per batch (1–60 s backoff) |
+| `SINK_MAX_BUFFERED_BATCHES` | `1000` | Retry buffer cap; oldest drops are logged |
 | `SINK_MAX_BUFFERED_MB` | `64` | Sink retry buffer cap (memory) |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |

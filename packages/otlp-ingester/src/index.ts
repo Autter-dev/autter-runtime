@@ -30,8 +30,7 @@ async function shutdown(signal: string) {
 			// The retry buffer is memory-only; everything in it is already in
 			// ClickHouse, so the consumer's reconciliation replays it.
 			console.warn(
-				`${pending} sink batch(es) undelivered at shutdown — ` +
-					`recoverable via ClickHouse replay`,
+				`${pending} sink batch(es) undelivered at shutdown — recoverable via ClickHouse replay`,
 			);
 		}
 	}
@@ -46,5 +45,5 @@ process.on("SIGINT", () => void shutdown("SIGINT"));
 
 export { createIngesterApp } from "./server.js";
 export { loadConfig } from "./config.js";
-export { SinkForwarder, type SinkStats } from "./sink.js";
+export { SinkForwarder, type SinkStats, type SinkTuning } from "./sink.js";
 export * from "./types.js";

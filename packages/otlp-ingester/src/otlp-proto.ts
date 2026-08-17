@@ -67,7 +67,7 @@ message NumberDataPoint {
   sfixed64 as_int = 6;
   repeated KeyValue attributes = 7;
 }
-message Histogram { repeated HistogramDataPoint data_points = 1; }
+message Histogram { repeated HistogramDataPoint data_points = 1; int32 aggregation_temporality = 2; }
 message HistogramDataPoint {
   fixed64 time_unix_nano = 3;
   fixed64 count = 4;

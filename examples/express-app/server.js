@@ -38,6 +38,10 @@ app.post("/api/autter-runtime", createBrowserRelayHandler({ apiKey, endpoint }))
 
 app.get("/api/ok", (_req, res) => res.json({ ok: true }));
 
+// Param route: shows up in runtime_metrics_1m as "/api/users/:id" — one
+// rollup row per route template, not one per user id.
+app.get("/api/users/:id", (req, res) => res.json({ id: req.params.id }));
+
 app.get("/api/boom", (_req, res) => {
 	try {
 		throw new TypeError("cannot read properties of undefined (reading 'total')");

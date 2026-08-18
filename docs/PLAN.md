@@ -31,7 +31,9 @@ Self-hostable ingest service, `packages/otlp-ingester`.
   with a 60-second in-process cache.
 - **Sink webhook** (optional): fingerprinted occurrences are forwarded to
   `AUTTER_SINK_URL` so a backend can do issue grouping/alerting in Postgres.
-  The ingester itself only writes ClickHouse.
+  The ingester itself only writes ClickHouse. Delivery is at-least-once
+  (in-memory retry buffer, `batchId` for consumer dedupe); ClickHouse
+  remains the replay source for anything the buffer cannot save.
 - Payload cap (default 1 MB), per-key fixed-window rate limit, graceful
   degrade when ClickHouse is unreachable (503 on ingest, never crash).
 
@@ -128,4 +130,5 @@ initialisation in the Node SDKs:
 | `/v1/traces`, `/v1/metrics` OTLP/HTTP | OTLP spec-stable |
 | `/v1/browser` payload (`version: 1`) | additive-only changes |
 | ClickHouse table schemas | additive-only; TTLs configurable via env |
-| Sink webhook payload (`version: 1`) | additive-only changes (`llmCalls` added additively) |
+| Sink webhook payload (`version: 1`) | additive-only (`llmCalls`, `batchId`) |
+| Sink webhook delivery | at-least-once; dedupe on `batchId`/`occurrenceId` |

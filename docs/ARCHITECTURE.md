@@ -135,7 +135,22 @@ Span-level:
   (query-stripped).
 - `status_code` from `http.response.status_code` / `http.status_code`.
 - Server spans aggregate into 1-minute usage rollups: `request_count`,
-  `error_count` (status ≥ 500 or span error), `duration_sum_ms`.
+  `error_count` (status ≥ 500 or span error), `duration_sum_ms`. Rollup
+  rows key on the **normalized** route (id-like path segments → `:id`), so
+  span-fed and metric-fed rows for the same endpoint sum together and the
+  SummingMergeTree key space stays bounded; `runtime_metrics_1m` route
+  values are templates, never raw paths. (Metric-fed rollups get their
+  route from `http.route` on `http.server.duration` /
+  `http.server.request.duration` data points — OTel never puts raw URL
+  paths on metrics, so the SDK must set the route template;
+  `@autter/runtime-node` does this for Express out of the box.)
+- Double-count guards on `runtime_metrics_1m`: resources marked
+  `autter.metrics_wired` (set by `@autter/runtime-node`, which always
+  exports request metrics) do NOT get span-fed rollups — their spans are
+  head-sampled, the metric feed is exact. And only **delta**-temporality
+  histograms fold into rollups: cumulative points repeat lifetime totals
+  every export, which a SummingMergeTree would re-add each minute;
+  cumulative senders are covered by the span-fed fallback instead.
 - GenAI spans (`gen_ai.*` attributes; Vercel AI SDK inner `.doGenerate` /
   `.doStream` / `.doEmbed` spans) additionally produce a `runtime_llm_calls`
   row — provider, model, operation, token counts, and cost
@@ -206,6 +221,7 @@ When `AUTTER_SINK_URL` is set, each ingest batch POSTs:
 ```json
 {
   "version": 1,
+  "batchId": "5f0c9e7a-…",
   "orgId": "...",
   "repositoryId": "...",
   "occurrences": [
@@ -234,5 +250,42 @@ Batches also carry `metrics` (1-minute usage rollup points) and `llmCalls`
 `userId`, `status`, `startedAt`) whenever the ingest produced them — same
 shapes as their ClickHouse rows, additive to the v1 payload.
 
-Delivery is best-effort fire-and-forget (the ingester is not a queue); the
-consumer should treat ClickHouse as the recovery source for missed batches.
+### Delivery semantics
+
+Delivery is **at-least-once within a process lifetime**: batches queue in
+memory and retry with exponential backoff (1 s → 60 s, `SINK_MAX_ATTEMPTS`
+tries, ~8 min by default) on network errors, timeouts, 408/429, and 5xx.
+Other 4xx responses mean the consumer rejected the batch — those drop
+immediately and are logged. The retry buffer is bounded
+(`SINK_MAX_BUFFERED_BATCHES` / `SINK_MAX_BUFFERED_MB`); on overflow the
+oldest batch of the tenant holding the most buffered bytes drops first —
+one flooding org cannot evict everyone else — and every drop is logged
+with its signal time range. A single batch larger than the whole buffer
+is dropped alone rather than flushing the queue. Retrying batches keep
+their enqueue-age position, so eviction order stays oldest-first even
+under sustained failure.
+
+Consequences for consumers:
+
+- **Deduplicate on `batchId`** (and per-occurrence on `occurrenceId`):
+  a batch can arrive more than once — e.g. the consumer processed it but
+  the 2xx response was lost, so the ingester retried.
+- **`occurrenceId` is content-derived, not random.** An OTLP exporter
+  that retries an export (after a 503 from a partially-failed ClickHouse
+  write, or a lost 2xx) reproduces the same ids, so per-occurrence dedupe
+  holds across transport retries too — and duplicated ClickHouse rows
+  share an id, so replays and row counts should use distinct ids.
+- **ClickHouse is the recovery source.** Every forwarded signal was
+  written to ClickHouse before it was queued (ingest returns 503
+  otherwise), so a crashed ingester, an exhausted retry budget, or a
+  buffer overflow never loses data — the consumer reconciles by replaying
+  the affected time range from `runtime_error_occurrences` /
+  `runtime_metrics_1m`. Occurrence rows carry the same `occurrence_id`
+  the sink payload does, so replays deduplicate exactly.
+- `/healthz` exposes delivery counters (`sink.queued`, `sink.delivered`,
+  `sink.retried`, `sink.droppedOverflow`, `sink.droppedPermanent`,
+  `sink.lastFailureAt`, …) for missed-batch monitoring and alerting.
+  Failure detail is a fixed category (`sink.lastFailureReason`:
+  `timeout`, `connection_error`, `http_<status>`, `error`) — raw
+  transport errors stay in server logs, never in the unauthenticated
+  health response.

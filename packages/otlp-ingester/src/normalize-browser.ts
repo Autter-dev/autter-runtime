@@ -76,7 +76,7 @@ export function normalizeBrowserPayload(
 	function bumpRollup(
 		route: string,
 		occurredAt: Date,
-		field: "sessionCount" | "requestCount",
+		counts: { requestCount?: number; errorCount?: number; sessionCount?: number },
 	): void {
 		const bucketAt = new Date(
 			Math.floor(occurredAt.getTime() / 60_000) * 60_000,
@@ -84,7 +84,9 @@ export function normalizeBrowserPayload(
 		const key = `${route} ${bucketAt.getTime()}`;
 		const existing = rollups.get(key);
 		if (existing) {
-			existing[field] += 1;
+			existing.requestCount += counts.requestCount ?? 0;
+			existing.errorCount += counts.errorCount ?? 0;
+			existing.sessionCount += counts.sessionCount ?? 0;
 			return;
 		}
 		rollups.set(key, {
@@ -93,10 +95,10 @@ export function normalizeBrowserPayload(
 			release: payload.release ?? null,
 			route,
 			bucketAt,
-			requestCount: field === "requestCount" ? 1 : 0,
-			errorCount: 0,
+			requestCount: counts.requestCount ?? 0,
+			errorCount: counts.errorCount ?? 0,
 			durationSumMs: 0,
-			sessionCount: field === "sessionCount" ? 1 : 0,
+			sessionCount: counts.sessionCount ?? 0,
 		});
 	}
 
@@ -104,7 +106,7 @@ export function normalizeBrowserPayload(
 		const occurredAt = new Date(event.timestamp);
 
 		if (event.type === "session_start") {
-			bumpRollup("", occurredAt, "sessionCount");
+			bumpRollup("", occurredAt, { sessionCount: 1 });
 			continue;
 		}
 
@@ -112,16 +114,26 @@ export function normalizeBrowserPayload(
 		// request_count increment on the synthetic route "event:checkout_opened".
 		if (event.type === "track_event") {
 			const name = (event.name ?? event.message ?? "").slice(0, 200);
-			if (name) bumpRollup(`event:${name}`, occurredAt, "requestCount");
+			if (name) bumpRollup(`event:${name}`, occurredAt, { requestCount: 1 });
 			continue;
 		}
 
+		const severity = asSeverity(
+			event.severity,
+			TYPE_TO_SEVERITY[event.type] ?? "error",
+		);
+		// The browser has no request stream, so error/message events are the
+		// only usage signal for many pages — count each as an event (and, for
+		// fatal/error severity, an error event). Without this, a page that
+		// only reports errors groups issues whose dashboards all read 0.
+		bumpRollup(event.route ? (event.route.split("?")[0] ?? "") : "", occurredAt, {
+			requestCount: 1,
+			errorCount: severity === "fatal" || severity === "error" ? 1 : 0,
+		});
+
 		occurrences.push({
 			source: "browser",
-			severity: asSeverity(
-				event.severity,
-				TYPE_TO_SEVERITY[event.type] ?? "error",
-			),
+			severity,
 			service: payload.service,
 			environment: payload.environment,
 			release: payload.release ?? null,

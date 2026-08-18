@@ -135,7 +135,22 @@ Span-level:
   (query-stripped).
 - `status_code` from `http.response.status_code` / `http.status_code`.
 - Server spans aggregate into 1-minute usage rollups: `request_count`,
-  `error_count` (status ≥ 500 or span error), `duration_sum_ms`.
+  `error_count` (status ≥ 500 or span error), `duration_sum_ms`. Rollup
+  rows key on the **normalized** route (id-like path segments → `:id`), so
+  span-fed and metric-fed rows for the same endpoint sum together and the
+  SummingMergeTree key space stays bounded; `runtime_metrics_1m` route
+  values are templates, never raw paths. (Metric-fed rollups get their
+  route from `http.route` on `http.server.duration` /
+  `http.server.request.duration` data points — OTel never puts raw URL
+  paths on metrics, so the SDK must set the route template;
+  `@autter/runtime-node` does this for Express out of the box.)
+- Double-count guards on `runtime_metrics_1m`: resources marked
+  `autter.metrics_wired` (set by `@autter/runtime-node`, which always
+  exports request metrics) do NOT get span-fed rollups — their spans are
+  head-sampled, the metric feed is exact. And only **delta**-temporality
+  histograms fold into rollups: cumulative points repeat lifetime totals
+  every export, which a SummingMergeTree would re-add each minute;
+  cumulative senders are covered by the span-fed fallback instead.
 - GenAI spans (`gen_ai.*` attributes; Vercel AI SDK inner `.doGenerate` /
   `.doStream` / `.doEmbed` spans) additionally produce a `runtime_llm_calls`
   row — provider, model, operation, token counts, and cost

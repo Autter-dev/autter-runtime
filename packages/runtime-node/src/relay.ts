@@ -3,9 +3,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 /**
  * Same-origin browser relay. The browser tracker posts to a route on the
  * customer's own backend; this handler validates + sanitises the payload,
- * attaches the private ingest key server-side, forwards asynchronously to
- * the Autter ingester, and returns 202 immediately. The key never reaches
- * the browser, and there is no CORS/CSP surface.
+ * attaches the private ingest key server-side, and returns success only after
+ * the Autter ingester accepts the batch. The key never reaches the browser,
+ * and there is no CORS/CSP surface.
  */
 
 export interface RelayOptions {
@@ -80,6 +80,7 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 		if (typeof e.type !== "string" || !EVENT_TYPES.has(e.type)) return null;
 		if (typeof e.timestamp !== "string") return null;
 		events.push({
+			...(typeof e.id === "string" ? { id: e.id.slice(0, 64) } : {}),
 			type: e.type,
 			timestamp: e.timestamp,
 			...(typeof e.severity === "string" && SEVERITIES.has(e.severity)
@@ -122,21 +123,25 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 	};
 }
 
-function forward(payload: object, opts: RelayOptions): void {
+async function forward(payload: object, opts: RelayOptions): Promise<number> {
 	const url = `${(opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "")}/v1/browser`;
-	void fetch(url, {
-		method: "POST",
-		headers: {
-			"content-type": "application/json",
-			authorization: `Bearer ${opts.apiKey}`,
-		},
-		body: JSON.stringify(payload),
-		signal: AbortSignal.timeout(10_000),
-	}).catch((err) => {
+	try {
+		const response = await fetch(url, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				authorization: `Bearer ${opts.apiKey}`,
+			},
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(10_000),
+		});
+		return response.status;
+	} catch (err) {
 		(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(
 			err,
 		);
-	});
+		return 503;
+	}
 }
 
 /**
@@ -185,8 +190,8 @@ export function createBrowserRelayFetchHandler(
 				status: 400,
 			});
 		}
-		forward(payload, opts);
-		return new Response(null, { status: 202 });
+		const status = await forward(payload, opts);
+		return new Response(null, { status: status >= 200 && status < 300 ? 202 : status });
 	};
 }
 
@@ -220,14 +225,14 @@ export function createBrowserRelayHandler(
 		}
 	}
 
-	function handleParsed(raw: unknown, res: ServerResponse): void {
+	async function handleParsed(raw: unknown, res: ServerResponse): Promise<void> {
 		const payload = sanitizeBrowserPayload(raw);
 		if (!payload) {
 			respond(res, 400, { error: "invalid payload" });
 			return;
 		}
-		forward(payload, opts);
-		respond(res, 202);
+		const status = await forward(payload, opts);
+		respond(res, status >= 200 && status < 300 ? 202 : status);
 	}
 
 	return (req, res) => {
@@ -255,7 +260,7 @@ export function createBrowserRelayHandler(
 					return;
 				}
 			}
-			handleParsed(raw, res);
+			void handleParsed(raw, res);
 			return;
 		}
 		const chunks: Buffer[] = [];
@@ -274,7 +279,7 @@ export function createBrowserRelayHandler(
 		req.on("end", () => {
 			if (aborted) return;
 			try {
-				handleParsed(JSON.parse(Buffer.concat(chunks).toString()), res);
+				void handleParsed(JSON.parse(Buffer.concat(chunks).toString()), res);
 			} catch {
 				respond(res, 400, { error: "invalid json" });
 			}

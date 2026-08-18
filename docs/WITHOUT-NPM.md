@@ -113,6 +113,7 @@ toolchain:
 function reportError(err) {
   const body = JSON.stringify({
     version: 1,
+    clientKey: AUTTER_CLIENT_KEY,
     service: "marketing-site",
     environment: "production",
     events: [{
@@ -126,9 +127,8 @@ function reportError(err) {
       // severity: "warning",                  // for type: "message"
     }],
   });
-  // Client keys can't set headers via sendBeacon — use the ?key= param:
   navigator.sendBeacon(
-    "https://otlp.autter.dev/v1/browser?key=" + AUTTER_CLIENT_KEY,
+    "https://otlp.autter.dev/v1/browser",
     new Blob([body], { type: "text/plain" }),
   );
 }

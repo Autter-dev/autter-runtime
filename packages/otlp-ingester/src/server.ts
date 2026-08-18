@@ -112,6 +112,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		req: Request,
 		res: Response,
 		surface: "otlp" | "browser",
+		bodyKey?: string,
 	): Promise<IngestContext | null> {
 		// A storage-less ingester must refuse, not accept-and-drop: exporters
 		// retry on 503, so telemetry survives a misconfigured deploy.
@@ -119,7 +120,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			res.status(503).json({ error: "storage not configured" });
 			return null;
 		}
-		const key = keys.extractKey(req);
+		const key = bodyKey || keys.extractKey(req);
 		if (!key) {
 			res.status(401).json({ error: "missing ingest key" });
 			return null;
@@ -127,6 +128,12 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		const ctx = await keys.resolve(key);
 		if (!ctx) {
 			res.status(401).json({ error: "invalid ingest key" });
+			return null;
+		}
+		if (bodyKey && ctx.scope !== "client") {
+			res
+				.status(403)
+				.json({ error: "payload keys must be publishable client keys" });
 			return null;
 		}
 		if (ctx.scope === "client") {
@@ -260,8 +267,6 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	});
 
 	app.post("/v1/browser", async (req, res) => {
-		const ctx = await authenticate(req, res, "browser");
-		if (!ctx) return;
 		let body: unknown = req.body;
 		if (typeof body === "string") {
 			// text/plain from a cross-origin sendBeacon — see CORS note above.
@@ -272,6 +277,13 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				return;
 			}
 		}
+		const bodyKey =
+			typeof body === "object" && body !== null && "clientKey" in body &&
+			typeof (body as { clientKey?: unknown }).clientKey === "string"
+				? (body as { clientKey: string }).clientKey
+				: undefined;
+		const ctx = await authenticate(req, res, "browser", bodyKey);
+		if (!ctx) return;
 		const parsed = browserPayloadSchema.safeParse(body);
 		if (!parsed.success) {
 			res.status(400).json({

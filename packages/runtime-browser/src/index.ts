@@ -33,11 +33,28 @@ export interface AutterBrowserOptions {
 	sessionTracking?: boolean;
 	/** Last-chance hook: mutate or drop (return null) an event before send. */
 	beforeSend?: (event: BrowserEvent) => BrowserEvent | null;
+	/** Maximum events accepted during one page lifecycle (default 200). */
+	maxEvents?: number;
+	/** Maximum copies of the same error accepted per page (default 20). */
+	maxDuplicateErrors?: number;
+	/** Called when an event is discarded by a safety limit or delivery failure. */
+	onDrop?: (count: number, reason: BrowserDropReason) => void;
+}
+
+export type BrowserDropReason = "session_cap" | "duplicate" | "delivery_failed";
+
+export interface BrowserDeliveryStats {
+	accepted: number;
+	delivered: number;
+	beaconAccepted: number;
+	dropped: number;
+	pending: number;
 }
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
 
 export interface BrowserEvent {
+	id?: string;
 	type:
 		| "exception"
 		| "unhandled_rejection"
@@ -62,6 +79,8 @@ const MAX_QUEUE = 10;
 const FLUSH_INTERVAL_MS = 5000;
 const ERROR_FLUSH_DELAY_MS = 500;
 const MAX_EVENTS_PER_SESSION = 200;
+const MAX_DUPLICATE_ERRORS = 20;
+const MAX_RETRIES = 3;
 
 let opts: Required<Pick<AutterBrowserOptions, "endpoint" | "service">> &
 	AutterBrowserOptions;
@@ -70,7 +89,13 @@ let sessionId = "";
 let userId: string | undefined;
 let globalContext: Record<string, unknown> | undefined;
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
-let sentCount = 0;
+let acceptedCount = 0;
+let deliveredCount = 0;
+let beaconAcceptedCount = 0;
+let droppedCount = 0;
+let sending = false;
+let inFlightCount = 0;
+const duplicateCounts = new Map<string, number>();
 let initialized = false;
 
 function uid(): string {
@@ -107,12 +132,37 @@ function route(): string {
 }
 
 function enqueue(event: BrowserEvent, urgent?: boolean): void {
-	if (!initialized || sentCount + queue.length >= MAX_EVENTS_PER_SESSION) return;
+	if (!initialized) return;
 	if (opts.beforeSend) {
 		const mapped = opts.beforeSend(event);
 		if (!mapped) return;
 		event = mapped;
 	}
+	if (acceptedCount >= Math.max(1, opts.maxEvents ?? MAX_EVENTS_PER_SESSION)) {
+		recordDrop(1, "session_cap");
+		return;
+	}
+	if (
+		event.type === "exception" ||
+		event.type === "unhandled_rejection" ||
+		event.type === "message"
+	) {
+		const signature = [
+			event.type,
+			event.errorType,
+			event.message,
+			event.stack?.split("\n", 2)[1],
+			event.route,
+		].join("|");
+		const count = duplicateCounts.get(signature) ?? 0;
+		if (count >= Math.max(1, opts.maxDuplicateErrors ?? MAX_DUPLICATE_ERRORS)) {
+			recordDrop(1, "duplicate");
+			return;
+		}
+		duplicateCounts.set(signature, count + 1);
+	}
+	event.id ||= uid();
+	acceptedCount++;
 	queue.push(event);
 	if (queue.length >= MAX_QUEUE) {
 		flush();
@@ -121,6 +171,25 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	} else {
 		schedule(FLUSH_INTERVAL_MS);
 	}
+}
+
+function recordDrop(count: number, reason: BrowserDropReason): void {
+	droppedCount += count;
+	try {
+		opts.onDrop?.(count, reason);
+	} catch {
+		// Diagnostics must never break the host application.
+	}
+}
+
+export function getDeliveryStats(): BrowserDeliveryStats {
+	return {
+		accepted: acceptedCount,
+		delivered: deliveredCount,
+		beaconAccepted: beaconAcceptedCount,
+		dropped: droppedCount,
+		pending: queue.length + inFlightCount,
+	};
 }
 
 function schedule(delay: number): void {
@@ -133,6 +202,7 @@ function baseEvent(
 	message: string,
 ): BrowserEvent {
 	return {
+		id: uid(),
 		type,
 		timestamp: new Date().toISOString(),
 		message: String(message).slice(0, 4000),
@@ -143,52 +213,81 @@ function baseEvent(
 	};
 }
 
-/** Send everything queued, now. Uses sendBeacon when available so a closing
- * page still delivers; falls back to keepalive fetch. */
+/** Send queued events now, retaining and retrying a batch until acknowledged. */
 export function flush(): void {
 	if (flushTimer !== undefined) {
 		clearTimeout(flushTimer);
 		flushTimer = undefined;
 	}
-	if (!initialized || queue.length === 0) return;
-	const events = queue.splice(0, queue.length);
-	sentCount += events.length;
-	const body = JSON.stringify({
+	if (!initialized || queue.length === 0 || sending) return;
+	const events = queue.splice(0, MAX_QUEUE);
+	sending = true;
+	inFlightCount = events.length;
+	void deliver(events, 0);
+}
+
+function payload(events: BrowserEvent[]): string {
+	return JSON.stringify({
 		version: 1,
+		...(opts.clientKey ? { clientKey: opts.clientKey } : {}),
 		sessionId,
 		service: opts.service,
 		environment: opts.environment || "production",
 		...(opts.release ? { release: opts.release } : {}),
 		events,
 	});
-	// Direct mode: key as query param (sendBeacon can't set headers) and
-	// text/plain content type (CORS-safelisted — no preflight round-trip).
+}
+
+async function deliver(events: BrowserEvent[], attempt: number): Promise<void> {
+	const body = payload(events);
 	const direct = !!opts.clientKey;
-	const url = direct
-		? opts.endpoint +
-			(opts.endpoint.indexOf("?") < 0 ? "?" : "&") +
-			"key=" +
-			encodeURIComponent(opts.clientKey!)
-		: opts.endpoint;
 	const contentType = direct ? "text/plain" : "application/json";
 	try {
+		const response = await fetch(opts.endpoint, {
+			method: "POST",
+			body,
+			headers: { "content-type": contentType },
+			keepalive: true,
+			credentials: "omit",
+		});
+		if (!response.ok) throw new Error(`HTTP ${response.status}`);
+		deliveredCount += events.length;
+		sending = false;
+		inFlightCount = 0;
+		if (queue.length > 0) flush();
+	} catch {
+		if (attempt < MAX_RETRIES) {
+			setTimeout(() => void deliver(events, attempt + 1), 500 * 2 ** attempt);
+			return;
+		}
+		sending = false;
+		inFlightCount = 0;
+		recordDrop(events.length, "delivery_failed");
+		if (queue.length > 0) flush();
+	}
+}
+
+/** Last-chance unload delivery. Beacon acceptance is not a server ack. */
+function flushBeacon(): void {
+	if (!initialized || queue.length === 0) return;
+	const events = queue.splice(0, queue.length);
+	const body = payload(events);
+	const contentType = opts.clientKey ? "text/plain" : "application/json";
+	try {
 		if (
-			typeof navigator !== "undefined" &&
-			navigator.sendBeacon &&
-			navigator.sendBeacon(url, new Blob([body], { type: contentType }))
+			navigator.sendBeacon?.(
+				opts.endpoint,
+				new Blob([body], { type: contentType }),
+			)
 		) {
+			beaconAcceptedCount += events.length;
 			return;
 		}
 	} catch {
-		// fall through to fetch
+		// Fall through to keepalive fetch.
 	}
-	void fetch(url, {
-		method: "POST",
-		body,
-		headers: { "content-type": contentType },
-		keepalive: true,
-		credentials: "omit",
-	}).catch(() => {});
+	queue.unshift(...events);
+	flush();
 }
 
 export function captureException(
@@ -290,9 +389,9 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 	);
 
 	document.addEventListener("visibilitychange", () => {
-		if (document.visibilityState === "hidden") flush();
+		if (document.visibilityState === "hidden") flushBeacon();
 	});
-	window.addEventListener("pagehide", flush);
+	window.addEventListener("pagehide", flushBeacon);
 
 	if (options.sessionTracking !== false) {
 		enqueue(baseEvent("session_start", ""));

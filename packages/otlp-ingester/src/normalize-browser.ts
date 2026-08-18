@@ -40,6 +40,8 @@ const browserEventSchema = z.object({
 
 export const browserPayloadSchema = z.object({
 	version: z.literal(1),
+	/** Publishable direct-browser key; stripped before normalization/storage. */
+	clientKey: z.string().min(1).max(500).optional(),
 	sessionId: z.string().max(100).optional(),
 	service: z.string().min(1).max(200),
 	environment: z.string().min(1).max(100),

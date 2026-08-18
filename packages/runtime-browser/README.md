@@ -65,15 +65,17 @@ initAutterBrowser({
 | `trackEvent(name, props?)` | Usage counter; aggregated server-side per minute |
 | `setUser(id)` | **Opaque id only** — never an email |
 | `setContext(ctx)` | Attached to subsequent events |
-| `flush()` | Force-send the queue (also runs on page hide/unload) |
+| `flush()` | Force-send the queue with acknowledged, bounded retries |
+| `getDeliveryStats()` | Accepted, acknowledged, beacon-accepted, pending, and dropped counts |
 
 ## Batching & delivery
 
-Events queue and flush at 10 events / 5 s / page hidden / `pagehide` /
-manually; errors trigger a fast flush (500 ms). Delivery uses
-`navigator.sendBeacon` (JSON blob) with a `fetch(keepalive)` fallback, so
-events survive page navigation. A hard cap of 200 events per session
-prevents error loops from flooding.
+Events queue and flush at 10 events / 5 s / manually; errors trigger a fast
+flush (500 ms). Ordinary delivery uses acknowledged `fetch(keepalive)` with
+three bounded retries. Page hide/unload uses `navigator.sendBeacon` as a
+last chance. A configurable 200-event page-lifecycle cap and 20-copy
+per-error cap prevent loops from flooding; `onDrop` and `getDeliveryStats()`
+make every SDK-side drop observable.
 
 ## What is never sent
 

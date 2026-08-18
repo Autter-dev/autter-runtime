@@ -13,9 +13,10 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 | `POST /v1/browser` | Browser payload `version: 1` | Errors/rejections → occurrences; session pings → rollups |
 | `GET /healthz` | — | Liveness + ClickHouse reachability |
 
-Auth on every ingest route: `Authorization: Bearer <ingest key>`,
-`x-autter-key`, or `?key=` (query param — for sendBeacon, which cannot set
-headers). OTLP endpoints accept **both protobuf and JSON** (`content-type:
+Auth on every ingest route: `Authorization: Bearer <ingest key>` or
+`x-autter-key`; `/v1/browser` also accepts a publishable `clientKey` inside
+its bounded payload. The legacy `?key=` form remains accepted for compatibility.
+OTLP endpoints accept **both protobuf and JSON** (`content-type:
 application/x-protobuf` or `application/json`), gzip/deflate bodies
 included — so any OpenTelemetry SDK (Go, Rust, Python, Java, .NET, JS)
 works with its default exporter settings.

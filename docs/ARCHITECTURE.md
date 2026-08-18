@@ -32,8 +32,8 @@ Two key scopes separate frontend and backend credentials:
   and as the relay's forwarding key. Sent as a bearer header.
 - **Client keys** (`autter_rtc_…`, publishable): shipped in frontend
   bundles for direct browser ingest. Restricted to `/v1/browser`, enforced
-  against a per-key origin allow-list, tighter rate limits, and carried as
-  a `?key=` query param because `sendBeacon` cannot set headers. A leaked
+  against a per-key origin allow-list, tighter rate limits, and carried in
+  the bounded browser payload so it does not leak into infrastructure URLs. A leaked
   client key can at worst submit fake browser events for one repo — it can
   never read data or send OTLP.
 

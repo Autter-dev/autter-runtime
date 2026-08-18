@@ -38,8 +38,8 @@ export class KeyResolver {
 		}
 		const alt = req.headers["x-autter-key"];
 		if (typeof alt === "string" && alt.trim()) return alt.trim();
-		// Query param — the only channel available to navigator.sendBeacon
-		// (it cannot set headers). Intended for publishable client keys.
+		// Legacy query-param compatibility. Current browser SDKs carry their
+		// publishable key in the size-limited browser payload instead.
 		const q = req.query.key;
 		if (typeof q === "string" && q.trim()) return q.trim();
 		return null;

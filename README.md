@@ -54,7 +54,8 @@ captureException(err, { operation: "start-checkout" });
 trackEvent("clicked_upgrade");
 ```
 
-**Backend** — one preloaded file, requests traced automatically:
+**Backend** — one preloaded file, created in your own app next to its entry
+point, requests traced automatically:
 
 ```js
 // instrument.cjs — run with: node --require ./instrument.cjs server.js

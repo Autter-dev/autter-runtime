@@ -4,6 +4,7 @@
 	"version": "0.0.0",
 	"type": "module",
 	"scripts": {
+		"build": "node --check server.js",
 		"prestart": "mkdir -p public/sdk && cp ../../packages/runtime-browser/dist/index.js public/sdk/index.js",
 		"start": "node server.js"
 	},

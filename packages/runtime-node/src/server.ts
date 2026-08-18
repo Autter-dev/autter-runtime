@@ -1,3 +1,4 @@
+import { ServerResponse, type IncomingMessage } from "node:http";
 import {
 	context,
 	trace,
@@ -6,9 +7,14 @@ import {
 	type Attributes,
 	type Context,
 	type Link,
+	type Span,
 	type Tracer,
 } from "@opentelemetry/api";
-import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { getRPCMetadata, RPCType } from "@opentelemetry/core";
+import {
+	AggregationTemporalityPreference,
+	OTLPMetricExporter,
+} from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
 import { Resource } from "@opentelemetry/resources";
@@ -41,7 +47,9 @@ import {
  *                                         spans — cost tracking needs every
  *                                         call)
  *   successful traces            : 1%    (head sampling, configurable)
- *   request metrics              : aggregated every 60 s
+ *   request metrics              : aggregated every 60 s, keyed by route
+ *                                  template (Express routes detected
+ *                                  out of the box — see captureExpressRoute)
  *   logs                         : not collected
  *
  * Exports OTLP/HTTP JSON to the Autter ingester (`/v1/traces`,
@@ -359,6 +367,58 @@ async function runWithSpan<T>(
 	}
 }
 
+/** Express (4/5) assigns routing state onto the core request object; a
+ * matched handler leaves the route template on `req.route.path` and the
+ * mount prefix on `req.baseUrl`. */
+interface ExpressRequestProps {
+	baseUrl?: unknown;
+	route?: { path?: unknown };
+}
+
+/**
+ * Route template of a finished Express request ("/api/users/:id"), or null
+ * when no route matched (404s, static files) or the server isn't Express.
+ * Only meaningful at response end — Express fills `req.route` during routing.
+ */
+function expressRouteOf(req: unknown): string | null {
+	const props = req as ExpressRequestProps | null | undefined;
+	const path = props?.route?.path;
+	if (typeof path !== "string" || path === "") return null;
+	const base = typeof props?.baseUrl === "string" ? props.baseUrl : "";
+	const route = base + path;
+	return route.startsWith("/") ? route : null;
+}
+
+/**
+ * HttpInstrumentation responseHook: copy the Express route template into
+ * `rpcMetadata.route` before the instrumentation snapshots attributes at
+ * response close. That is the only channel through which `http.route`
+ * reaches BOTH the server span and the `http.server.duration` histogram —
+ * metric data points never carry raw URL paths (cardinality), so without a
+ * route here every per-route rollup row lands on the empty route. A router
+ * instrumentation supplied via `options.instrumentations` (e.g.
+ * ExpressInstrumentation) wins when it has already set the route.
+ */
+function captureExpressRoute(
+	_span: Span,
+	response: IncomingMessage | ServerResponse,
+): void {
+	// The hook also fires for outgoing client responses (IncomingMessage).
+	if (!(response instanceof ServerResponse)) return;
+	const rpcMetadata = getRPCMetadata(context.active());
+	if (rpcMetadata?.type !== RPCType.HTTP) return;
+	const setRoute = () => {
+		if (rpcMetadata.route) return;
+		const route = expressRouteOf(response.req);
+		if (route) rpcMetadata.route = route;
+	};
+	// prependListener: must run before the instrumentation's own 'close'
+	// handler reads rpcMetadata. 'finish' covers completed responses,
+	// 'close' covers aborted ones; setRoute is idempotent.
+	response.prependListener("finish", setRoute);
+	response.prependListener("close", setRoute);
+}
+
 let active: AutterServer | null = null;
 /** Always-on provider shared by error, LLM, and process spans — set while a
  * server is active so withLlmCall/withProcessSpan bypass head sampling. */
@@ -378,6 +438,10 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		[ATTR_SERVICE_NAME]: options.service,
 		...(options.release ? { [ATTR_SERVICE_VERSION]: options.release } : {}),
 		"deployment.environment": environment,
+		// Tells the ingester request metrics arrive on the metrics pipe, so
+		// it must not also fold our server spans into usage rollups (that
+		// would double-count every sampled request).
+		"autter.metrics_wired": true,
 	});
 
 	const headSampler = new ParentBasedSampler({
@@ -400,11 +464,16 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			exporter: new OTLPMetricExporter({
 				url: `${endpoint}/v1/metrics`,
 				headers,
+				// Deltas, not lifetime totals: the ingester SUMs data points
+				// into runtime_metrics_1m, and the default (cumulative)
+				// temporality would re-count every past request on each
+				// 60 s export.
+				temporalityPreference: AggregationTemporalityPreference.DELTA,
 			}),
 			exportIntervalMillis: options.metricIntervalMs ?? 60_000,
 		}),
 		instrumentations: [
-			new HttpInstrumentation(),
+			new HttpInstrumentation({ responseHook: captureExpressRoute }),
 			...((options.instrumentations ?? []) as never[]),
 		],
 	});

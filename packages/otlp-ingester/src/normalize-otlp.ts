@@ -1,3 +1,4 @@
+import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
 import {
 	asSeverity,
@@ -74,7 +75,10 @@ export interface OtlpMetricsRequest {
 			metrics?: Array<{
 				name?: string;
 				unit?: string;
-				histogram?: { dataPoints?: OtlpDataPoint[] };
+				histogram?: {
+					dataPoints?: OtlpDataPoint[];
+					aggregationTemporality?: string | number;
+				};
 				sum?: { dataPoints?: OtlpDataPoint[] };
 			}>;
 		}>;
@@ -136,6 +140,9 @@ interface ResourceInfo {
 	service: string;
 	environment: string;
 	release: string | null;
+	/** `autter.metrics_wired` — the sender exports request metrics, so
+	 * span-fed usage rollups would double-count its requests. */
+	metricsWired: boolean;
 }
 
 function resourceInfo(resource: OtlpResource | undefined): ResourceInfo {
@@ -147,6 +154,7 @@ function resourceInfo(resource: OtlpResource | undefined): ResourceInfo {
 			attrs.get("deployment.environment") ??
 			"production",
 		release: attrs.get("service.version") ?? null,
+		metricsWired: attrs.get("autter.metrics_wired") === "true",
 	};
 }
 
@@ -317,13 +325,21 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				if (llmCall) llmCalls.push(llmCall);
 
 				// Server spans fold into 1-minute usage rollups so traffic is
-				// tracked even when the metrics pipeline isn't wired.
-				if (kind === "server") {
+				// tracked even when the metrics pipeline isn't wired —
+				// senders that DO export request metrics mark the resource
+				// with `autter.metrics_wired` and are skipped here, or every
+				// request they trace would count twice. The rollup key uses
+				// the normalized route: `http.route` is already a template,
+				// but the url.path/http.target fallback is a raw path whose
+				// id segments would explode the SummingMergeTree key space
+				// (and never line up with the metric-fed rows for the same
+				// endpoint).
+				if (kind === "server" && !resource.metricsWired) {
 					addToRollup(rollups, {
 						service: resource.service,
 						environment: resource.environment,
 						release: resource.release,
-						route: route ?? "",
+						route: normalizeRoute(route),
 						bucketAt: minuteBucket(startedAt),
 						requestCount: 1,
 						errorCount: isError ? 1 : 0,
@@ -403,6 +419,17 @@ const HTTP_DURATION_INSTRUMENTS: Record<string, number> = {
 	"http.server.request.duration": 1000,
 };
 
+/**
+ * Cumulative histograms report lifetime totals on every export; adding them
+ * into a SummingMergeTree would re-count all past requests each interval.
+ * Only deltas are summable — cumulative senders are skipped and covered by
+ * the span-fed rollup fallback instead. (Enum arrives as a number or an
+ * `AGGREGATION_TEMPORALITY_*` string depending on the serialiser.)
+ */
+function isCumulativeTemporality(t: string | number | undefined): boolean {
+	return t === 2 || t === "AGGREGATION_TEMPORALITY_CUMULATIVE";
+}
+
 export function normalizeMetrics(
 	request: OtlpMetricsRequest,
 ): RuntimeMetricPoint[] {
@@ -416,6 +443,9 @@ export function normalizeMetrics(
 					? HTTP_DURATION_INSTRUMENTS[metric.name]
 					: undefined;
 				if (multiplier === undefined) continue;
+				if (isCumulativeTemporality(metric.histogram?.aggregationTemporality)) {
+					continue;
+				}
 				for (const dataPoint of metric.histogram?.dataPoints ?? []) {
 					const attrs = attrMap(dataPoint.attributes);
 					const statusCode = statusCodeOf(attrs);
@@ -425,7 +455,11 @@ export function normalizeMetrics(
 						service: resource.service,
 						environment: resource.environment,
 						release: resource.release,
-						route: routeOf(attrs) ?? "",
+						// Same normalization as the span-fed rollups: emitters
+						// are supposed to put route templates in `http.route`,
+						// but some put raw paths there — keep the key space
+						// bounded and consistent across both feeds.
+						route: normalizeRoute(routeOf(attrs)),
 						bucketAt: minuteBucket(nanosToDate(dataPoint.timeUnixNano)),
 						requestCount: count,
 						errorCount: statusCode !== null && statusCode >= 500 ? count : 0,

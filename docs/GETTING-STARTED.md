@@ -41,7 +41,7 @@ you from zero to seeing data in ClickHouse.
 | Unhandled errors / rejections | ✅ automatic | ✅ automatic |
 | Handled errors | `captureException(err)` | `captureException(err)` |
 | Usage | session pings + `trackEvent()` | request counts/durations per route (automatic) |
-| Traces | — (by design; no OTel in the browser) | ~1% sampled (configurable) |
+| Traces | — (by design; no OTel in the browser) | ~1% sampled, plus **every erroring trace kept in full** |
 | LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% (model, tokens, cost) |
 
 **What is never sent:** cookies, DOM content, form values, request/response
@@ -57,6 +57,11 @@ git clone https://github.com/Autter-dev/autter-runtime
 cd autter-runtime
 docker compose up   # ClickHouse + ingester on :4318, key "dev-key"
 ```
+
+> **That's all the clone is for.** It runs the ingester — you never add
+> code to this checkout. Every step from here on (installing packages,
+> creating `instrument.cjs`, …) happens in **your application's
+> repository**, the app you want to monitor.
 
 For real deployments, configure keys via env (or point
 `AUTTER_KEY_VALIDATOR_URL` at your own key service):
@@ -78,11 +83,15 @@ Full config reference: [`packages/otlp-ingester`](../packages/otlp-ingester).
 
 ## 3. Instrument your backend
 
+In **your app's repository** (not the `autter-runtime` checkout from
+step 2):
+
 ```bash
 npm install @autter/runtime-node
 ```
 
-Create `instrument.cjs` — it must load **before** your app:
+Create `instrument.cjs` in your app's root, next to its entry point — it
+must load **before** your app:
 
 ```js
 const { initAutterServer } = require("@autter/runtime-node");
@@ -101,8 +110,10 @@ node --require ./instrument.cjs server.js
 ```
 
 That alone gives you: every incoming HTTP request traced-and-sampled,
-request/error/duration rollups per route, and crashes captured. For
-handled errors:
+request/error/duration rollups per route, crashes captured, and the full
+trace of any request that errors — erroring traces are retained even when
+the sampler wouldn't have kept them, so every issue keeps the trace that
+explains it. For handled errors:
 
 ```js
 const { captureException } = require("@autter/runtime-node");
@@ -303,7 +314,9 @@ clickhouse-client --password dev`.
 - [ ] `release` is wired to your git SHA in **both** frontend and backend —
       it's what powers regression detection ("broke in release X").
 - [ ] Keep trace sampling at ~1% (`traceSampleRate`) — errors are always
-      captured regardless.
+      captured regardless, and the full trace of an erroring request is
+      retained (`retainTracesOnError`, on by default), so cheap sampling
+      doesn't cost you debugging context.
 - [ ] The relay route keeps its built-in per-IP rate limit (or your WAF
       covers it: `perIpRateLimit: false`).
 - [ ] Direct browser ingest: your CSP includes

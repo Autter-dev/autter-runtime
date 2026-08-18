@@ -164,3 +164,15 @@ Errors are always worth sending; keep successful-trace sampling at ~1%
 (`OTEL_TRACES_SAMPLER_ARG=0.01`). Request/usage metrics are derived
 server-side from spans and the `http.server.duration` histogram — no extra
 setup. LLM/GenAI spans are the exception — send them at 100% (see above).
+
+One consequence of plain head sampling to know about: an error recorded on
+an unsampled trace is dropped with it, and even when the error survives
+through a separate path, the trace explaining it usually doesn't.
+`@autter/runtime-node` handles both automatically — errors ride a dedicated
+always-on tracer, and the full trace around an error is tail-retained even
+when head sampling said no (`retainTracesOnError`, on by default). On other
+stacks, route errors through an always-on tracer provider (same pattern as
+the LLM guidance above), and if you want erroring traces kept in full, put
+an OTel Collector with the `tail_sampling` processor (a
+`status_code = ERROR` policy plus a small `probabilistic` one) in front of
+the ingester instead of sampling in the SDK.

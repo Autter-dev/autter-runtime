@@ -4,6 +4,7 @@ import {
 	trace,
 	SpanKind,
 	SpanStatusCode,
+	TraceFlags,
 	type Attributes,
 	type Context,
 	type Link,
@@ -27,8 +28,11 @@ import {
 	AlwaysOnSampler,
 	BasicTracerProvider,
 	SamplingDecision,
+	type ReadableSpan,
 	type Sampler,
 	type SamplingResult,
+	type Span as SdkSpan,
+	type SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import {
 	ATTR_SERVICE_NAME,
@@ -40,6 +44,10 @@ import {
  * auto-instrumentation metapackage. Default data-volume policy:
  *
  *   errors / captured exceptions : 100%  (dedicated always-on error tracer)
+ *   traces containing an error   : 100%  (tail retention — the full trace is
+ *                                         exported when any of its spans
+ *                                         errors, so a retained error keeps
+ *                                         the trace that explains it)
  *   named process spans          : 100%  (withProcessSpan, always-on tracer)
  *   LLM / GenAI call spans       : 100%  (withLlmCall/trackLlmCall/
  *                                         instrumentLlmClient + an LLM-aware
@@ -67,6 +75,17 @@ export interface AutterServerOptions {
 	release?: string;
 	/** Head-sampling ratio for regular traces. Default 0.01 (1%). */
 	traceSampleRate?: number;
+	/**
+	 * Keep the FULL trace whenever it contains an error: an ERROR-status
+	 * span (e.g. a 5xx request), a recorded exception, or a
+	 * `captureException` / error-severity `captureMessage` call made inside
+	 * it. Head sampling still decides what is exported for healthy traffic;
+	 * erroring traces are rescued from the unsampled pool by a bounded
+	 * in-process buffer — without this, errors are retained at 100% while
+	 * the trace explaining them survives only `traceSampleRate` of the time.
+	 * Default true.
+	 */
+	retainTracesOnError?: boolean;
 	/** Metric export interval. Default 60_000 ms. */
 	metricIntervalMs?: number;
 	/** Capture crashing exceptions via process.uncaughtExceptionMonitor (default true). */
@@ -239,6 +258,219 @@ class LlmAwareSampler implements Sampler {
 
 	toString(): string {
 		return `LlmAware(${this.delegate.toString()})`;
+	}
+}
+
+/**
+ * Upgrades NOT_RECORD decisions to RECORD so head-unsampled traces still
+ * materialise in-process: their spans reach the span processors with the
+ * sampled flag off (the regular batch processor ignores them) where
+ * ErrorTraceRetentionProcessor can buffer them and promote the whole trace
+ * to export if an error shows up. The W3C traceparent stays unsampled
+ * either way, so downstream services behave exactly as before.
+ */
+class RecordUnsampledSampler implements Sampler {
+	constructor(private readonly delegate: Sampler) {}
+
+	shouldSample(
+		ctx: Context,
+		traceId: string,
+		spanName: string,
+		spanKind: SpanKind,
+		attributes: Attributes,
+		links: Link[],
+	): SamplingResult {
+		const result = this.delegate.shouldSample(
+			ctx,
+			traceId,
+			spanName,
+			spanKind,
+			attributes,
+			links,
+		);
+		if (result.decision === SamplingDecision.NOT_RECORD) {
+			return { ...result, decision: SamplingDecision.RECORD };
+		}
+		return result;
+	}
+
+	toString(): string {
+		return `RecordUnsampled(${this.delegate.toString()})`;
+	}
+}
+
+const RETENTION_MAX_SPANS_PER_TRACE = 256;
+const RETENTION_MAX_BUFFERED_SPANS = 5_000;
+const RETENTION_SWEEP_INTERVAL_MS = 10_000;
+const RETENTION_TRACE_TTL_MS = 30_000;
+
+function spanIndicatesError(span: ReadableSpan): boolean {
+	if (span.status.code === SpanStatusCode.ERROR) return true;
+	return span.events.some((event) => event.name === "exception");
+}
+
+/** Marks spans exported by tail retention rather than head sampling. The
+ * ingester uses it to keep such spans out of span-fed usage rollups —
+ * erroring requests are already counted by the metrics pipeline, and at
+ * ~100% retention the span contribution would double-count them. */
+const TAIL_RETAINED_ATTR = "autter.tail_retained";
+
+/** The batch processor only exports spans with the sampled flag, so a
+ * rescued span is re-wrapped with the flag set — which is also the truth:
+ * the tail decision sampled it. */
+function withSampledFlag(span: ReadableSpan): ReadableSpan {
+	const spanContext = {
+		...span.spanContext(),
+		traceFlags: span.spanContext().traceFlags | TraceFlags.SAMPLED,
+	};
+	return {
+		name: span.name,
+		kind: span.kind,
+		spanContext: () => spanContext,
+		parentSpanId: span.parentSpanId,
+		startTime: span.startTime,
+		endTime: span.endTime,
+		status: span.status,
+		attributes: { ...span.attributes, [TAIL_RETAINED_ATTR]: true },
+		links: span.links,
+		events: span.events,
+		duration: span.duration,
+		ended: span.ended,
+		resource: span.resource,
+		instrumentationLibrary: span.instrumentationLibrary,
+		droppedAttributesCount: span.droppedAttributesCount,
+		droppedEventsCount: span.droppedEventsCount,
+		droppedLinksCount: span.droppedLinksCount,
+	};
+}
+
+interface RetentionEntry {
+	spans: ReadableSpan[];
+	retained: boolean;
+	firstSeenAtMs: number;
+}
+
+/**
+ * Tail retention for erroring traces. Errors export at 100% via the
+ * always-on tracer while regular traces are head-sampled at ~1% — so the
+ * trace that explains a retained error would almost always be gone. This
+ * processor buffers the finished-but-unsampled spans of in-flight traces
+ * and promotes a whole trace to export the moment it shows an error: an
+ * ERROR-status span (5xx requests included), an `exception` event, or an
+ * explicit captureException / captureMessage("…", "error") inside it.
+ *
+ * Bounded by construction: per-trace and total span caps, buffers dropped
+ * as soon as the local root span ends healthy, and a TTL sweep for traces
+ * whose root is never seen. On overflow it degrades to plain head sampling
+ * for the evicted traces — it never blocks and never grows unbounded.
+ * Errors reported after the root span has ended keep their occurrence (the
+ * always-on pipe) but can no longer rescue the request trace.
+ */
+class ErrorTraceRetentionProcessor implements SpanProcessor {
+	private readonly traces = new Map<string, RetentionEntry>();
+	private bufferedSpans = 0;
+	private readonly sweeper: NodeJS.Timeout;
+
+	constructor(private readonly inner: SpanProcessor) {
+		this.sweeper = setInterval(() => this.sweep(), RETENTION_SWEEP_INTERVAL_MS);
+		// Never hold the process open just to babysit the buffer.
+		this.sweeper.unref?.();
+	}
+
+	onStart(_span: SdkSpan, _parentContext: Context): void {}
+
+	onEnd(span: ReadableSpan): void {
+		const ctx = span.spanContext();
+		// Head-sampled spans already export through the regular processor.
+		if ((ctx.traceFlags & TraceFlags.SAMPLED) !== 0) return;
+
+		const entry = this.entryFor(ctx.traceId);
+		if (entry.retained) {
+			this.forward(span);
+		} else if (spanIndicatesError(span)) {
+			entry.retained = true;
+			this.flush(entry);
+			this.forward(span);
+		} else if (entry.spans.length < RETENTION_MAX_SPANS_PER_TRACE) {
+			entry.spans.push(span);
+			this.bufferedSpans++;
+			this.evictIfOverBudget();
+		}
+
+		// The local root ended: the request is over, and an error inside it
+		// would have surfaced by now. Drop a healthy trace's buffer; keep
+		// retained entries so late stragglers still export (sweep cleans up).
+		if (span.parentSpanId === undefined && !entry.retained) {
+			this.drop(ctx.traceId);
+		}
+	}
+
+	/** Promote the active trace, if any — called on captured errors. */
+	retainActiveTrace(): void {
+		const active = trace.getActiveSpan()?.spanContext();
+		// No active trace, or a head-sampled one that exports anyway.
+		if (!active || (active.traceFlags & TraceFlags.SAMPLED) !== 0) return;
+		const entry = this.entryFor(active.traceId);
+		if (entry.retained) return;
+		entry.retained = true;
+		this.flush(entry);
+	}
+
+	forceFlush(): Promise<void> {
+		return this.inner.forceFlush();
+	}
+
+	shutdown(): Promise<void> {
+		clearInterval(this.sweeper);
+		this.traces.clear();
+		this.bufferedSpans = 0;
+		return this.inner.shutdown();
+	}
+
+	private entryFor(traceId: string): RetentionEntry {
+		let entry = this.traces.get(traceId);
+		if (!entry) {
+			entry = { spans: [], retained: false, firstSeenAtMs: Date.now() };
+			this.traces.set(traceId, entry);
+		}
+		return entry;
+	}
+
+	private forward(span: ReadableSpan): void {
+		this.inner.onEnd(withSampledFlag(span));
+	}
+
+	private flush(entry: RetentionEntry): void {
+		for (const span of entry.spans) this.forward(span);
+		this.bufferedSpans -= entry.spans.length;
+		entry.spans = [];
+	}
+
+	private drop(traceId: string): void {
+		const entry = this.traces.get(traceId);
+		if (!entry) return;
+		this.bufferedSpans -= entry.spans.length;
+		this.traces.delete(traceId);
+	}
+
+	private evictIfOverBudget(): void {
+		if (this.bufferedSpans <= RETENTION_MAX_BUFFERED_SPANS) return;
+		// Insertion order ≈ oldest trace first; evicting whole traces keeps
+		// what survives coherent instead of leaving partial traces behind.
+		// Entries without buffered spans (retained markers, drained traces)
+		// don't help the budget and keep their rescue semantics.
+		for (const [traceId, entry] of this.traces) {
+			if (entry.spans.length === 0) continue;
+			this.drop(traceId);
+			if (this.bufferedSpans <= RETENTION_MAX_BUFFERED_SPANS) return;
+		}
+	}
+
+	private sweep(): void {
+		const cutoff = Date.now() - RETENTION_TRACE_TTL_MS;
+		for (const [traceId, entry] of this.traces) {
+			if (entry.firstSeenAtMs <= cutoff) this.drop(traceId);
+		}
 	}
 }
 
@@ -447,19 +679,36 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const headSampler = new ParentBasedSampler({
 		root: new TraceIdRatioBasedSampler(options.traceSampleRate ?? 0.01),
 	});
+	const retainOnError = options.retainTracesOnError !== false;
+	// Error-linked trace retention (default on): unsampled spans are still
+	// recorded in-process and briefly buffered, so a trace can be exported in
+	// full once it turns out to contain an error. Rescued spans ride their
+	// own batch processor on the errors' 2 s flush cadence.
+	let sampler: Sampler = retainOnError
+		? new RecordUnsampledSampler(headSampler)
+		: headSampler;
+	// LLM tracing is on by default: gen_ai/ai.* spans emitted through the
+	// global provider (Vercel AI SDK, GenAI instrumentations) skip head
+	// sampling so every model call reaches the ingester.
+	if (options.llmTracing !== false) sampler = new LlmAwareSampler(sampler);
+	const errorTraceBuffer = retainOnError
+		? new ErrorTraceRetentionProcessor(
+				new BatchSpanProcessor(
+					new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+					{ scheduledDelayMillis: 2000 },
+				),
+			)
+		: null;
+
 	const sdk = new NodeSDK({
 		resource,
-		// LLM tracing is on by default: gen_ai/ai.* spans emitted through the
-		// global provider (Vercel AI SDK, GenAI instrumentations) skip head
-		// sampling so every model call reaches the ingester.
-		sampler:
-			options.llmTracing === false
-				? headSampler
-				: new LlmAwareSampler(headSampler),
-		traceExporter: new OTLPTraceExporter({
-			url: `${endpoint}/v1/traces`,
-			headers,
-		}),
+		sampler,
+		spanProcessors: [
+			new BatchSpanProcessor(
+				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+			),
+			...(errorTraceBuffer ? [errorTraceBuffer] : []),
+		],
 		metricReader: new PeriodicExportingMetricReader({
 			exporter: new OTLPMetricExporter({
 				url: `${endpoint}/v1/metrics`,
@@ -501,6 +750,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const llmTracer = alwaysOnProvider.getTracer("autter-llm");
 
 	function captureException(error: unknown, attributes?: Attributes): void {
+		// A captured error makes the surrounding trace worth keeping in full.
+		errorTraceBuffer?.retainActiveTrace();
 		const isError = error instanceof Error;
 		const message = isError ? error.message : String(error);
 		const span = errorTracer.startSpan(isError ? error.name : "Error", {
@@ -532,6 +783,11 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		severity: AutterSeverity = "warning",
 		attributes?: Attributes,
 	): void {
+		// Error-severity messages rescue their trace like exceptions do;
+		// warnings/info are too chatty to justify exporting whole traces.
+		if (severity === "error" || severity === "fatal") {
+			errorTraceBuffer?.retainActiveTrace();
+		}
 		// Same wire shape as an exception (an event named "exception" with
 		// ERROR status is what the ingester turns into an occurrence), with
 		// autter.severity carrying the level. A synthetic stack (minus this

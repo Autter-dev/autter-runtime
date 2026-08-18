@@ -83,11 +83,22 @@ Defaults (cheap by construction):
 | Signal | Default |
 | --- | --- |
 | Captured/unhandled exceptions | 100% (dedicated always-on tracer) |
+| Traces containing an error | 100% (tail retention, `retainTracesOnError`) |
 | `withProcessSpan` spans | 100% (same always-on tracer) |
 | LLM/GenAI call spans | 100% (`llmTracing`, on by default) |
-| Traces | 1% head sampling (`traceSampleRate`) |
+| Healthy traces | 1% head sampling (`traceSampleRate`) |
 | Request metrics | exported every 60 s |
 | Logs | not collected |
+
+**Error-linked trace retention.** Errors export at 100% while traces are
+head-sampled — on its own that strands a retained error without the trace
+that explains it. So unsampled spans are kept briefly in an in-process
+buffer, and the moment a trace shows an error — a 5xx response, a recorded
+exception, `captureException`, or an error-severity `captureMessage` — the
+whole trace is exported, sampling lottery notwithstanding. The buffer is
+bounded (256 spans per trace, 5 000 spans total, dropped as soon as the
+request ends healthy, 30 s TTL), degrades to plain head sampling on
+overflow, and never blocks. Disable with `retainTracesOnError: false`.
 
 Crashes are observed via `process.uncaughtExceptionMonitor`, which does
 **not** change your process's exit behaviour; the final flush is
@@ -102,6 +113,8 @@ Note on usage rollups: requests are counted from the `http.server.duration`
 metric (100% accurate) and additionally from sampled server spans. At the
 default 1% sampling the span contribution is negligible; if you set
 `traceSampleRate: 1` in development, expect request counts roughly doubled.
+Tail-retained error traces don't distort this: their spans carry
+`autter.tail_retained` and the ingester keeps them out of span-fed rollups.
 
 ## 3. LLM tracing
 

@@ -177,8 +177,10 @@ new OTLPTraceExporter({
 ## Design principles
 
 - **Errors are 100%, everything else is sampled or aggregated.** Raw error
-  occurrences are always kept (14-day TTL); successful traces are expected to
-  be sampled upstream (0.5–1%); usage is stored as 1-minute rollups (90 days).
+  occurrences are always kept (14-day TTL); traces containing an error are
+  retained in full (the Node SDK tail-retains them), so every issue keeps the
+  trace that explains it; healthy traces are expected to be sampled upstream
+  (0.5–1%); usage is stored as 1-minute rollups (90 days).
 - **Per-repo analysis.** Every row is keyed by `org_id` + `repository_id`.
 - **Privacy by construction.** No cookies, no DOM, no request/response bodies,
   no emails, no full URLs with query strings.

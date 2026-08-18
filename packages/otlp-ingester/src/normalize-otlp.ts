@@ -325,16 +325,12 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				if (llmCall) llmCalls.push(llmCall);
 
 				// Server spans fold into 1-minute usage rollups so traffic is
-				// tracked even when the metrics pipeline isn't wired —
-				// senders that DO export request metrics mark the resource
-				// with `autter.metrics_wired` and are skipped here, or every
-				// request they trace would count twice. The rollup key uses
-				// the normalized route: `http.route` is already a template,
-				// but the url.path/http.target fallback is a raw path whose
-				// id segments would explode the SummingMergeTree key space
-				// (and never line up with the metric-fed rows for the same
-				// endpoint).
-				if (kind === "server" && !resource.metricsWired) {
+				// tracked even when the metrics pipeline isn't wired. Spans
+				// exported by error-linked tail retention are skipped: the SDK
+				// ships those at ~100% alongside a metrics pipeline that already
+				// counts every request, so folding them in would double-count
+				// erroring routes.
+				if (kind === "server" && attrs.get("autter.tail_retained") !== "true") {
 					addToRollup(rollups, {
 						service: resource.service,
 						environment: resource.environment,

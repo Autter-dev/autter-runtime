@@ -247,6 +247,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 
 				// Error occurrences: one per exception event; if the span is
 				// errored without exception events, one from the span status.
+				const occurrencesBefore = occurrences.length;
 				const exceptionEvents = (span.events ?? []).filter(
 					(event) => event.name === "exception",
 				);
@@ -329,6 +330,27 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						durationSumMs: durationMs,
 						sessionCount: 0,
 					});
+				} else {
+					// Occurrences on non-server spans (captureException's internal
+					// error spans, workers, consumers) have no request rollup to
+					// ride — count each as one event / one error event, or a
+					// service whose errors arrive outside HTTP handlers groups
+					// issues while every event counter stays 0. Server spans are
+					// excluded: their request rollup above already represents them.
+					for (const occ of occurrences.slice(occurrencesBefore)) {
+						addToRollup(rollups, {
+							service: occ.service,
+							environment: occ.environment,
+							release: occ.release,
+							route: occ.route ?? "",
+							bucketAt: minuteBucket(occ.occurredAt),
+							requestCount: 1,
+							errorCount:
+								occ.severity === "fatal" || occ.severity === "error" ? 1 : 0,
+							durationSumMs: 0,
+							sessionCount: 0,
+						});
+					}
 				}
 			}
 		}

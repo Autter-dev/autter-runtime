@@ -1,68 +1,10 @@
 /**
  * @autter/runtime-next — one-command Autter Runtime for Next.js.
  *
- * 1. `instrumentation.ts` (server tracing):
- *
- *      export async function register() {
- *        if (process.env.NEXT_RUNTIME === "nodejs") {
- *          const { registerAutter } = await import("@autter/runtime-next");
- *          registerAutter({
- *            apiKey: process.env.AUTTER_RUNTIME_KEY!,
- *            service: "web-app",
- *            release: process.env.GIT_SHA,
- *          });
- *        }
- *      }
- *
- * 2. `app/api/autter-runtime/route.ts` (browser relay):
- *
- *      import { createAutterRelayRoute } from "@autter/runtime-next";
- *      export const { POST } = createAutterRelayRoute({
- *        apiKey: process.env.AUTTER_RUNTIME_KEY!,
- *      });
- *
- * 3. A client component (browser tracker + boundary):
- *
- *      "use client";
- *      import { initAutterBrowser, AutterErrorBoundary } from "@autter/runtime-next";
- *      initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
+ * The root entry is SERVER-ONLY (`instrumentation.ts`, route handlers).
+ * Client components must import from `@autter/runtime-next/client` —
+ * importing the root from client code would pull the Node OpenTelemetry
+ * SDK into the browser bundle and break the build.
  */
 
-import {
-	createBrowserRelayFetchHandler,
-	initAutterServer,
-	type AutterServer,
-	type AutterServerOptions,
-	type RelayOptions,
-} from "@autter/runtime-node";
-
-export {
-	initAutterBrowser,
-	captureException,
-	captureMessage,
-	trackEvent,
-	setUser,
-	setContext,
-	flush,
-	type AutterSeverity,
-} from "@autter/runtime-browser";
-export {
-	AutterErrorBoundary,
-	type AutterErrorBoundaryProps,
-} from "./error-boundary.js";
-export {
-	captureException as captureServerException,
-	captureMessage as captureServerMessage,
-} from "@autter/runtime-node";
-
-/** Server OTel init for Next.js `instrumentation.ts`. */
-export function registerAutter(options: AutterServerOptions): AutterServer {
-	return initAutterServer(options);
-}
-
-/** App Router relay route: `export const { POST } = createAutterRelayRoute({...})`. */
-export function createAutterRelayRoute(options: RelayOptions): {
-	POST: (request: Request) => Promise<Response>;
-} {
-	return { POST: createBrowserRelayFetchHandler(options) };
-}
+export * from "./server.js";

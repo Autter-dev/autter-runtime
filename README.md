@@ -67,6 +67,21 @@ initAutterServer({
 });
 ```
 
+**LLM calls** — initialised with the server tracker, recorded at 100%
+(model, tokens, latency, USD cost). One line per client:
+
+```js
+const { instrumentLlmClient } = require("@autter/runtime-node");
+
+const openai = instrumentLlmClient(new OpenAI());   // that's it — every
+// chat/embedding/stream call through this client is traced automatically
+```
+
+Vercel AI SDK users don't even need that — set
+`experimental_telemetry: { isEnabled: true }` on the call. For raw-fetch
+clients there's a manual `withLlmCall` wrapper (see
+[`@autter/runtime-node`](packages/runtime-node)).
+
 Full walkthrough (keys, relay setup, Next.js, verification):
 **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**.
 
@@ -163,8 +178,10 @@ new OTLPTraceExporter({
 ## Design principles
 
 - **Errors are 100%, everything else is sampled or aggregated.** Raw error
-  occurrences are always kept (14-day TTL); successful traces are expected to
-  be sampled upstream (0.5–1%); usage is stored as 1-minute rollups (90 days).
+  occurrences are always kept (14-day TTL); traces containing an error are
+  retained in full (the Node SDK tail-retains them), so every issue keeps the
+  trace that explains it; healthy traces are expected to be sampled upstream
+  (0.5–1%); usage is stored as 1-minute rollups (90 days).
 - **Per-repo analysis.** Every row is keyed by `org_id` + `repository_id`.
 - **Privacy by construction.** No cookies, no DOM, no request/response bodies,
   no emails, no full URLs with query strings.

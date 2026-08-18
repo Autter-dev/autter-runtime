@@ -8,7 +8,7 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 
 | Route | Payload | Purpose |
 | --- | --- | --- |
-| `POST /v1/traces` | OTLP/JSON `ExportTraceServiceRequest` | Error spans → occurrences; all spans → `runtime_spans`; server spans → usage rollups |
+| `POST /v1/traces` | OTLP/JSON `ExportTraceServiceRequest` | Error spans → occurrences; all spans → `runtime_spans`; server spans → usage rollups; GenAI spans → `runtime_llm_calls` |
 | `POST /v1/metrics` | OTLP/JSON `ExportMetricsServiceRequest` | HTTP-server duration histograms → usage rollups |
 | `POST /v1/browser` | Browser payload `version: 1` | Errors/rejections → occurrences; session pings → rollups |
 | `GET /healthz` | — | Liveness + ClickHouse reachability |
@@ -54,12 +54,33 @@ The validator webhook may return the same extra fields:
 | `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` |
 | `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId}` (60 s cache) |
 | `AUTTER_KEY_VALIDATOR_TOKEN` | — | Bearer token sent to the validator |
-| `AUTTER_SINK_URL` | — | Webhook receiving fingerprinted occurrences for issue grouping |
+| `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once (`docs/ARCHITECTURE.md`) |
 | `AUTTER_SINK_TOKEN` | — | Bearer token sent to the sink |
+| `SINK_MAX_ATTEMPTS` | `12` | Delivery attempts per batch (1–60 s backoff) |
+| `SINK_MAX_BUFFERED_BATCHES` | `1000` | Retry buffer cap; oldest drops are logged |
+| `SINK_MAX_BUFFERED_MB` | `64` | Sink retry buffer cap (memory) |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |
 | `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
+| `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
+
+## LLM / GenAI calls
+
+Spans following the [OTel GenAI semconv](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+(`gen_ai.*` attributes — emitted by `withLlmCall` in `@autter/runtime-node`,
+the Vercel AI SDK with telemetry enabled, and the GenAI instrumentations for
+Python/Go/etc.) are recognised automatically on `/v1/traces` and additionally
+stored per call in `runtime_llm_calls`: provider, model, operation, input/
+output tokens, duration, ok/error status (with the provider exception type
+in `error_type` for failed calls), and a USD cost. The cost is taken
+from the `autter.llm.cost_usd` span attribute when reported; otherwise it's
+estimated from the built-in price table in `src/llm-pricing.ts`
+(`cost_source` records which: `reported` / `estimated` / `unpriced`). An
+opaque calling-user id is read from `autter.user_id` (or the AI SDK's
+`metadata.userId`). The Vercel AI SDK's outer `ai.generateText`/`ai.streamText`
+spans are not counted — their inner `.doGenerate`/`.doEmbed` call spans carry
+the usage, and counting both would double the tokens.
 
 ## Schema migrations
 

@@ -15,7 +15,10 @@ services:
     # Not published to the host — only the ingester talks to it, over the
     # internal compose network. Never expose 8123/9000 publicly.
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      # 127.0.0.1, not localhost: in-container localhost resolves to ::1, but
+      # ClickHouse's IPv6 bind can silently fail (listen_try), leaving only
+      # 0.0.0.0 listening and the check refused forever.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 10

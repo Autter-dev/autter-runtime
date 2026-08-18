@@ -39,7 +39,7 @@ initAutterBrowser({
 ```
 
 React render errors: wrap with `<AutterErrorBoundary>` (from
-`@autter/runtime-next`, works in any React app). Vue/Svelte/Angular: call
+`@autter/runtime-next/client`, works in any React app). Vue/Svelte/Angular: call
 `captureException(err)` from the framework's error hook
 (`app.config.errorHandler`, `handleError`, `ErrorHandler`).
 
@@ -126,9 +126,53 @@ span.record_exception(err)  # or add_event("exception", {...})
 span.set_attribute("autter.severity", "warning")
 ```
 
+## LLM / GenAI calls (any language)
+
+Any span following the [OTel GenAI semconv](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+is recognised automatically and stored per call with model, tokens,
+latency, and a USD cost — no Autter package required. The attributes that
+matter:
+
+| Attribute | Meaning |
+| --- | --- |
+| `gen_ai.provider.name` (or legacy `gen_ai.system`) | "openai", "anthropic", … |
+| `gen_ai.request.model` / `gen_ai.response.model` | model id |
+| `gen_ai.operation.name` | "chat", "embeddings", … |
+| `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | token counts |
+| `autter.llm.cost_usd` | optional exact cost — otherwise estimated from a built-in price table |
+| `autter.user_id` | optional opaque end-user id (never an email) |
+
+- **Node**: automatic — `initAutterServer` exempts GenAI spans from
+  sampling. Use the Vercel AI SDK's `experimental_telemetry:
+  { isEnabled: true }`, or wrap other clients with `withLlmCall` (see the
+  [`@autter/runtime-node` README](../packages/runtime-node)).
+- **Python**: `pip install opentelemetry-instrumentation-openai-v2` (or the
+  anthropic/bedrock equivalents) and instrument as usual.
+- **Go / Rust / others**: emit a client span with the attributes above
+  around each model call.
+
+**Sampling caveat (non-Node stacks):** the ~1% ratio sampler below applies
+to all spans, GenAI included — at 1% your cost numbers are meaningless.
+Exempt them, e.g. a custom sampler that always samples spans whose name
+starts with `chat`/`gen_ai`/`ai.` or that carry `gen_ai.*` attributes, or
+emit LLM spans through a second, always-on tracer provider pointed at the
+same exporter. (The Node package does this exemption for you.)
+
 ## Sampling guidance (all stacks)
 
 Errors are always worth sending; keep successful-trace sampling at ~1%
 (`OTEL_TRACES_SAMPLER_ARG=0.01`). Request/usage metrics are derived
 server-side from spans and the `http.server.duration` histogram — no extra
-setup.
+setup. LLM/GenAI spans are the exception — send them at 100% (see above).
+
+One consequence of plain head sampling to know about: an error recorded on
+an unsampled trace is dropped with it, and even when the error survives
+through a separate path, the trace explaining it usually doesn't.
+`@autter/runtime-node` handles both automatically — errors ride a dedicated
+always-on tracer, and the full trace around an error is tail-retained even
+when head sampling said no (`retainTracesOnError`, on by default). On other
+stacks, route errors through an always-on tracer provider (same pattern as
+the LLM guidance above), and if you want erroring traces kept in full, put
+an OTel Collector with the `tail_sampling` processor (a
+`status_code = ERROR` policy plus a small `probabilistic` one) in front of
+the ingester instead of sampling in the SDK.

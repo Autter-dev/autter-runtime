@@ -41,7 +41,8 @@ you from zero to seeing data in ClickHouse.
 | Unhandled errors / rejections | ✅ automatic | ✅ automatic |
 | Handled errors | `captureException(err)` | `captureException(err)` |
 | Usage | session pings + `trackEvent()` | request counts/durations per route (automatic) |
-| Traces | — (by design; no OTel in the browser) | ~1% sampled (configurable) |
+| Traces | — (by design; no OTel in the browser) | ~1% sampled, plus **every erroring trace kept in full** |
+| LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% (model, tokens, cost) |
 
 **What is never sent:** cookies, DOM content, form values, request/response
 bodies, headers, emails, full URLs with query strings.
@@ -56,6 +57,11 @@ git clone https://github.com/Autter-dev/autter-runtime
 cd autter-runtime
 docker compose up   # ClickHouse + ingester on :4318, key "dev-key"
 ```
+
+> **That's all the clone is for.** It runs the ingester — you never add
+> code to this checkout. Every step from here on (installing packages,
+> creating `instrument.cjs`, …) happens in **your application's
+> repository**, the app you want to monitor.
 
 For real deployments, configure keys via env (or point
 `AUTTER_KEY_VALIDATOR_URL` at your own key service):
@@ -76,6 +82,9 @@ app/repository — the `repositoryId` is how data is grouped for analysis.
 Full config reference: [`packages/otlp-ingester`](../packages/otlp-ingester).
 
 ## 3. Instrument your backend
+
+In **your app's repository** (not the `autter-runtime` checkout from
+step 2):
 
 ```bash
 npm install @autter/runtime-node
@@ -103,8 +112,10 @@ node --require ./instrument.cjs server.js
 ```
 
 That alone gives you: every incoming HTTP request traced-and-sampled,
-request/error/duration rollups per route, and crashes captured. For
-handled errors:
+request/error/duration rollups per route, crashes captured, and the full
+trace of any request that errors — erroring traces are retained even when
+the sampler wouldn't have kept them, so every issue keeps the trace that
+explains it. For handled errors:
 
 ```js
 const { captureException } = require("@autter/runtime-node");
@@ -121,6 +132,57 @@ ESM-only app? Use `--import` plus OTel's loader hook (see the
 [package README](../packages/runtime-node)). Express route timings can be
 enriched with `@opentelemetry/instrumentation-express` via the
 `instrumentations` option.
+
+### Track LLM usage & cost
+
+`initAutterServer` initialises LLM tracing too: every recognised LLM call
+is recorded 100% (an LLM-aware sampler keeps GenAI spans even at 1% trace
+sampling) with model, tokens, latency, and a USD cost — estimated from a
+built-in price table unless you report the exact figure. Three ways to emit
+calls, easiest first:
+
+```ts
+// 1. Wrap the client once — OpenAI/Anthropic/Google SDKs, streaming included:
+import { instrumentLlmClient } from "@autter/runtime-node";
+const openai = instrumentLlmClient(new OpenAI());
+
+// 2. Vercel AI SDK — turn on its telemetry, nothing else:
+const { text } = await generateText({
+  model: openai("gpt-5-mini"),
+  prompt,
+  experimental_telemetry: {
+    isEnabled: true,
+    metadata: { userId: user.id },   // → per-user cost attribution
+  },
+});
+
+// 3. Raw fetch / anything else — wrap the call manually:
+import { withLlmCall } from "@autter/runtime-node";
+const res = await withLlmCall(
+  { provider: "openai", model: "gpt-5-mini", userId: user.id },
+  async (llm) => {
+    const out = await openai.chat.completions.create({ ... });
+    llm.setUsage({ inputTokens: out.usage?.prompt_tokens,
+                   outputTokens: out.usage?.completion_tokens });
+    return out;
+  },
+);
+```
+
+Or report after the fact with
+`trackLlmCall({ provider, model, inputTokens, outputTokens, durationMs })`.
+Python/Go/etc. need no Autter package: any OTel GenAI instrumentation
+(OpenLLMetry, OpenLIT, the official contrib packages) emitting `gen_ai.*`
+spans through the OTLP endpoint is recognised the same way.
+
+Verify the pipe without spending a token — `emitLlmSelftestTrace()` sends
+one clearly-named fake call, flushes it, and returns the `traceId` to look
+up:
+
+```ts
+import { emitLlmSelftestTrace } from "@autter/runtime-node";
+console.log(await emitLlmSelftestTrace()); // { traceId: "…" }
+```
 
 ## 4. Instrument your frontend
 
@@ -175,7 +237,7 @@ setUser("u_8f2k1");                                     // opaque id — never a
 ```
 
 React render errors don't reach `window.onerror` — add the boundary
-(exported from `@autter/runtime-next`, works in any React app):
+(exported from `@autter/runtime-next/client`, works in any React app):
 
 ```tsx
 <AutterErrorBoundary fallback={<ErrorPage />}>
@@ -214,6 +276,14 @@ Errors become issues when spans record exceptions
 (`span.RecordError(err)` in Go, `record_exception` in Python, …) or carry
 `ERROR` status. Per-language snippets: [INTEGRATIONS.md](INTEGRATIONS.md).
 
+LLM calls need no Autter package either: any OTel GenAI instrumentation
+(`gen_ai.*` spans — e.g. `opentelemetry-instrumentation-openai-v2` in
+Python) is recognised automatically. One caveat: make sure your sampler
+doesn't drop them — the 1% ratio above applies to everything, so either
+exempt GenAI spans in a custom sampler or route them through an always-on
+tracer provider. See
+[INTEGRATIONS.md § LLM / GenAI calls](INTEGRATIONS.md#llm--genai-calls-any-language).
+
 ## 7. Verify data is flowing
 
 Trigger a test error, then query ClickHouse:
@@ -227,6 +297,12 @@ SELECT service, route, sum(request_count) AS requests, sum(error_count) AS error
 FROM autter_runtime.runtime_metrics_1m
 WHERE bucket_at > now() - INTERVAL 1 HOUR
 GROUP BY service, route;
+
+-- LLM calls (after emitLlmSelftestTrace() or a real traced model call)
+SELECT service, provider, model, input_tokens, output_tokens,
+       cost_usd, cost_source, status, started_at
+FROM autter_runtime.runtime_llm_calls
+ORDER BY started_at DESC LIMIT 10;
 ```
 
 With the local compose setup: `docker compose exec clickhouse
@@ -240,7 +316,9 @@ clickhouse-client --password dev`.
 - [ ] `release` is wired to your git SHA in **both** frontend and backend —
       it's what powers regression detection ("broke in release X").
 - [ ] Keep trace sampling at ~1% (`traceSampleRate`) — errors are always
-      captured regardless.
+      captured regardless, and the full trace of an erroring request is
+      retained (`retainTracesOnError`, on by default), so cheap sampling
+      doesn't cost you debugging context.
 - [ ] The relay route keeps its built-in per-IP rate limit (or your WAF
       covers it: `perIpRateLimit: false`).
 - [ ] Direct browser ingest: your CSP includes

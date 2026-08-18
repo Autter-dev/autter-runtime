@@ -23,6 +23,11 @@ export interface IngesterConfig {
 	/** Optional webhook receiving fingerprinted occurrences for issue grouping. */
 	sinkUrl: string | null;
 	sinkToken: string | null;
+	/** Sink delivery attempts per batch before giving up (backoff-capped ~8 min). */
+	sinkMaxAttempts: number;
+	/** Bounds for the in-memory sink retry buffer; oldest batches drop first. */
+	sinkMaxBufferedBatches: number;
+	sinkMaxBufferedMb: number;
 	maxBodyBytes: number;
 	/** Per-key requests per minute (server keys). */
 	rateLimitPerMinute: number;
@@ -32,6 +37,7 @@ export interface IngesterConfig {
 	occurrenceTtlDays: number;
 	spanTtlDays: number;
 	metricsTtlDays: number;
+	llmCallTtlDays: number;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -71,12 +77,20 @@ export function loadConfig(): IngesterConfig {
 		keyValidatorToken: process.env.AUTTER_KEY_VALIDATOR_TOKEN || null,
 		sinkUrl: process.env.AUTTER_SINK_URL || null,
 		sinkToken: process.env.AUTTER_SINK_TOKEN || null,
+		// 12 attempts with 1s..60s exponential backoff spans ~8 minutes — long
+		// enough to ride out a routine consumer deploy without unbounded memory.
+		sinkMaxAttempts: intEnv("SINK_MAX_ATTEMPTS", 12),
+		sinkMaxBufferedBatches: intEnv("SINK_MAX_BUFFERED_BATCHES", 1000),
+		sinkMaxBufferedMb: intEnv("SINK_MAX_BUFFERED_MB", 64),
 		maxBodyBytes: intEnv("MAX_BODY_BYTES", 1024 * 1024),
 		rateLimitPerMinute: intEnv("RATE_LIMIT_PER_MINUTE", 300),
 		clientRateLimitPerMinute: intEnv("CLIENT_RATE_LIMIT_PER_MINUTE", 120),
 		occurrenceTtlDays: intEnv("OCCURRENCE_TTL_DAYS", 14),
 		spanTtlDays: intEnv("SPAN_TTL_DAYS", 7),
 		metricsTtlDays: intEnv("METRICS_TTL_DAYS", 90),
+		// LLM calls keep the metrics horizon, not the span one — cost trends
+		// need months, and per-call volume is small next to HTTP spans.
+		llmCallTtlDays: intEnv("LLM_CALL_TTL_DAYS", 90),
 	};
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {
 		throw new Error(

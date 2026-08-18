@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import express, {
 	type Express,
 	type Request,
@@ -7,7 +6,11 @@ import express, {
 import { KeyResolver, RateLimiter } from "./auth.js";
 import { ClickHouseStore } from "./clickhouse.js";
 import type { IngesterConfig } from "./config.js";
-import { deriveFields, fingerprintOccurrence } from "./fingerprint.js";
+import {
+	deriveFields,
+	fingerprintOccurrence,
+	occurrenceIdFor,
+} from "./fingerprint.js";
 import {
 	browserPayloadSchema,
 	normalizeBrowserPayload,
@@ -19,9 +22,9 @@ import {
 	type OtlpTraceRequest,
 } from "./normalize-otlp.js";
 import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
+import { SinkForwarder } from "./sink.js";
 import type {
 	IngestContext,
-	RuntimeMetricPoint,
 	RuntimeOccurrence,
 	RuntimeOccurrenceInput,
 } from "./types.js";
@@ -29,10 +32,16 @@ import type {
 export interface IngesterApp {
 	app: Express;
 	store: ClickHouseStore;
+	/** Present when AUTTER_SINK_URL is configured. */
+	sink: SinkForwarder | null;
 }
 
 export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	const store = new ClickHouseStore(config);
+	// Fingerprinted occurrences feed the consumer's issue grouping, metric
+	// points feed the request/error-rate rollups, LLM calls feed spend
+	// watching. Delivery is at-least-once with bounded retries — see sink.ts.
+	const sink = config.sinkUrl ? new SinkForwarder(config) : null;
 	const keys = new KeyResolver(config);
 	const serverRateLimiter = new RateLimiter(config.rateLimitPerMinute);
 	const clientRateLimiter = new RateLimiter(config.clientRateLimitPerMinute);
@@ -83,15 +92,18 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	});
 
 	app.get("/healthz", async (_req, res) => {
+		const sinkStats = sink ? { sink: sink.stats() } : {};
 		if (!store.configured) {
-			res.status(200).json({ ok: true, clickhouse: "unconfigured" });
+			res.status(200).json({ ok: true, clickhouse: "unconfigured", ...sinkStats });
 			return;
 		}
 		try {
 			const ok = await store.ping();
-			res.status(ok ? 200 : 503).json({ ok, clickhouse: ok ? "up" : "down" });
+			res
+				.status(ok ? 200 : 503)
+				.json({ ok, clickhouse: ok ? "up" : "down", ...sinkStats });
 		} catch {
-			res.status(503).json({ ok: false, clickhouse: "down" });
+			res.status(503).json({ ok: false, clickhouse: "down", ...sinkStats });
 		}
 	});
 
@@ -147,52 +159,23 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		return ctx;
 	}
 
+	/** Ids are content-derived (occurrenceIdFor), NOT random: an exporter
+	 * that retries a batch — after a 503 from a partially-failed ClickHouse
+	 * write, or when only our 2xx got lost — must produce the same ids, so
+	 * the sink consumer's per-occurrence dedupe holds across transport
+	 * retries and duplicated ClickHouse rows stay identifiable. */
 	function fingerprintAll(
+		ctx: IngestContext,
 		inputs: RuntimeOccurrenceInput[],
 	): RuntimeOccurrence[] {
-		return inputs.map((input) => ({
-			...input,
-			occurrenceId: randomUUID(),
-			fingerprint: fingerprintOccurrence(input),
-			...deriveFields(input),
-		}));
-	}
-
-	/**
-	 * Best-effort forward for the cloud dashboard: fingerprinted occurrences
-	 * feed issue grouping, metric points feed the request/error-rate rollups.
-	 */
-	function forwardToSink(
-		ctx: IngestContext,
-		occurrences: RuntimeOccurrence[],
-		metricPoints: RuntimeMetricPoint[] = [],
-	) {
-		if (!config.sinkUrl) return;
-		if (occurrences.length === 0 && metricPoints.length === 0) return;
-		void fetch(config.sinkUrl, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				...(config.sinkToken
-					? { authorization: `Bearer ${config.sinkToken}` }
-					: {}),
-			},
-			body: JSON.stringify({
-				version: 1,
-				orgId: ctx.orgId,
-				repositoryId: ctx.repositoryId,
-				occurrences: occurrences.map((o) => ({
-					...o,
-					occurredAt: o.occurredAt.toISOString(),
-				})),
-				metrics: metricPoints.map((p) => ({
-					...p,
-					bucketAt: p.bucketAt.toISOString(),
-				})),
-			}),
-			signal: AbortSignal.timeout(10_000),
-		}).catch((err) => {
-			console.warn("sink forward failed (non-fatal):", err?.message ?? err);
+		return inputs.map((input, index) => {
+			const fingerprint = fingerprintOccurrence(input);
+			return {
+				...input,
+				occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
+				fingerprint,
+				...deriveFields(input),
+			};
 		});
 	}
 
@@ -225,19 +208,29 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		} else {
 			request = req.body as OtlpTraceRequest;
 		}
-		const { occurrences, spans, metricPoints } = normalizeTraces(request);
-		const fingerprinted = fingerprintAll(occurrences);
+		const { occurrences, spans, metricPoints, llmCalls } =
+			normalizeTraces(request);
+		const fingerprinted = fingerprintAll(ctx, occurrences);
+		// ClickHouse has no cross-table transaction, so these four inserts can
+		// partially commit. Recovery boundary: any failure → 503 → the exporter
+		// retries the whole batch. Deterministic occurrence ids make the retry
+		// idempotent downstream (consumer dedupes per id; duplicate ClickHouse
+		// rows share an id, and the consumer's reconciler counts distinct ids),
+		// and nothing reaches the sink queue unless every insert succeeded —
+		// signals persisted by a partial write are picked up by the consumer's
+		// ClickHouse reconciliation instead.
 		try {
 			await Promise.all([
 				store.insertOccurrences(ctx, fingerprinted),
 				store.insertSpans(ctx, spans),
 				store.insertMetricPoints(ctx, metricPoints),
+				store.insertLlmCalls(ctx, llmCalls),
 			]);
 		} catch (err) {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, fingerprinted, metricPoints);
+		sink?.enqueue(ctx, fingerprinted, metricPoints, llmCalls);
 		otlpSuccess(req, res);
 	});
 
@@ -262,7 +255,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, [], metricPoints);
+		sink?.enqueue(ctx, [], metricPoints);
 		otlpSuccess(req, res);
 	});
 
@@ -288,7 +281,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		const { occurrences, metricPoints } = normalizeBrowserPayload(parsed.data);
-		const fingerprinted = fingerprintAll(occurrences);
+		const fingerprinted = fingerprintAll(ctx, occurrences);
 		try {
 			await Promise.all([
 				store.insertOccurrences(ctx, fingerprinted),
@@ -298,7 +291,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			storageError(res, err);
 			return;
 		}
-		forwardToSink(ctx, fingerprinted, metricPoints);
+		sink?.enqueue(ctx, fingerprinted, metricPoints);
 		res.status(202).json({ accepted: fingerprinted.length });
 	});
 
@@ -324,5 +317,5 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		},
 	);
 
-	return { app, store };
+	return { app, store, sink };
 }

@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# copied from packages/runtime-browser/dist by the example's prestart
+examples/express-app/public/sdk/
 *.log
 .env
 .env.*

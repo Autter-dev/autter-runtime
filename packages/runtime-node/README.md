@@ -16,7 +16,10 @@ npm install @autter/runtime-node
 The browser tracker posts to your backend; this handler validates and
 whitelist-sanitises the payload, attaches your private ingest key
 server-side, and returns 202 only after the ingester accepts the batch. This
-lets the browser SDK retry transient end-to-end delivery failures.
+lets the browser SDK retry transient end-to-end delivery failures. When the
+ingester refuses the batch (bad key, rate limit, …), the relay passes the
+ingester's rejection reason back as JSON so the refusal is explainable
+browser-side via `onDrop`.
 
 Express / Node http:
 

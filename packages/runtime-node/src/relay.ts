@@ -25,6 +25,16 @@ export interface RelayOptions {
 	onError?: (err: unknown) => void;
 }
 
+interface ForwardResult {
+	status: number;
+	/**
+	 * Rejection reason extracted from the ingester's JSON error body
+	 * ("invalid ingest key", "rate limit exceeded", …) so refusals can be
+	 * explained to the browser caller instead of surfacing as bare statuses.
+	 */
+	error?: string;
+}
+
 class IpWindow {
 	private windows = new Map<string, { start: number; count: number }>();
 
@@ -123,7 +133,24 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 	};
 }
 
-async function forward(payload: object, opts: RelayOptions): Promise<number> {
+/** Pull the human-readable `error` field out of an ingester rejection
+ * body, capped so a hostile upstream can't stream junk to the browser. */
+async function upstreamError(response: Response): Promise<string | undefined> {
+	try {
+		const body = (await response.json()) as { error?: unknown } | null;
+		if (typeof body?.error === "string" && body.error) {
+			return body.error.slice(0, 200);
+		}
+	} catch {
+		// Non-JSON or unreadable body — fall through.
+	}
+	return undefined;
+}
+
+async function forward(
+	payload: object,
+	opts: RelayOptions,
+): Promise<ForwardResult> {
 	const url = `${(opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "")}/v1/browser`;
 	try {
 		const response = await fetch(url, {
@@ -135,13 +162,26 @@ async function forward(payload: object, opts: RelayOptions): Promise<number> {
 			body: JSON.stringify(payload),
 			signal: AbortSignal.timeout(10_000),
 		});
-		return response.status;
+		if (response.ok) return { status: response.status };
+		return { status: response.status, error: await upstreamError(response) };
 	} catch (err) {
 		(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(
 			err,
 		);
-		return 503;
+		return { status: 503, error: "ingest upstream unavailable" };
 	}
+}
+
+/** Rejections are explained: the ingester's own reason (or a relay-level
+ * one) travels back as JSON so the browser SDK can surface it. */
+function forwardResponse(result: ForwardResult): Response {
+	if (result.status >= 200 && result.status < 300) {
+		return new Response(null, { status: 202 });
+	}
+	return new Response(JSON.stringify({ error: result.error ?? "forward failed" }), {
+		status: result.status,
+		headers: { "content-type": "application/json" },
+	});
 }
 
 /**
@@ -190,8 +230,7 @@ export function createBrowserRelayFetchHandler(
 				status: 400,
 			});
 		}
-		const status = await forward(payload, opts);
-		return new Response(null, { status: status >= 200 && status < 300 ? 202 : status });
+		return forwardResponse(await forward(payload, opts));
 	};
 }
 
@@ -231,8 +270,14 @@ export function createBrowserRelayHandler(
 			respond(res, 400, { error: "invalid payload" });
 			return;
 		}
-		const status = await forward(payload, opts);
-		respond(res, status >= 200 && status < 300 ? 202 : status);
+		const result = await forward(payload, opts);
+		const status =
+			result.status >= 200 && result.status < 300 ? 202 : result.status;
+		respond(
+			res,
+			status,
+			result.error ? { error: result.error } : undefined,
+		);
 	}
 
 	return (req, res) => {

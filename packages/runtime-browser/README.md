@@ -75,7 +75,10 @@ flush (500 ms). Ordinary delivery uses acknowledged `fetch(keepalive)` with
 three bounded retries. Page hide/unload uses `navigator.sendBeacon` as a
 last chance. A configurable 200-event page-lifecycle cap and 20-copy
 per-error cap prevent loops from flooding; `onDrop` and `getDeliveryStats()`
-make every SDK-side drop observable.
+make every SDK-side drop observable. Delivery refusals carry the server's
+reason (`onDrop`'s third argument, e.g. `"invalid ingest key"`) and are not
+retried — only rate limits (429), transient upstream failures (5xx) and
+network errors are.
 
 ## What is never sent
 

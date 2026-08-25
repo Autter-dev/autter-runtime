@@ -37,8 +37,16 @@ export interface AutterBrowserOptions {
 	maxEvents?: number;
 	/** Maximum copies of the same error accepted per page (default 20). */
 	maxDuplicateErrors?: number;
-	/** Called when an event is discarded by a safety limit or delivery failure. */
-	onDrop?: (count: number, reason: BrowserDropReason) => void;
+	/**
+	 * Called when an event is discarded by a safety limit or delivery failure.
+	 * `detail` carries the server's rejection reason when one arrived
+	 * ("invalid ingest key", "rate limit exceeded", …).
+	 */
+	onDrop?: (
+		count: number,
+		reason: BrowserDropReason,
+		detail?: string,
+	) => void;
 }
 
 export type BrowserDropReason = "session_cap" | "duplicate" | "delivery_failed";
@@ -173,10 +181,14 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	}
 }
 
-function recordDrop(count: number, reason: BrowserDropReason): void {
+function recordDrop(
+	count: number,
+	reason: BrowserDropReason,
+	detail?: string,
+): void {
 	droppedCount += count;
 	try {
-		opts.onDrop?.(count, reason);
+		opts.onDrop?.(count, reason, detail);
 	} catch {
 		// Diagnostics must never break the host application.
 	}
@@ -238,33 +250,60 @@ function payload(events: BrowserEvent[]): string {
 	});
 }
 
+/** Extract the server's rejection reason ("invalid ingest key", "rate
+ * limit exceeded", …) from a refused response body. */
+function refusalReason(response: Response): Promise<string | undefined> {
+	return response.text().then((text) => {
+		try {
+			const parsed = JSON.parse(text) as { error?: unknown } | null;
+			if (typeof parsed?.error === "string" && parsed.error) {
+				return parsed.error.slice(0, 200);
+			}
+		} catch {
+			// Non-JSON body — no usable reason.
+		}
+		return undefined;
+	}, () => undefined);
+}
+
+/**
+ * Send queued events now, retaining and retrying a batch until acknowledged.
+ * A refusal the server explained won't change on retry — permanent 4xx
+ * rejections fail fast with the reason; only rate limits (429), transient
+ * upstream failures (5xx) and network errors are retried.
+ */
 async function deliver(events: BrowserEvent[], attempt: number): Promise<void> {
-	const body = payload(events);
 	const direct = !!opts.clientKey;
-	const contentType = direct ? "text/plain" : "application/json";
+	let detail: string | undefined;
+	let retriable = true;
 	try {
 		const response = await fetch(opts.endpoint, {
 			method: "POST",
-			body,
-			headers: { "content-type": contentType },
+			body: payload(events),
+			headers: { "content-type": direct ? "text/plain" : "application/json" },
 			keepalive: true,
 			credentials: "omit",
 		});
-		if (!response.ok) throw new Error(`HTTP ${response.status}`);
-		deliveredCount += events.length;
-		sending = false;
-		inFlightCount = 0;
-		if (queue.length > 0) flush();
-	} catch {
-		if (attempt < MAX_RETRIES) {
-			setTimeout(() => void deliver(events, attempt + 1), 500 * 2 ** attempt);
+		if (response.ok) {
+			deliveredCount += events.length;
+			sending = false;
+			inFlightCount = 0;
+			if (queue.length > 0) flush();
 			return;
 		}
-		sending = false;
-		inFlightCount = 0;
-		recordDrop(events.length, "delivery_failed");
-		if (queue.length > 0) flush();
+		detail = await refusalReason(response);
+		retriable = response.status === 429 || response.status >= 500;
+	} catch {
+		detail = undefined;
 	}
+	if (retriable && attempt < MAX_RETRIES) {
+		setTimeout(() => void deliver(events, attempt + 1), 500 * 2 ** attempt);
+		return;
+	}
+	sending = false;
+	inFlightCount = 0;
+	recordDrop(events.length, "delivery_failed", detail);
+	if (queue.length > 0) flush();
 }
 
 /** Last-chance unload delivery. Beacon acceptance is not a server ack. */

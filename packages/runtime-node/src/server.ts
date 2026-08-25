@@ -38,6 +38,23 @@ import {
 	ATTR_SERVICE_NAME,
 	ATTR_SERVICE_VERSION,
 } from "@opentelemetry/semantic-conventions";
+import {
+	CountingExporter,
+	installAutterAutoFlush,
+	isDebugEnabled,
+	debugLog,
+	registerFlushTarget,
+	telemetryStats,
+	unregisterFlushTargets,
+	type AutoFlushHandle,
+	setDebugMode,
+	type FlushTarget,
+} from "./lifecycle.js";
+import {
+	makeRedactor,
+	redactAttributes,
+	type RedactOptions,
+} from "./redact.js";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -90,6 +107,29 @@ export interface AutterServerOptions {
 	metricIntervalMs?: number;
 	/** Capture crashing exceptions via process.uncaughtExceptionMonitor (default true). */
 	captureGlobalErrors?: boolean;
+	/**
+	 * Flush all exporters when the process exits (`beforeExit`, SIGINT,
+	 * SIGTERM) so a forgotten `shutdown()` doesn't silently drop buffered
+	 * telemetry. If your code also handles the signal, Autter only flushes
+	 * alongside it and never changes your exit path. Default true.
+	 */
+	autoFlush?: boolean;
+	/**
+	 * Mask PII/secrets in custom attributes before they leave the process:
+	 * emails, tokens (JWT, sk-, gh_, AWS, Slack), bearer headers,
+	 * `scheme://user:pass@` URLs, and anything whose attribute KEY looks
+	 * sensitive (password/token/secret/cookie/…). Mirrors the browser
+	 * relay's whitelist sanitiser. `true`/undefined = defaults; pass a
+	 * RedactOptions object to extend the patterns; `false` disables.
+	 * Default true.
+	 */
+	redactAttributes?: boolean | RedactOptions;
+	/**
+	 * Verbose lifecycle logging to stderr: "exported N spans", flushes and
+	 * auto-flush activity — handy while wiring the SDK up. Also enabled by
+	 * the AUTTER_DEBUG=1 environment variable. Default false.
+	 */
+	debug?: boolean;
 	/**
 	 * Record LLM/GenAI spans (`gen_ai.*` semconv, Vercel AI SDK `ai.*`,
 	 * `withLlmCall`) at 100% regardless of `traceSampleRate`, so every model
@@ -484,7 +524,9 @@ function llmBaseAttributes(info: LlmCallInfo): Attributes {
 		"gen_ai.request.model": info.model,
 		...(info.userId ? { "autter.user_id": info.userId } : {}),
 		...(info.sessionId ? { "autter.session_id": info.sessionId } : {}),
-		...info.attributes,
+		// Caller-supplied extras go through redaction like every other
+		// custom attribute family (prompts can contain emails/keys).
+		...(info.attributes ? activeRedactor(info.attributes) : {}),
 	};
 }
 
@@ -656,6 +698,10 @@ let active: AutterServer | null = null;
  * server is active so withLlmCall/withProcessSpan bypass head sampling. */
 let activeAlwaysOnProvider: BasicTracerProvider | null = null;
 
+/** Compiled attribute redactor — defaults until initAutterServer applies its
+ * own configuration. Used by every capture path including LLM attributes. */
+let activeRedactor = makeRedactor(true);
+
 export function initAutterServer(options: AutterServerOptions): AutterServer {
 	if (active) return active;
 
@@ -665,6 +711,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	);
 	const headers = { authorization: `Bearer ${options.apiKey}` };
 	const environment = options.environment ?? process.env.NODE_ENV ?? "production";
+
+	// Debug mode: option OR AUTTER_DEBUG env (lifecycle seeds itself from the
+	// env at import time — never clobber an env-enabled session here).
+	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
+	debugLog(`initialising service=${options.service} endpoint=${endpoint}`);
+	activeRedactor = makeRedactor(options.redactAttributes ?? true);
 
 	const resource = new Resource({
 		[ATTR_SERVICE_NAME]: options.service,
@@ -694,33 +746,40 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const errorTraceBuffer = retainOnError
 		? new ErrorTraceRetentionProcessor(
 				new BatchSpanProcessor(
-					new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+					new CountingExporter(
+						new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+					),
 					{ scheduledDelayMillis: 2000 },
 				),
 			)
 		: null;
 
+	const mainSpanProcessor = new BatchSpanProcessor(
+		new CountingExporter(
+			new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+		),
+	);
+	const metricReader = new PeriodicExportingMetricReader({
+		exporter: new OTLPMetricExporter({
+			url: `${endpoint}/v1/metrics`,
+			headers,
+			// Deltas, not lifetime totals: the ingester SUMs data points
+			// into runtime_metrics_1m, and the default (cumulative)
+			// temporality would re-count every past request on each
+			// 60 s export.
+			temporalityPreference: AggregationTemporalityPreference.DELTA,
+		}),
+		exportIntervalMillis: options.metricIntervalMs ?? 60_000,
+	});
+
 	const sdk = new NodeSDK({
 		resource,
 		sampler,
 		spanProcessors: [
-			new BatchSpanProcessor(
-				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
-			),
+			mainSpanProcessor,
 			...(errorTraceBuffer ? [errorTraceBuffer] : []),
 		],
-		metricReader: new PeriodicExportingMetricReader({
-			exporter: new OTLPMetricExporter({
-				url: `${endpoint}/v1/metrics`,
-				headers,
-				// Deltas, not lifetime totals: the ingester SUMs data points
-				// into runtime_metrics_1m, and the default (cumulative)
-				// temporality would re-count every past request on each
-				// 60 s export.
-				temporalityPreference: AggregationTemporalityPreference.DELTA,
-			}),
-			exportIntervalMillis: options.metricIntervalMs ?? 60_000,
-		}),
+		metricReader,
 		instrumentations: [
 			new HttpInstrumentation({ responseHook: captureExpressRoute }),
 			...((options.instrumentations ?? []) as never[]),
@@ -736,7 +795,9 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		sampler: new AlwaysOnSampler(),
 		spanProcessors: [
 			new BatchSpanProcessor(
-				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+				new CountingExporter(
+					new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+				),
 				{ scheduledDelayMillis: 2000 },
 			),
 		],
@@ -752,10 +813,16 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	function captureException(error: unknown, attributes?: Attributes): void {
 		// A captured error makes the surrounding trace worth keeping in full.
 		errorTraceBuffer?.retainActiveTrace();
+		telemetryStats.markCaptured();
 		const isError = error instanceof Error;
 		const message = isError ? error.message : String(error);
 		const span = errorTracer.startSpan(isError ? error.name : "Error", {
-			attributes: { "autter.severity": "error", ...attributes },
+			attributes: {
+				"autter.severity": "error",
+				// Redaction is applied here, not at export time: PII must not
+				// leave the process even if an exporter misbehaves.
+				...activeRedactor(attributes),
+			},
 		});
 		if (isError && error.stack) {
 			span.recordException(error);
@@ -788,6 +855,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		if (severity === "error" || severity === "fatal") {
 			errorTraceBuffer?.retainActiveTrace();
 		}
+		telemetryStats.markCaptured();
 		// Same wire shape as an exception (an event named "exception" with
 		// ERROR status is what the ingester turns into an occurrence), with
 		// autter.severity carrying the level. A synthetic stack (minus this
@@ -797,7 +865,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			.filter((line, i) => i === 0 || !line.includes("captureMessage"))
 			.join("\n");
 		const span = errorTracer.startSpan("Message", {
-			attributes: { "autter.severity": severity, ...attributes },
+			attributes: { "autter.severity": severity, ...activeRedactor(attributes) },
 		});
 		span.addEvent("exception", {
 			"exception.type": "Message",
@@ -815,7 +883,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		// Best-effort: the batch may not fully flush before the process dies.
 		process.on("uncaughtExceptionMonitor", (err) => {
 			captureException(err, { "autter.unhandled": true });
-			void alwaysOnProvider.forceFlush().catch(() => {});
+			void flushTarget.forceFlush();
 		});
 		// The async twin of an uncaught exception: a rejected promise with no
 		// `.catch`. Registering this listener also stops Node's default
@@ -834,16 +902,40 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		});
 	}
 
+	// Everything that buffers telemetry in-process, reachable as one unit:
+	// auto-flush and the crash monitor push all of these out together
+	// (NodeSDK exposes no forceFlush(), but the processors we handed it do).
+	const flushTarget: FlushTarget = {
+		forceFlush: async () => {
+			await Promise.allSettled([
+				alwaysOnProvider.forceFlush(),
+				mainSpanProcessor.forceFlush(),
+				...(errorTraceBuffer ? [errorTraceBuffer.forceFlush()] : []),
+				metricReader.forceFlush(),
+			]);
+		},
+	};
+	registerFlushTarget("active-server", flushTarget);
+
+	let autoFlushHandle: AutoFlushHandle | null = null;
+	if (options.autoFlush !== false) {
+		autoFlushHandle = installAutterAutoFlush();
+	}
+
 	const server: AutterServer = {
 		captureException,
 		captureMessage,
 		withProcessSpan: (name, fn, attributes) =>
-			runWithSpan(processTracer, name, fn, attributes),
+			runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
 			active = null;
 			activeAlwaysOnProvider = null;
+			autoFlushHandle?.dispose();
+			autoFlushHandle = null;
+			unregisterFlushTargets();
+			telemetryStats.markAllFlushed();
 			await Promise.allSettled([alwaysOnProvider.shutdown(), sdk.shutdown()]);
 		},
 	};
@@ -929,6 +1021,41 @@ export function captureMessage(
 	});
 	span.setStatus({ code: SpanStatusCode.ERROR, message });
 	span.end();
+}
+
+/** Capture surface with guaranteed redaction, regardless of how the host app
+ * configured initAutterServer — for library authors whose calls must never
+ * forward PII even when the host disabled it. Routes to the active server
+ * (or degrades to the global tracer exactly like captureException). */
+export interface SafeCapture {
+	captureException(error: unknown, attributes?: Attributes): void;
+	captureMessage(
+		message: string,
+		severity?: AutterSeverity,
+		attributes?: Attributes,
+	): void;
+}
+
+/**
+ * Build a redacting capture wrapper:
+ *
+ *   const safe = makeSafeCapture();
+ *   safe.captureException(err, { "user.email": email }); // masked before export
+ *
+ * The returned functions have the same signatures as their plain twins;
+ * every attribute passes through redactAttributes() first. Note that when
+ * the host has NOT disabled redaction this is belt-and-braces (already on by
+ * default) — its value is enforcing privacy inside libraries and wrappers.
+ */
+export function makeSafeCapture(options?: RedactOptions): SafeCapture {
+	const clean = (attributes?: Attributes): Attributes | undefined =>
+		attributes ? { ...redactAttributes(attributes, options) } : undefined;
+	return {
+		captureException: (error, attributes) =>
+			captureException(error, clean(attributes)),
+		captureMessage: (message, severity, attributes) =>
+			captureMessage(message, severity ?? "warning", clean(attributes)),
+	};
 }
 
 /** Tracer from the always-on provider (never head-sampled), or the global

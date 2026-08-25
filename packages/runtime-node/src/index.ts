@@ -12,6 +12,7 @@ export {
 	withLlmCall,
 	trackLlmCall,
 	emitLlmSelftestTrace,
+	makeSafeCapture,
 	type AutterServerOptions,
 	type AutterServer,
 	type AutterSeverity,
@@ -19,7 +20,18 @@ export {
 	type LlmCallHandle,
 	type LlmUsage,
 	type TrackedLlmCall,
+	type SafeCapture,
 } from "./server.js";
+export {
+	installAutterAutoFlush,
+	type AutoFlushHandle,
+	type AutoFlushOptions,
+	type FlushTarget,
+} from "./lifecycle.js";
+export {
+	redactAttributes,
+	type RedactOptions,
+} from "./redact.js";
 export {
 	instrumentLlmClient,
 	type InstrumentLlmOptions,

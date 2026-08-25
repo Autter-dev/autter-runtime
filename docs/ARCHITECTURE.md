@@ -214,6 +214,12 @@ counters, not an analytics event store).
 Forbidden at the schema level (rejected/stripped): full URLs with query
 strings, cookies, DOM content, form values, request headers/bodies, emails.
 
+Server-side custom attributes are guarded at the source instead: the Node
+SDK masks email/token/credential-shaped values and sensitive-keyed
+attributes before export (`redactAttributes`, on by default), so OTLP spans
+never carry a stray `user.email` even though the OTLP schema itself accepts
+free-form attributes.
+
 ## Sink webhook (v1)
 
 When `AUTTER_SINK_URL` is set, each ingest batch POSTs:

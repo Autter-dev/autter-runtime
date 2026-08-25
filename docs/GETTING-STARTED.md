@@ -45,7 +45,11 @@ you from zero to seeing data in ClickHouse.
 | LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% (model, tokens, cost) |
 
 **What is never sent:** cookies, DOM content, form values, request/response
-bodies, headers, emails, full URLs with query strings.
+bodies, headers, emails, full URLs with query strings. On the backend,
+custom attributes are additionally scrubbed before export: values that look
+like emails/tokens/credentials and attributes with sensitive keys
+(`password`, `api_key`, …) are masked by default (`redactAttributes`), so a
+stray `captureException(err, { "user.email": … })` doesn't leak PII.
 
 ## 2. Run the ingester
 

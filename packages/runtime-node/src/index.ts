@@ -5,6 +5,11 @@ export {
 	type RelayOptions,
 } from "./relay.js";
 export {
+	verifyIngestKey,
+	type IngestKeyVerification,
+	type VerifyIngestKeyOptions,
+} from "./probe.js";
+export {
 	initAutterServer,
 	captureException,
 	captureMessage,

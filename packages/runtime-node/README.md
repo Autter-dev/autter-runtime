@@ -43,7 +43,33 @@ export const POST = createBrowserRelayFetchHandler({
 ```
 
 Options: `endpoint` (default `https://otlp.autter.dev`), `maxBodyBytes`
-(default 64 KB), `onError`.
+(default 64 KB), `perIpRateLimit`, `onError`.
+
+**About the per-IP rate limit.** The relay's own limit (120 req/min,
+`Retry-After` included on 429) is keyed by IP because that's all a browser
+request carries at this edge — per-key limiting happens at the ingester.
+Everyone behind one office NAT / VPN shares one IP, so during development a
+single busy tab can throttle colleagues. For local dev either raise
+`perIpRateLimit` or set it to `false`. The two throttles are worded
+differently so you can tell them apart in the browser console: the relay
+says `"relay rate limit exceeded for your IP…"` while the ingester says
+`"rate limit exceeded"`.
+
+### Validate your setup
+
+Before shipping, prove the key works — the probe authenticates against the
+ingester with an empty batch (no data is written):
+
+```ts
+import { verifyIngestKey } from "@autter/runtime-node";
+
+const check = await verifyIngestKey({ apiKey: process.env.AUTTER_RUNTIME_KEY! });
+if (!check.ok) {
+  console.warn("Autter setup problem:", check.message); // e.g. "invalid ingest key"
+} else {
+  console.log("Autter ingest key OK", check.status);
+}
+```
 
 ## 2. Server tracker
 

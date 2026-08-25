@@ -18,7 +18,9 @@ export interface RelayOptions {
 	/**
 	 * The relay route is necessarily public (browsers must reach it), so it
 	 * ships with a per-IP fixed-window limit. Default 120 req/min; set
-	 * `false` to disable (e.g. when a WAF already rate-limits).
+	 * `false` to disable (e.g. when a WAF already rate-limits, or locally
+	 * where a whole office shares one egress IP). Per-key limiting happens
+	 * at the ingester; only an IP is identifiable at this edge.
 	 */
 	perIpRateLimit?: number | false;
 	/** Called when the async forward fails (default: console.warn). */
@@ -184,6 +186,30 @@ function forwardResponse(result: ForwardResult): Response {
 	});
 }
 
+/** Seconds until the per-IP fixed window resets — for Retry-After. */
+function secondsUntilNextWindow(): number {
+	return Math.max(1, 60 - Math.floor((Date.now() % 60_000) / 1000));
+}
+
+/**
+ * Relay-local throttle rejection. Deliberately worded differently from the
+ * ingester's "rate limit exceeded": a shared egress IP (office NAT, VPN,
+ * CI farm) trips THIS one even when the ingest key is far from its limit,
+ * and developers need to tell the two apart in the browser console.
+ */
+const RELAY_RATE_LIMIT_ERROR =
+	"relay rate limit exceeded for your IP — many users may share this address";
+
+function relayRateLimited(): Response {
+	return new Response(JSON.stringify({ error: RELAY_RATE_LIMIT_ERROR }), {
+		status: 429,
+		headers: {
+			"content-type": "application/json",
+			"retry-after": String(secondsUntilNextWindow()),
+		},
+	});
+}
+
 /**
  * Fetch-style handler (Next.js App Router route, Remix, Hono, Bun, Deno):
  *
@@ -205,9 +231,7 @@ export function createBrowserRelayFetchHandler(
 			const ip =
 				firstForwardedFor(request.headers.get("x-forwarded-for")) || "unknown";
 			if (!limiter.allow(ip)) {
-				return new Response(JSON.stringify({ error: "rate limit exceeded" }), {
-					status: 429,
-				});
+				return relayRateLimited();
 			}
 		}
 		const text = await request.text();
@@ -291,7 +315,10 @@ export function createBrowserRelayHandler(
 				req.socket?.remoteAddress ||
 				"unknown";
 			if (!limiter.allow(ip)) {
-				respond(res, 429, { error: "rate limit exceeded" });
+				res.statusCode = 429;
+				res.setHeader("content-type", "application/json");
+				res.setHeader("retry-after", String(secondsUntilNextWindow()));
+				res.end(JSON.stringify({ error: RELAY_RATE_LIMIT_ERROR }));
 				return;
 			}
 		}

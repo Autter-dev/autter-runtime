@@ -188,7 +188,16 @@ function recordDrop(
 ): void {
 	droppedCount += count;
 	try {
-		opts.onDrop?.(count, reason, detail);
+		if (opts.onDrop) {
+			opts.onDrop(count, reason, detail);
+		} else if (reason === "delivery_failed") {
+			// No consumer hook installed: a lost report must still be visible,
+			// not silently swallowed. Routine caps stay quiet to avoid noise.
+			console.warn(
+				`[autter] delivery failed: ${count} report(s) lost` +
+					(detail ? ` — ${detail}` : ""),
+			);
+		}
 	} catch {
 		// Diagnostics must never break the host application.
 	}

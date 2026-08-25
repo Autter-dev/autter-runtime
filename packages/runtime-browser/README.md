@@ -66,6 +66,7 @@ initAutterBrowser({
 | `setUser(id)` | **Opaque id only** — never an email |
 | `setContext(ctx)` | Attached to subsequent events |
 | `flush()` | Force-send the queue (also runs on page hide/unload) |
+| `redactContext(ctx)` | Mask obvious PII in a context bag (applied to every event automatically) |
 
 ## Batching & delivery
 
@@ -78,5 +79,12 @@ prevents error loops from flooding.
 ## What is never sent
 
 Full URLs with query strings, cookies, localStorage, DOM content, form
-values, request headers/bodies, console history, emails, IP addresses.
+values, request headers/bodies, console history, IP addresses.
 Routes are `location.pathname` only; filenames are query-stripped.
+
+Custom `context` is free-form, so it is scrubbed before send: values under
+sensitive-looking keys (`email`, `password`, `token`, `secret`, `auth`,
+`cookie`, `api_key`, `card_number`, …) are replaced with `[redacted]`, and
+email-shaped substrings are masked inside ordinary string values. This
+mirrors the server SDK's `redactAttributes`; the relay and ingester apply
+the same rules as defense-in-depth.

@@ -55,6 +55,29 @@ const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 	message: "Message",
 };
 
+// Content-level gate for the free-form `context` bag. The schema whitelist
+// above is structural; this masks obvious PII/secrets inside whatever a
+// (possibly outdated) SDK still sends: values under sensitive-looking keys
+// and email-shaped strings — mirroring redactAttributes() in
+// @autter/runtime-node and redactContext() in @autter/runtime-browser.
+const SENSITIVE_KEY_RE =
+	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
+const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const REDACTED = "[redacted]";
+
+function scrubContext(context: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(context)) {
+		if (value === undefined || value === null) continue;
+		out[key] = SENSITIVE_KEY_RE.test(key)
+			? REDACTED
+			: typeof value === "string"
+				? value.replace(EMAIL_VALUE_RE, REDACTED)
+				: value;
+	}
+	return out;
+}
+
 /** Default severity per event type when the SDK doesn't say. */
 const TYPE_TO_SEVERITY: Record<string, RuntimeSeverity> = {
 	exception: "error",
@@ -150,7 +173,7 @@ export function normalizeBrowserPayload(
 				...(event.filename ? { filename: event.filename.split("?")[0] } : {}),
 				...(event.line !== undefined ? { line: event.line } : {}),
 				...(event.column !== undefined ? { column: event.column } : {}),
-				...(event.context ? { context: event.context } : {}),
+				...(event.context ? { context: scrubContext(event.context) } : {}),
 			},
 			occurredAt,
 		});

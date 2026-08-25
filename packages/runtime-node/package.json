@@ -23,7 +23,8 @@
 		"directory": "packages/runtime-node"
 	},
 	"scripts": {
-		"build": "tsup src/index.ts --format esm,cjs --dts --target node20 --clean"
+		"build": "tsup src/index.ts --format esm,cjs --dts --target node20 --clean",
+		"test": "npm run build && node --test test/*.test.mjs"
 	},
 	"dependencies": {
 		"@opentelemetry/api": "^1.9.0",

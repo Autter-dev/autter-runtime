@@ -41,6 +41,9 @@ export {
 	trackLlmCall,
 	instrumentLlmClient,
 	emitLlmSelftestTrace,
+	makeSafeCapture,
+	installAutterAutoFlush,
+	redactAttributes,
 } from "@autter/runtime-node";
 export type {
 	LlmCallHandle,
@@ -48,6 +51,11 @@ export type {
 	LlmUsage,
 	TrackedLlmCall,
 	InstrumentLlmOptions,
+	SafeCapture,
+	AutoFlushHandle,
+	AutoFlushOptions,
+	FlushTarget,
+	RedactOptions,
 } from "@autter/runtime-node";
 export type { AutterServer, AutterServerOptions, RelayOptions };
 

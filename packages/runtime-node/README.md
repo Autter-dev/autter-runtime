@@ -89,6 +89,8 @@ Defaults (cheap by construction):
 | Healthy traces | 1% head sampling (`traceSampleRate`) |
 | Request metrics | exported every 60 s |
 | Logs | not collected |
+| PII in custom attributes | redacted before export (`redactAttributes`) |
+| Forgotten `shutdown()` | exporters still flushed on exit (`autoFlush`) |
 
 **Error-linked trace retention.** Errors export at 100% while traces are
 head-sampled — on its own that strands a retained error without the trace
@@ -109,12 +111,79 @@ import { ExpressInstrumentation } from "@opentelemetry/instrumentation-express";
 initAutterServer({ ..., instrumentations: [new ExpressInstrumentation()] });
 ```
 
+### Lifecycle: never lose telemetry to a forgotten shutdown()
+
+Telemetry is batched (errors every ~2 s, healthy traces every ~5 s, metrics
+every 60 s) — so exiting without flushing loses whatever is still buffered.
+`initAutterServer` therefore installs an exit flush **by default**: on
+`beforeExit`, SIGINT, and SIGTERM it force-flushes every exporter, then lets
+your process die as it would have (conventional 130/143 codes). If your own
+code also handles those signals, Autter only flushes alongside it and never
+touches your exit path. Opt out with `autoFlush: false`.
+
+Prefer explicit control? Do the same yourself and get a handle back:
+
+```ts
+import { installAutterAutoFlush } from "@autter/runtime-node";
+
+const handle = installAutterAutoFlush(); // uses the active server's exporters
+// …later: handle.flush("deploy-drain") or handle.dispose()
+```
+
+If the process still exits with captures that were never confirmed
+exported (e.g. a flush timed out), you get a one-line stderr warning — not
+silent loss. While wiring things up, set `debug: true` (or `AUTTER_DEBUG=1`)
+to see `[autter] exported N span(s)` lines on stderr as batches leave.
+
 Note on usage rollups: requests are counted from the `http.server.duration`
 metric (100% accurate) and additionally from sampled server spans. At the
 default 1% sampling the span contribution is negligible; if you set
 `traceSampleRate: 1` in development, expect request counts roughly doubled.
 Tail-retained error traces don't distort this: their spans carry
 `autter.tail_retained` and the ingester keeps them out of span-fed rollups.
+
+### Privacy: custom attributes are redacted before they leave the process
+
+The browser relay whitelist-sanitises everything a client posts — but the
+server tracker accepts free-form attributes from *your* code, where a stray
+`captureException(err, { "user.email": … })` would otherwise go out
+verbatim. Custom attributes are therefore scrubbed at capture time by
+default:
+
+- values that look like emails, JWTs, `sk-…`/`ghp_…`/AWS/Slack tokens,
+  `Bearer …` headers, or `scheme://user:pass@host` URLs are masked;
+- attributes whose **key** looks sensitive (`password`, `token`, `secret`,
+  `api_key`, `authorization`, `cookie`, `ssn`, `card_number`, …) are masked
+  wholesale;
+- non-sensitive keys and primitives pass through untouched, so grouping and
+  dashboards keep working.
+
+Disable or extend it per service:
+
+```ts
+initAutterServer({
+  ...,
+  // redactAttributes: false,            // opt out entirely
+  redactAttributes: {
+    additionalKeyPatterns: ["employee_id"],
+    additionalValuePatterns: [/^ACC-\d+$/],
+  },
+});
+```
+
+Libraries that must never forward PII regardless of host configuration can
+wrap once:
+
+```ts
+import { makeSafeCapture } from "@autter/runtime-node";
+const safe = makeSafeCapture();
+safe.captureException(err, { "user.email": email }); // masked before export
+```
+
+The raw primitive is exported too (`redactAttributes(attrs, options)`).
+This closes the server-side gap to match the browser relay's payload
+whitelist; it is best-effort scrubbing of obvious PII shapes, not a DLP
+engine — keep secrets out of attributes in the first place.
 
 ## 3. LLM tracing
 

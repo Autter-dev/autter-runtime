@@ -15,4 +15,7 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm run build
+      - run: npm run test -w @autter/runtime-node
+      - run: npm run test -w @autter/runtime-browser
+      - run: npm run test -w @autter/otlp-ingester
       - run: npm run size -w @autter/runtime-browser

@@ -5,7 +5,8 @@
  * - zero runtime dependencies, < 5 KB gzipped (CI-enforced)
  * - no OTel SDK, no console patching, no DOM recording, no offline storage
  * - privacy by construction: pathname-only routes, no cookies / form values /
- *   request bodies / emails; query strings stripped everywhere
+ *   request bodies; query strings stripped everywhere; custom context is
+ *   scrubbed for obvious PII (emails, sensitive keys) before send
  *
  * Payload contract: `/v1/browser` version 1 of the Autter otlp-ingester,
  * normally reached through the customer's same-origin relay
@@ -98,6 +99,30 @@ function stripQuery(value: string | undefined): string | undefined {
 	return value ? value.split("?")[0] : undefined;
 }
 
+// Mini redaction — the browser twin of redactAttributes() in
+// @autter/runtime-node. Custom context is free-form, so values under
+// sensitive-looking keys and email-shaped strings are masked before
+// anything leaves the page. Deliberately tiny: this bundle is size-capped.
+const SENSITIVE_KEY_RE =
+	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const MASK = "[redacted]";
+
+export function redactContext(
+	context: Record<string, unknown>,
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const key in context) {
+		const value = context[key];
+		out[key] = SENSITIVE_KEY_RE.test(key)
+			? MASK
+			: typeof value === "string"
+				? value.replace(EMAIL_RE, MASK)
+				: value;
+	}
+	return out;
+}
+
 function route(): string {
 	try {
 		return location.pathname;
@@ -108,6 +133,8 @@ function route(): string {
 
 function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	if (!initialized || sentCount + queue.length >= MAX_EVENTS_PER_SESSION) return;
+	// Scrub before beforeSend so the last-chance hook sees the final form.
+	if (event.context) event.context = redactContext(event.context);
 	if (opts.beforeSend) {
 		const mapped = opts.beforeSend(event);
 		if (!mapped) return;

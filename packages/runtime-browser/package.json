@@ -24,7 +24,8 @@
 		"directory": "packages/runtime-browser"
 	},
 	"scripts": {
-		"build": "tsup src/index.ts --format esm,cjs,iife --global-name AutterRuntime --dts --minify --target es2019 --clean",
+		"build": "tsup src/index.ts --format esm --dts --target es2020 --clean",
+		"test": "npm run build && node --test \"test/*.test.mjs\"",
 		"size": "size-limit"
 	},
 	"size-limit": [

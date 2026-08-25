@@ -35,6 +35,13 @@ export async function register() {
 }
 ```
 
+`registerAutter` passes options straight to `initAutterServer`, so the
+server SDK's defaults apply out of the box: exporters are flushed on
+process exit (`autoFlush`) and custom attributes are scrubbed for PII
+before export (`redactAttributes`). See the `@autter/runtime-node` README
+for every option; `makeSafeCapture`, `installAutterAutoFlush`, and
+`redactAttributes` are also re-exported from this package.
+
 **2. `app/api/autter-runtime/route.ts`** — browser relay (key stays server-side):
 
 ```ts

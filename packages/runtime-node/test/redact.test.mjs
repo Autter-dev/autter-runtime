@@ -152,6 +152,10 @@ token: "raw",
 access_token: "raw",
 refresh_token: "raw",
 authToken: "raw",
+token_value: "raw",
+tokenString: "raw",
+token_id: "raw",
+id_token_hint: "raw",
 });
 for (const value of Object.values(out)) assert.equal(value, MASK);
 });

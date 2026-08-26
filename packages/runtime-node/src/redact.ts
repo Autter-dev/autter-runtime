@@ -43,7 +43,7 @@ export interface RedactOptions {
 const SENSITIVE_KEY_PATTERNS: RegExp[] = [
 	/e-?mail/,
 	/pass(word|wd|phrase)|^pass$/,
-	/token$/,
+	/token/,
 	/secret/,
 	/credential/,
 	/(api|access|secret|private|consumer|client|signing|encryption)-?[_.]?key/,
@@ -149,9 +149,24 @@ function redactValue(value: unknown, r: CompiledRedactor, depth: number): unknow
 	return value;
 }
 
+const USAGE_TOKEN_KEYS = new Set([
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "token_count",
+        "max_tokens",
+]);
+
 function isSensitiveKey(key: string, r: CompiledRedactor): boolean {
-	const lowered = key.toLowerCase();
-	return r.keyPatterns.some((re) => re.test(lowered));
+        const lowered = key.toLowerCase();
+
+        // Known GenAI usage-count attributes are safe to keep.
+        const usageKey = lowered.split(".").pop() ?? lowered;
+        if (USAGE_TOKEN_KEYS.has(usageKey)) return false;
+
+        return r.keyPatterns.some((re) => re.test(lowered));
 }
 
 /**

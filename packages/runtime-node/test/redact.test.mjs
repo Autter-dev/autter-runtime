@@ -125,7 +125,7 @@ test("empty/nullish input yields an empty object", () => {
 	assert.deepEqual(redactAttributes(null), {});
 });
 
-test("keeps GenAI/usage token-count attributes (not secrets)", () => {
+test("keeps only supported GenAI/usage token-count attributes", () => {
 const out = redactAttributes({
 "gen_ai.usage.input_tokens": 512,
 "gen_ai.usage.output_tokens": 128,
@@ -134,7 +134,9 @@ completion_tokens: 128,
 total_tokens: 640,
 token_count: 42,
 max_tokens: 1000,
+"secret.input_tokens": 999,
 });
+
 assert.deepEqual(out, {
 "gen_ai.usage.input_tokens": 512,
 "gen_ai.usage.output_tokens": 128,
@@ -142,9 +144,11 @@ prompt_tokens: 512,
 completion_tokens: 128,
 total_tokens: 640,
 token_count: 42,
-max_tokens: 1000,
+max_tokens: MASK,
+"secret.input_tokens": MASK,
 });
 });
+
 
 test("still masks secret token keys ending in 'token'", () => {
 const out = redactAttributes({

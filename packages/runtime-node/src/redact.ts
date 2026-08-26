@@ -156,15 +156,19 @@ const USAGE_TOKEN_KEYS = new Set([
         "completion_tokens",
         "total_tokens",
         "token_count",
-        "max_tokens",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.prompt_tokens",
+        "gen_ai.usage.completion_tokens",
+        "gen_ai.usage.total_tokens",
+        "gen_ai.usage.token_count",
 ]);
 
 function isSensitiveKey(key: string, r: CompiledRedactor): boolean {
         const lowered = key.toLowerCase();
 
-        // Known GenAI usage-count attributes are safe to keep.
-        const usageKey = lowered.split(".").pop() ?? lowered;
-        if (USAGE_TOKEN_KEYS.has(usageKey)) return false;
+        // Only explicitly supported GenAI usage attributes bypass key redaction.
+        if (USAGE_TOKEN_KEYS.has(lowered)) return false;
 
         return r.keyPatterns.some((re) => re.test(lowered));
 }

@@ -43,7 +43,7 @@ export interface RedactOptions {
 const SENSITIVE_KEY_PATTERNS: RegExp[] = [
 	/e-?mail/,
 	/pass(word|wd|phrase)|^pass$/,
-	/token/,
+	/token$/,
 	/secret/,
 	/credential/,
 	/(api|access|secret|private|consumer|client|signing|encryption)-?[_.]?key/,

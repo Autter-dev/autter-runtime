@@ -142,16 +142,41 @@ function redactValue(value: unknown, r: CompiledRedactor, depth: number): unknow
 	if (typeof value === "object" && value !== null && depth > 0) {
 		const out: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-			out[k] = isSensitiveKey(k, r) ? r.mask : redactValue(v, r, depth - 1);
+			out[k] = isSensitiveKey(k, v, r) ? r.mask : redactValue(v, r, depth - 1);
 		}
 		return out;
 	}
 	return value;
 }
 
-function isSensitiveKey(key: string, r: CompiledRedactor): boolean {
-	const lowered = key.toLowerCase();
-	return r.keyPatterns.some((re) => re.test(lowered));
+const USAGE_TOKEN_KEYS = new Set([
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.prompt_tokens",
+        "gen_ai.usage.completion_tokens",
+        "gen_ai.usage.total_tokens",
+        "gen_ai.usage.token_count",
+]);
+
+function isSensitiveKey(
+        key: string,
+        value: unknown,
+        r: CompiledRedactor,
+): boolean {
+        const lowered = key.toLowerCase();
+
+        // Canonical GenAI usage attributes are safe when they contain
+        // valid non-negative numeric counts.
+        if (USAGE_TOKEN_KEYS.has(lowered)) {
+                return !(
+                        typeof value === "number" &&
+                        Number.isFinite(value) &&
+                        value >= 0
+                );
+        }
+
+        // All other sensitive keys, including token-like keys, are redacted.
+        return r.keyPatterns.some((re) => re.test(lowered));
 }
 
 /**
@@ -176,7 +201,7 @@ function redactWith(
 	if (!attributes) return out;
 	for (const [key, value] of Object.entries(attributes)) {
 		if (value === undefined) continue;
-		out[key] = isSensitiveKey(key, r)
+		out[key] = isSensitiveKey(key, value, r)
 			? r.mask
 			: (redactValue(value, r, maxDepth) as Attributes[string]);
 	}

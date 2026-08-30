@@ -124,3 +124,38 @@ test("empty/nullish input yields an empty object", () => {
 	assert.deepEqual(redactAttributes(), {});
 	assert.deepEqual(redactAttributes(null), {});
 });
+
+test("redacts sensitive keys beyond the nested traversal depth", () => {
+        const out = redactAttributes({
+                context: {
+                        level1: {
+                                level2: {
+                                        level3: {
+                                                level4: {
+                                                        password: "SECRET",
+                                                },
+                                        },
+                                },
+                        },
+                },
+        });
+
+        assert.equal(
+                out.context.level1.level2.level3.level4.password,
+                MASK,
+        );
+});
+
+test("handles circular references without leaking sensitive values", () => {
+        const context = {};
+        const nested = { password: "SECRET", safe: "ok" };
+
+        context.self = context;
+        context.nested = nested;
+
+        const out = redactAttributes({ context });
+
+        assert.equal(out.context.nested.password, MASK);
+        assert.equal(out.context.nested.safe, "ok");
+        assert.equal(out.context.self, out.context);
+});

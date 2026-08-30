@@ -131,22 +131,46 @@ function redactString(value: string, r: CompiledRedactor): string {
 	return out;
 }
 
-function redactValue(value: unknown, r: CompiledRedactor, depth: number): unknown {
-	if (typeof value === "string") return redactString(value, r);
-	if (Array.isArray(value)) {
-		if (depth <= 0) return value;
-		return value.map((item) => redactValue(item, r, depth - 1));
-	}
-	// Defensive: OTLP attributes are flat, but callers hand us arbitrary
-	// objects — walk one more level so nothing sensitive hides inside.
-	if (typeof value === "object" && value !== null && depth > 0) {
-		const out: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-			out[k] = isSensitiveKey(k, r) ? r.mask : redactValue(v, r, depth - 1);
-		}
-		return out;
-	}
-	return value;
+function redactValue(
+        value: unknown,
+        r: CompiledRedactor,
+        ancestors: WeakMap<object, object>,
+): unknown {
+        if (typeof value === "string") return redactString(value, r);
+
+        if (Array.isArray(value)) {
+                const existing = ancestors.get(value);
+                if (existing) return existing;
+
+                const out: unknown[] = [];
+                ancestors.set(value, out);
+
+                for (const item of value) {
+                        out.push(redactValue(item, r, ancestors));
+                }
+
+                ancestors.delete(value);
+                return out;
+        }
+
+        if (typeof value === "object" && value !== null) {
+                const existing = ancestors.get(value);
+                if (existing) return existing;
+
+                const out: Record<string, unknown> = {};
+                ancestors.set(value, out);
+
+                for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+                        out[k] = isSensitiveKey(k, r)
+                                ? r.mask
+                                : redactValue(v, r, ancestors);
+                }
+
+                ancestors.delete(value);
+                return out;
+        }
+
+        return value;
 }
 
 function isSensitiveKey(key: string, r: CompiledRedactor): boolean {
@@ -164,13 +188,12 @@ export function redactAttributes(
 	options?: RedactOptions,
 ): Attributes {
 	const r = compile(options);
-	return redactWith(attributes, r, 4);
+	return redactWith(attributes, r);
 }
 
 function redactWith(
 	attributes: Attributes | null | undefined,
-	r: CompiledRedactor,
-	maxDepth: number,
+        r: CompiledRedactor,
 ): Attributes {
 	const out: Attributes = {};
 	if (!attributes) return out;
@@ -178,7 +201,7 @@ function redactWith(
 		if (value === undefined) continue;
 		out[key] = isSensitiveKey(key, r)
 			? r.mask
-			: (redactValue(value, r, maxDepth) as Attributes[string]);
+			: (redactValue(value, r, new WeakMap<object, object>()) as Attributes[string]);
 	}
 	return out;
 }
@@ -194,5 +217,5 @@ export function makeRedactor(
 		return (attributes) => ({ ...(attributes ?? {}) });
 	}
 	const r = compile(options === true ? undefined : options);
-	return (attributes) => redactWith(attributes, r, 4);
+	return (attributes) => redactWith(attributes, r);
 }

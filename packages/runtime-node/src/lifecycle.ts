@@ -204,7 +204,7 @@ export function installAutterAutoFlush(
 		});
 		const drained = Promise.allSettled(
 			targets.map((target) => target.forceFlush()),
-		).then(() => true);
+		).then((results) => results.every((result) => result.status === "fulfilled"));
 		const ok = await Promise.race([drained, timedOut]);
 		clearTimeout(timer);
 		if (ok) {

@@ -907,12 +907,22 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// (NodeSDK exposes no forceFlush(), but the processors we handed it do).
 	const flushTarget: FlushTarget = {
 		forceFlush: async () => {
-			await Promise.allSettled([
-				alwaysOnProvider.forceFlush(),
-				mainSpanProcessor.forceFlush(),
-				...(errorTraceBuffer ? [errorTraceBuffer.forceFlush()] : []),
-				metricReader.forceFlush(),
+			const results = await Promise.allSettled([
+				Promise.resolve().then(() => alwaysOnProvider.forceFlush()),
+				Promise.resolve().then(() => mainSpanProcessor.forceFlush()),
+				...(errorTraceBuffer
+					? [Promise.resolve().then(() => errorTraceBuffer.forceFlush())]
+					: []),
+				Promise.resolve().then(() => metricReader.forceFlush()),
 			]);
+
+			const failed = results.find(
+				(result) => result.status === "rejected",
+			);
+
+			if (failed) {
+				throw failed.reason;
+			}
 		},
 	};
 	registerFlushTarget("active-server", flushTarget);

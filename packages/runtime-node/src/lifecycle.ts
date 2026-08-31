@@ -203,10 +203,19 @@ export function installAutterAutoFlush(
 			timer = setTimeout(() => resolve(false), timeoutMs);
 		});
 		const drained = Promise.allSettled(
-			targets.map((target) => target.forceFlush()),
-		).then((results) => results.every((result) => result.status === "fulfilled"));
-		const ok = await Promise.race([drained, timedOut]);
-		clearTimeout(timer);
+			targets.map((target) =>
+				Promise.resolve().then(() => target.forceFlush()),
+			),
+		).then((results) =>
+			results.every((result) => result.status === "fulfilled"),
+		);
+
+		let ok: boolean;
+		try {
+				ok = await Promise.race([drained, timedOut]);
+		} finally {
+			clearTimeout(timer);
+		}
 		if (ok) {
 			telemetryStats.markAllFlushed();
 			if (log) {

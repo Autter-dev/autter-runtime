@@ -131,49 +131,162 @@ function redactString(value: string, r: CompiledRedactor): string {
 	return out;
 }
 
-function redactValue(
-	value: unknown,
-	r: CompiledRedactor,
-	ancestors: WeakMap<object, object>,
-): unknown {
-	if (typeof value === "string") return redactString(value, r);
+const MAX_REDACTION_DEPTH = 64;
+const MAX_REDACTION_WORK = 10_000;
+const MAX_COLLECTION_ENTRIES = 1_000;
 
-	if (Array.isArray(value)) {
-		const existing = ancestors.get(value);
-		if (existing) return existing;
-
-		const out: unknown[] = [];
-		ancestors.set(value, out);
-
-		for (const item of value) {
-			out.push(redactValue(item, r, ancestors));
-		}
-
-		ancestors.delete(value);
-		return out;
-	}
-
-	if (typeof value === "object" && value !== null) {
-		const existing = ancestors.get(value);
-		if (existing) return existing;
-
-		const out: Record<string, unknown> = {};
-		ancestors.set(value, out);
-
-		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-			out[k] = isSensitiveKey(k, v, r)
-				? r.mask
-				: redactValue(v, r, ancestors);
-		}
-
-		ancestors.delete(value);
-		return out;
-	}
-
-	return value;
+interface RedactionState {
+        ancestors: WeakMap<object, object>;
+        remainingWork: number;
 }
 
+function canTraverse(depth: number, state: RedactionState): boolean {
+        if (depth > MAX_REDACTION_DEPTH || state.remainingWork <= 0) return false;
+        state.remainingWork -= 1;
+        return true;
+}
+
+function redactValue(
+        value: unknown,
+        r: CompiledRedactor,
+        state: RedactionState,
+        depth: number,
+): unknown {
+        if (typeof value === "string") return redactString(value, r);
+
+        let isArray = false;
+        try {
+                isArray = Array.isArray(value);
+        } catch {
+                return r.mask;
+        }
+
+        if (isArray) {
+                return redactArray(value as unknown[], r, state, depth);
+        }
+
+        if (typeof value === "object" && value !== null) {
+                return redactObject(value, r, state, depth);
+        }
+
+        return value;
+}
+
+function redactArray(
+        value: unknown[],
+        r: CompiledRedactor,
+        state: RedactionState,
+        depth: number,
+): unknown {
+        const existing = state.ancestors.get(value);
+        if (existing) return r.mask;
+
+        if (!canTraverse(depth, state)) return r.mask;
+
+        const out: unknown[] = [];
+        state.ancestors.set(value, out);
+
+        let length: number;
+        try {
+                length = value.length;
+        } catch {
+                state.ancestors.delete(value);
+                return r.mask;
+        }
+
+        const limit = Math.min(length, MAX_COLLECTION_ENTRIES);
+
+        for (let i = 0; i < limit; i += 1) {
+                let item: unknown;
+
+                try {
+                        item = value[i];
+                } catch {
+                        out.push(r.mask);
+                        continue;
+                }
+
+                out.push(redactValue(item, r, state, depth + 1));
+        }
+
+        if (length > limit) {
+                out.push(r.mask);
+        }
+
+        state.ancestors.delete(value);
+        return out;
+}
+
+function redactObject(
+        value: object,
+        r: CompiledRedactor,
+        state: RedactionState,
+        depth: number,
+): unknown {
+        const existing = state.ancestors.get(value);
+        if (existing) return r.mask;
+
+        if (!canTraverse(depth, state)) return r.mask;
+
+        const out: Record<string, unknown> = {};
+        state.ancestors.set(value, out);
+
+        let count = 0;
+        let truncated = false;
+
+        try {
+                for (const key in value as Record<string, unknown>) {
+                        if (
+                                !Object.prototype.propertyIsEnumerable.call(
+                                        value,
+                                        key,
+                                )
+                        ) {
+                                continue;
+                        }
+
+                        if (count >= MAX_COLLECTION_ENTRIES) {
+                                truncated = true;
+                                break;
+                        }
+
+                        let nestedValue: unknown;
+                        try {
+                                nestedValue = (value as Record<string, unknown>)[key];
+                        } catch {
+                                out[key] = r.mask;
+                                count += 1;
+                                continue;
+                        }
+
+                        count += 1;
+                        out[key] = isSensitiveKey(key, nestedValue, r)
+                                ? r.mask
+                                : redactValue(
+                                          nestedValue,
+                                          r,
+                                          state,
+                                          depth + 1,
+                                  );
+                }
+        } catch {
+                truncated = true;
+        }
+
+        if (truncated) {
+                out.__redaction_truncated__ = r.mask;
+        }
+
+        state.ancestors.delete(value);
+        return out;
+}
 const USAGE_TOKEN_KEYS = new Set([
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "token_count",
         "gen_ai.usage.input_tokens",
         "gen_ai.usage.output_tokens",
         "gen_ai.usage.prompt_tokens",
@@ -217,18 +330,67 @@ export function redactAttributes(
 }
 
 function redactWith(
-	attributes: Attributes | null | undefined,
+        attributes: Attributes | null | undefined,
         r: CompiledRedactor,
 ): Attributes {
-	const out: Attributes = {};
-	if (!attributes) return out;
-	for (const [key, value] of Object.entries(attributes)) {
-		if (value === undefined) continue;
-		out[key] = isSensitiveKey(key, value, r)
-			? r.mask
-			: (redactValue(value, r, new WeakMap<object, object>()) as Attributes[string]);
-	}
-	return out;
+        const out: Attributes = {};
+        if (!attributes) return out;
+
+        const state: RedactionState = {
+                ancestors: new WeakMap<object, object>(),
+                remainingWork: MAX_REDACTION_WORK,
+        };
+
+        let count = 0;
+        let truncated = false;
+
+        try {
+                for (const key in attributes as Record<string, unknown>) {
+                        if (
+                                !Object.prototype.propertyIsEnumerable.call(
+                                        attributes,
+                                        key,
+                                )
+                        ) {
+                                continue;
+                        }
+
+                        if (
+                                count >= MAX_COLLECTION_ENTRIES ||
+                                state.remainingWork <= 0
+                        ) {
+                                truncated = true;
+                                break;
+                        }
+
+                        let value: unknown;
+                        try {
+                                value = (attributes as Record<string, unknown>)[key];
+                        } catch {
+                                out[key] = r.mask;
+                                count += 1;
+                                state.remainingWork -= 1;
+                                continue;
+                        }
+
+                        count += 1;
+                        state.remainingWork -= 1;
+
+                        if (value === undefined) continue;
+
+                        out[key] = isSensitiveKey(key, value, r)
+                                ? r.mask
+                                : (redactValue(value, r, state, 0) as Attributes[string]);
+                }
+        } catch {
+                truncated = true;
+        }
+
+        if (truncated) {
+                out.__redaction_truncated__ = r.mask;
+        }
+
+        return out;
 }
 
 /**

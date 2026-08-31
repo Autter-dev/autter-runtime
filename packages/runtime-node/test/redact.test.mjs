@@ -125,93 +125,159 @@ test("empty/nullish input yields an empty object", () => {
 	assert.deepEqual(redactAttributes(null), {});
 });
 
-test("keeps canonical GenAI usage counts only when numeric", () => {
-	const out = redactAttributes({
-		"gen_ai.usage.input_tokens": 512,
-		"gen_ai.usage.output_tokens": 128,
-		"gen_ai.usage.prompt_tokens": 256,
-		"gen_ai.usage.completion_tokens": 128,
-		"gen_ai.usage.total_tokens": 640,
-		"gen_ai.usage.token_count": 42,
-		"gen_ai.usage.input_tokens_string": "secret",
-		max_tokens: 1000,
-		"secret.input_tokens": 999,
-	});
-
-	assert.deepEqual(out, {
-		"gen_ai.usage.input_tokens": 512,
-		"gen_ai.usage.output_tokens": 128,
-		"gen_ai.usage.prompt_tokens": 256,
-		"gen_ai.usage.completion_tokens": 128,
-		"gen_ai.usage.total_tokens": 640,
-		"gen_ai.usage.token_count": 42,
-		"gen_ai.usage.input_tokens_string": MASK,
-		max_tokens: MASK,
-		"secret.input_tokens": MASK,
-	});
-});
-
-test("redacts non-numeric canonical GenAI usage values", () => {
-	const out = redactAttributes({
-		"gen_ai.usage.input_tokens": "secret",
-		"gen_ai.usage.output_tokens": -1,
-		"gen_ai.usage.total_tokens": NaN,
-		"gen_ai.usage.token_count": Infinity,
-	});
-
-	assert.deepEqual(out, {
-		"gen_ai.usage.input_tokens": MASK,
-		"gen_ai.usage.output_tokens": MASK,
-		"gen_ai.usage.total_tokens": MASK,
-		"gen_ai.usage.token_count": MASK,
-	});
-});
-
-test("still masks secret token keys ending in token", () => {
-	const out = redactAttributes({
-		token: "raw",
-		access_token: "raw",
-		refresh_token: "raw",
-		authToken: "raw",
-		token_value: "raw",
-		tokenString: "raw",
-		token_id: "raw",
-		id_token_hint: "raw",
-	});
-	for (const value of Object.values(out)) assert.equal(value, MASK);
-});
-
 test("redacts sensitive keys beyond the nested traversal depth", () => {
-	const out = redactAttributes({
-		context: {
-			level1: {
-				level2: {
-					level3: {
-						level4: {
-							password: "SECRET",
-						},
-					},
-				},
-			},
-		},
-	});
+        const out = redactAttributes({
+                context: {
+                        level1: {
+                                level2: {
+                                        level3: {
+                                                level4: {
+                                                        password: "SECRET",
+                                                },
+                                        },
+                                },
+                        },
+                },
+        });
 
-	assert.equal(
-		out.context.level1.level2.level3.level4.password,
-		MASK,
-	);
+        assert.equal(
+                out.context.level1.level2.level3.level4.password,
+                MASK,
+        );
 });
 
+test("bounds extremely deep object traversal safely", () => {
+        let value = { password: "SECRET" };
+
+        for (let i = 0; i < 200; i += 1) {
+                value = { nested: value };
+        }
+
+        assert.doesNotThrow(() => redactAttributes({ context: value }));
+});
+test("keeps only supported GenAI/usage token-count attributes", () => {
+        const out = redactAttributes({
+                "gen_ai.usage.input_tokens": 512,
+                "gen_ai.usage.output_tokens": 128,
+                prompt_tokens: 512,
+                completion_tokens: 128,
+                total_tokens: 640,
+                token_count: 42,
+                max_tokens: 1000,
+                "secret.input_tokens": 999,
+        });
+
+        assert.deepEqual(out, {
+                "gen_ai.usage.input_tokens": 512,
+                "gen_ai.usage.output_tokens": 128,
+                prompt_tokens: 512,
+                completion_tokens: 128,
+                total_tokens: 640,
+                token_count: 42,
+                max_tokens: MASK,
+                "secret.input_tokens": MASK,
+        });
+});
+
+test("masks invalid values for supported GenAI usage keys", () => {
+        const out = redactAttributes({
+                "gen_ai.usage.input_tokens": "512",
+                "gen_ai.usage.output_tokens": -1,
+                token_count: Number.NaN,
+        });
+
+        assert.equal(out["gen_ai.usage.input_tokens"], MASK);
+        assert.equal(out["gen_ai.usage.output_tokens"], MASK);
+        assert.equal(out.token_count, MASK);
+});
+test("still masks secret token keys ending in 'token'", () => {
+        const out = redactAttributes({
+                token: "raw",
+                access_token: "raw",
+                refresh_token: "raw",
+                authToken: "raw",
+                token_value: "raw",
+                tokenString: "raw",
+                token_id: "raw",
+                id_token_hint: "raw",
+        });
+
+        for (const value of Object.values(out)) assert.equal(value, MASK);
+});
+test("does not throw when a revoked array proxy is encountered", () => {
+        const target = [];
+        const { proxy, revoke } = Proxy.revocable(target, {});
+        revoke();
+
+        assert.doesNotThrow(() => redactAttributes({ context: proxy }));
+});
+
+test("does not throw when a revoked root proxy is encountered", () => {
+        const target = {};
+        const { proxy, revoke } = Proxy.revocable(target, {});
+        revoke();
+
+        assert.doesNotThrow(() => redactAttributes(proxy));
+});
+test("does not throw when top-level attribute enumeration fails", () => {
+        const hostile = new Proxy(
+                {},
+                {
+                        ownKeys() {
+                                throw new Error("ownKeys failed");
+                        },
+                },
+        );
+
+        assert.doesNotThrow(() => redactAttributes(hostile));
+});
+test("does not throw when an array element getter fails", () => {
+        const hostile = [];
+        Object.defineProperty(hostile, 0, {
+                enumerable: true,
+                get() {
+                        throw new Error("array getter failed");
+                },
+        });
+
+        assert.doesNotThrow(() => redactAttributes({ context: hostile }));
+});
+test("does not throw when an attribute getter fails", () => {
+        const hostile = {};
+        Object.defineProperty(hostile, "secret", {
+                enumerable: true,
+                get() {
+                        throw new Error("getter failed");
+                },
+        });
+
+        assert.doesNotThrow(() => redactAttributes({ context: hostile }));
+});
+test("bounds top-level attributes safely", () => {
+        const attributes = {};
+
+        for (let i = 0; i < 1005; i += 1) {
+                attributes["key_" + i] = "value";
+        }
+
+        const out = redactAttributes(attributes);
+
+        assert.ok(Object.keys(out).length <= 1001);
+        assert.equal(out.__redaction_truncated__, MASK);
+        assert.equal(out.key_0, "value");
+        assert.equal(out.key_999, "value");
+        assert.equal(out.key_1000, undefined);
+});
 test("handles circular references without leaking sensitive values", () => {
-	const context = {};
-	const nested = { password: "SECRET", safe: "ok" };
+        const context = {};
+        const nested = { password: "SECRET", safe: "ok" };
 
-	context.self = context;
-	context.nested = nested;
+        context.self = context;
+        context.nested = nested;
 
-	const out = redactAttributes({ context });
+        const out = redactAttributes({ context });
 
-	assert.equal(out.context.nested.password, MASK);
-	assert.equal(out.context.nested.safe, "ok");
-	assert.equal(out.context.self, out.context);
+        assert.equal(out.context.nested.password, MASK);
+        assert.equal(out.context.nested.safe, "ok");
+        assert.equal(out.context.self, MASK);
 });

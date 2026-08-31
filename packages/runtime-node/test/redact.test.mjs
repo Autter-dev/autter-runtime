@@ -155,6 +155,66 @@ test("bounds extremely deep object traversal safely", () => {
 
         assert.doesNotThrow(() => redactAttributes({ context: value }));
 });
+test("keeps only supported GenAI/usage token-count attributes", () => {
+        const out = redactAttributes({
+                "gen_ai.usage.input_tokens": 512,
+                "gen_ai.usage.output_tokens": 128,
+                prompt_tokens: 512,
+                completion_tokens: 128,
+                total_tokens: 640,
+                token_count: 42,
+                max_tokens: 1000,
+                "secret.input_tokens": 999,
+        });
+
+        assert.deepEqual(out, {
+                "gen_ai.usage.input_tokens": 512,
+                "gen_ai.usage.output_tokens": 128,
+                prompt_tokens: 512,
+                completion_tokens: 128,
+                total_tokens: 640,
+                token_count: 42,
+                max_tokens: MASK,
+                "secret.input_tokens": MASK,
+        });
+});
+
+test("masks invalid values for supported GenAI usage keys", () => {
+        const out = redactAttributes({
+                "gen_ai.usage.input_tokens": "512",
+                "gen_ai.usage.output_tokens": -1,
+                token_count: Number.NaN,
+        });
+
+        assert.equal(out["gen_ai.usage.input_tokens"], MASK);
+        assert.equal(out["gen_ai.usage.output_tokens"], MASK);
+        assert.equal(out.token_count, MASK);
+});
+test("still masks secret token keys ending in 'token'", () => {
+        const out = redactAttributes({
+                token: "raw",
+                access_token: "raw",
+                refresh_token: "raw",
+                authToken: "raw",
+                token_value: "raw",
+                tokenString: "raw",
+                token_id: "raw",
+                id_token_hint: "raw",
+        });
+
+        for (const value of Object.values(out)) assert.equal(value, MASK);
+});
+test("does not throw when an attribute getter fails", () => {
+        const hostile = {};
+        Object.defineProperty(hostile, "secret", {
+                enumerable: true,
+                get() {
+                        throw new Error("getter failed");
+                },
+        });
+
+        assert.doesNotThrow(() => redactAttributes({ context: hostile }));
+});
 test("handles circular references without leaking sensitive values", () => {
         const context = {};
         const nested = { password: "SECRET", safe: "ok" };

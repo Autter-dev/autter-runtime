@@ -186,18 +186,48 @@ function redactValue(
                 state.ancestors.set(value, out);
 
                 let count = 0;
-                for (const [k, v] of Object.entries(
-                        value as Record<string, unknown>,
-                )) {
-                        if (count >= MAX_COLLECTION_ENTRIES) break;
-                        count += 1;
+                let truncated = false;
 
-                        out[k] = isSensitiveKey(k, r)
-                                ? r.mask
-                                : redactValue(v, r, state, depth + 1);
+                try {
+                        for (const key in value as Record<string, unknown>) {
+                                if (
+                                        !Object.prototype.propertyIsEnumerable.call(
+                                                value,
+                                                key,
+                                        )
+                                ) {
+                                        continue;
+                                }
+
+                                if (count >= MAX_COLLECTION_ENTRIES) {
+                                        truncated = true;
+                                        break;
+                                }
+
+                                let nestedValue: unknown;
+                                try {
+                                        nestedValue = (value as Record<string, unknown>)[key];
+                                } catch {
+                                        out[key] = r.mask;
+                                        count += 1;
+                                        continue;
+                                }
+
+                                count += 1;
+                                out[key] = isSensitiveKey(key, nestedValue, r)
+                                        ? r.mask
+                                        : redactValue(
+                                                  nestedValue,
+                                                  r,
+                                                  state,
+                                                  depth + 1,
+                                          );
+                        }
+                } catch {
+                        truncated = true;
                 }
 
-                if (Object.keys(value).length > MAX_COLLECTION_ENTRIES) {
+                if (truncated) {
                         out.__redaction_truncated__ = r.mask;
                 }
 
@@ -208,9 +238,40 @@ function redactValue(
         return value;
 }
 
-function isSensitiveKey(key: string, r: CompiledRedactor): boolean {
-	const lowered = key.toLowerCase();
-	return r.keyPatterns.some((re) => re.test(lowered));
+const USAGE_TOKEN_KEYS = new Set([
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "token_count",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.prompt_tokens",
+        "gen_ai.usage.completion_tokens",
+        "gen_ai.usage.total_tokens",
+        "gen_ai.usage.token_count",
+]);
+
+function isSensitiveKey(
+        key: string,
+        value: unknown,
+        r: CompiledRedactor,
+): boolean {
+        const lowered = key.toLowerCase();
+
+        // Canonical GenAI usage attributes are safe when they contain
+        // valid non-negative numeric counts.
+        if (USAGE_TOKEN_KEYS.has(lowered)) {
+                return !(
+                        typeof value === "number" &&
+                        Number.isFinite(value) &&
+                        value >= 0
+                );
+        }
+
+        // All other sensitive keys, including token-like keys, are redacted.
+        return r.keyPatterns.some((re) => re.test(lowered));
 }
 
 /**
@@ -240,7 +301,7 @@ function redactWith(
 
         for (const [key, value] of Object.entries(attributes)) {
                 if (value === undefined) continue;
-                out[key] = isSensitiveKey(key, r)
+                out[key] = isSensitiveKey(key, value, r)
                         ? r.mask
                         : (redactValue(value, r, state, 0) as Attributes[string]);
         }

@@ -146,6 +146,15 @@ test("redacts sensitive keys beyond the nested traversal depth", () => {
         );
 });
 
+test("bounds extremely deep object traversal safely", () => {
+        let value = { password: "SECRET" };
+
+        for (let i = 0; i < 200; i += 1) {
+                value = { nested: value };
+        }
+
+        assert.doesNotThrow(() => redactAttributes({ context: value }));
+});
 test("handles circular references without leaking sensitive values", () => {
         const context = {};
         const nested = { password: "SECRET", safe: "ok" };

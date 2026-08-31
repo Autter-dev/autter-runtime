@@ -131,42 +131,77 @@ function redactString(value: string, r: CompiledRedactor): string {
 	return out;
 }
 
+const MAX_REDACTION_DEPTH = 64;
+const MAX_REDACTION_WORK = 10_000;
+const MAX_COLLECTION_ENTRIES = 1_000;
+
+interface RedactionState {
+        ancestors: WeakMap<object, object>;
+        remainingWork: number;
+}
+
+function canTraverse(depth: number, state: RedactionState): boolean {
+        if (depth > MAX_REDACTION_DEPTH || state.remainingWork <= 0) return false;
+        state.remainingWork -= 1;
+        return true;
+}
+
 function redactValue(
         value: unknown,
         r: CompiledRedactor,
-        ancestors: WeakMap<object, object>,
+        state: RedactionState,
+        depth: number,
 ): unknown {
         if (typeof value === "string") return redactString(value, r);
 
         if (Array.isArray(value)) {
-                const existing = ancestors.get(value);
+                const existing = state.ancestors.get(value);
                 if (existing) return existing;
 
-                const out: unknown[] = [];
-                ancestors.set(value, out);
+                if (!canTraverse(depth, state)) return r.mask;
 
-                for (const item of value) {
-                        out.push(redactValue(item, r, ancestors));
+                const out: unknown[] = [];
+                state.ancestors.set(value, out);
+
+                const limit = Math.min(value.length, MAX_COLLECTION_ENTRIES);
+                for (let i = 0; i < limit; i += 1) {
+                        out.push(redactValue(value[i], r, state, depth + 1));
                 }
 
-                ancestors.delete(value);
+                if (value.length > limit) {
+                        out.push(r.mask);
+                }
+
+                state.ancestors.delete(value);
                 return out;
         }
 
         if (typeof value === "object" && value !== null) {
-                const existing = ancestors.get(value);
+                const existing = state.ancestors.get(value);
                 if (existing) return existing;
 
-                const out: Record<string, unknown> = {};
-                ancestors.set(value, out);
+                if (!canTraverse(depth, state)) return r.mask;
 
-                for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+                const out: Record<string, unknown> = {};
+                state.ancestors.set(value, out);
+
+                let count = 0;
+                for (const [k, v] of Object.entries(
+                        value as Record<string, unknown>,
+                )) {
+                        if (count >= MAX_COLLECTION_ENTRIES) break;
+                        count += 1;
+
                         out[k] = isSensitiveKey(k, r)
                                 ? r.mask
-                                : redactValue(v, r, ancestors);
+                                : redactValue(v, r, state, depth + 1);
                 }
 
-                ancestors.delete(value);
+                if (Object.keys(value).length > MAX_COLLECTION_ENTRIES) {
+                        out.__redaction_truncated__ = r.mask;
+                }
+
+                state.ancestors.delete(value);
                 return out;
         }
 
@@ -192,18 +227,24 @@ export function redactAttributes(
 }
 
 function redactWith(
-	attributes: Attributes | null | undefined,
+        attributes: Attributes | null | undefined,
         r: CompiledRedactor,
 ): Attributes {
-	const out: Attributes = {};
-	if (!attributes) return out;
-	for (const [key, value] of Object.entries(attributes)) {
-		if (value === undefined) continue;
-		out[key] = isSensitiveKey(key, r)
-			? r.mask
-			: (redactValue(value, r, new WeakMap<object, object>()) as Attributes[string]);
-	}
-	return out;
+        const out: Attributes = {};
+        if (!attributes) return out;
+
+        const state: RedactionState = {
+                ancestors: new WeakMap<object, object>(),
+                remainingWork: MAX_REDACTION_WORK,
+        };
+
+        for (const [key, value] of Object.entries(attributes)) {
+                if (value === undefined) continue;
+                out[key] = isSensitiveKey(key, r)
+                        ? r.mask
+                        : (redactValue(value, r, state, 0) as Attributes[string]);
+        }
+        return out;
 }
 
 /**

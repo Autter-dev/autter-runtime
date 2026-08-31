@@ -179,7 +179,7 @@ function redactArray(
         depth: number,
 ): unknown {
         const existing = state.ancestors.get(value);
-        if (existing) return existing;
+        if (existing) return r.mask;
 
         if (!canTraverse(depth, state)) return r.mask;
 
@@ -224,7 +224,7 @@ function redactObject(
         depth: number,
 ): unknown {
         const existing = state.ancestors.get(value);
-        if (existing) return existing;
+        if (existing) return r.mask;
 
         if (!canTraverse(depth, state)) return r.mask;
 
@@ -341,6 +341,9 @@ function redactWith(
                 remainingWork: MAX_REDACTION_WORK,
         };
 
+        let count = 0;
+        let truncated = false;
+
         try {
                 for (const key in attributes as Record<string, unknown>) {
                         if (
@@ -352,13 +355,26 @@ function redactWith(
                                 continue;
                         }
 
+                        if (
+                                count >= MAX_COLLECTION_ENTRIES ||
+                                state.remainingWork <= 0
+                        ) {
+                                truncated = true;
+                                break;
+                        }
+
                         let value: unknown;
                         try {
                                 value = (attributes as Record<string, unknown>)[key];
                         } catch {
                                 out[key] = r.mask;
+                                count += 1;
+                                state.remainingWork -= 1;
                                 continue;
                         }
+
+                        count += 1;
+                        state.remainingWork -= 1;
 
                         if (value === undefined) continue;
 
@@ -367,6 +383,10 @@ function redactWith(
                                 : (redactValue(value, r, state, 0) as Attributes[string]);
                 }
         } catch {
+                truncated = true;
+        }
+
+        if (truncated) {
                 out.__redaction_truncated__ = r.mask;
         }
 

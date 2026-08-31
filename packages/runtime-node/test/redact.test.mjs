@@ -253,6 +253,21 @@ test("does not throw when an attribute getter fails", () => {
 
         assert.doesNotThrow(() => redactAttributes({ context: hostile }));
 });
+test("bounds top-level attributes safely", () => {
+        const attributes = {};
+
+        for (let i = 0; i < 1005; i += 1) {
+                attributes["key_" + i] = "value";
+        }
+
+        const out = redactAttributes(attributes);
+
+        assert.ok(Object.keys(out).length <= 1001);
+        assert.equal(out.__redaction_truncated__, MASK);
+        assert.equal(out.key_0, "value");
+        assert.equal(out.key_999, "value");
+        assert.equal(out.key_1000, undefined);
+});
 test("handles circular references without leaking sensitive values", () => {
         const context = {};
         const nested = { password: "SECRET", safe: "ok" };
@@ -264,5 +279,5 @@ test("handles circular references without leaking sensitive values", () => {
 
         assert.equal(out.context.nested.password, MASK);
         assert.equal(out.context.nested.safe, "ok");
-        assert.equal(out.context.self, out.context);
+        assert.equal(out.context.self, MASK);
 });

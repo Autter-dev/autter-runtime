@@ -126,56 +126,92 @@ test("empty/nullish input yields an empty object", () => {
 });
 
 test("keeps canonical GenAI usage counts only when numeric", () => {
-        const out = redactAttributes({
-                "gen_ai.usage.input_tokens": 512,
-                "gen_ai.usage.output_tokens": 128,
-                "gen_ai.usage.prompt_tokens": 256,
-                "gen_ai.usage.completion_tokens": 128,
-                "gen_ai.usage.total_tokens": 640,
-                "gen_ai.usage.token_count": 42,
-                "gen_ai.usage.input_tokens_string": "secret",
-                max_tokens: 1000,
-                "secret.input_tokens": 999,
-        });
+	const out = redactAttributes({
+		"gen_ai.usage.input_tokens": 512,
+		"gen_ai.usage.output_tokens": 128,
+		"gen_ai.usage.prompt_tokens": 256,
+		"gen_ai.usage.completion_tokens": 128,
+		"gen_ai.usage.total_tokens": 640,
+		"gen_ai.usage.token_count": 42,
+		"gen_ai.usage.input_tokens_string": "secret",
+		max_tokens: 1000,
+		"secret.input_tokens": 999,
+	});
 
-        assert.deepEqual(out, {
-                "gen_ai.usage.input_tokens": 512,
-                "gen_ai.usage.output_tokens": 128,
-                "gen_ai.usage.prompt_tokens": 256,
-                "gen_ai.usage.completion_tokens": 128,
-                "gen_ai.usage.total_tokens": 640,
-                "gen_ai.usage.token_count": 42,
-                "gen_ai.usage.input_tokens_string": MASK,
-                max_tokens: MASK,
-                "secret.input_tokens": MASK,
-        });
+	assert.deepEqual(out, {
+		"gen_ai.usage.input_tokens": 512,
+		"gen_ai.usage.output_tokens": 128,
+		"gen_ai.usage.prompt_tokens": 256,
+		"gen_ai.usage.completion_tokens": 128,
+		"gen_ai.usage.total_tokens": 640,
+		"gen_ai.usage.token_count": 42,
+		"gen_ai.usage.input_tokens_string": MASK,
+		max_tokens: MASK,
+		"secret.input_tokens": MASK,
+	});
 });
 
 test("redacts non-numeric canonical GenAI usage values", () => {
-        const out = redactAttributes({
-                "gen_ai.usage.input_tokens": "secret",
-                "gen_ai.usage.output_tokens": -1,
-                "gen_ai.usage.total_tokens": NaN,
-                "gen_ai.usage.token_count": Infinity,
-        });
+	const out = redactAttributes({
+		"gen_ai.usage.input_tokens": "secret",
+		"gen_ai.usage.output_tokens": -1,
+		"gen_ai.usage.total_tokens": NaN,
+		"gen_ai.usage.token_count": Infinity,
+	});
 
-        assert.deepEqual(out, {
-                "gen_ai.usage.input_tokens": MASK,
-                "gen_ai.usage.output_tokens": MASK,
-                "gen_ai.usage.total_tokens": MASK,
-                "gen_ai.usage.token_count": MASK,
-        });
+	assert.deepEqual(out, {
+		"gen_ai.usage.input_tokens": MASK,
+		"gen_ai.usage.output_tokens": MASK,
+		"gen_ai.usage.total_tokens": MASK,
+		"gen_ai.usage.token_count": MASK,
+	});
 });
+
 test("still masks secret token keys ending in token", () => {
-const out = redactAttributes({
-token: "raw",
-access_token: "raw",
-refresh_token: "raw",
-authToken: "raw",
-token_value: "raw",
-tokenString: "raw",
-token_id: "raw",
-id_token_hint: "raw",
+	const out = redactAttributes({
+		token: "raw",
+		access_token: "raw",
+		refresh_token: "raw",
+		authToken: "raw",
+		token_value: "raw",
+		tokenString: "raw",
+		token_id: "raw",
+		id_token_hint: "raw",
+	});
+	for (const value of Object.values(out)) assert.equal(value, MASK);
 });
-for (const value of Object.values(out)) assert.equal(value, MASK);
+
+test("redacts sensitive keys beyond the nested traversal depth", () => {
+	const out = redactAttributes({
+		context: {
+			level1: {
+				level2: {
+					level3: {
+						level4: {
+							password: "SECRET",
+						},
+					},
+				},
+			},
+		},
+	});
+
+	assert.equal(
+		out.context.level1.level2.level3.level4.password,
+		MASK,
+	);
+});
+
+test("handles circular references without leaking sensitive values", () => {
+	const context = {};
+	const nested = { password: "SECRET", safe: "ok" };
+
+	context.self = context;
+	context.nested = nested;
+
+	const out = redactAttributes({ context });
+
+	assert.equal(out.context.nested.password, MASK);
+	assert.equal(out.context.nested.safe, "ok");
+	assert.equal(out.context.self, out.context);
 });

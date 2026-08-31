@@ -204,6 +204,44 @@ test("still masks secret token keys ending in 'token'", () => {
 
         for (const value of Object.values(out)) assert.equal(value, MASK);
 });
+test("does not throw when a revoked array proxy is encountered", () => {
+        const target = [];
+        const { proxy, revoke } = Proxy.revocable(target, {});
+        revoke();
+
+        assert.doesNotThrow(() => redactAttributes({ context: proxy }));
+});
+
+test("does not throw when a revoked root proxy is encountered", () => {
+        const target = {};
+        const { proxy, revoke } = Proxy.revocable(target, {});
+        revoke();
+
+        assert.doesNotThrow(() => redactAttributes(proxy));
+});
+test("does not throw when top-level attribute enumeration fails", () => {
+        const hostile = new Proxy(
+                {},
+                {
+                        ownKeys() {
+                                throw new Error("ownKeys failed");
+                        },
+                },
+        );
+
+        assert.doesNotThrow(() => redactAttributes(hostile));
+});
+test("does not throw when an array element getter fails", () => {
+        const hostile = [];
+        Object.defineProperty(hostile, 0, {
+                enumerable: true,
+                get() {
+                        throw new Error("array getter failed");
+                },
+        });
+
+        assert.doesNotThrow(() => redactAttributes({ context: hostile }));
+});
 test("does not throw when an attribute getter fails", () => {
         const hostile = {};
         Object.defineProperty(hostile, "secret", {

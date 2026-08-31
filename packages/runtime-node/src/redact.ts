@@ -154,90 +154,132 @@ function redactValue(
 ): unknown {
         if (typeof value === "string") return redactString(value, r);
 
-        if (Array.isArray(value)) {
-                const existing = state.ancestors.get(value);
-                if (existing) return existing;
+        let isArray = false;
+        try {
+                isArray = Array.isArray(value);
+        } catch {
+                return r.mask;
+        }
 
-                if (!canTraverse(depth, state)) return r.mask;
-
-                const out: unknown[] = [];
-                state.ancestors.set(value, out);
-
-                const limit = Math.min(value.length, MAX_COLLECTION_ENTRIES);
-                for (let i = 0; i < limit; i += 1) {
-                        out.push(redactValue(value[i], r, state, depth + 1));
-                }
-
-                if (value.length > limit) {
-                        out.push(r.mask);
-                }
-
-                state.ancestors.delete(value);
-                return out;
+        if (isArray) {
+                return redactArray(value as unknown[], r, state, depth);
         }
 
         if (typeof value === "object" && value !== null) {
-                const existing = state.ancestors.get(value);
-                if (existing) return existing;
-
-                if (!canTraverse(depth, state)) return r.mask;
-
-                const out: Record<string, unknown> = {};
-                state.ancestors.set(value, out);
-
-                let count = 0;
-                let truncated = false;
-
-                try {
-                        for (const key in value as Record<string, unknown>) {
-                                if (
-                                        !Object.prototype.propertyIsEnumerable.call(
-                                                value,
-                                                key,
-                                        )
-                                ) {
-                                        continue;
-                                }
-
-                                if (count >= MAX_COLLECTION_ENTRIES) {
-                                        truncated = true;
-                                        break;
-                                }
-
-                                let nestedValue: unknown;
-                                try {
-                                        nestedValue = (value as Record<string, unknown>)[key];
-                                } catch {
-                                        out[key] = r.mask;
-                                        count += 1;
-                                        continue;
-                                }
-
-                                count += 1;
-                                out[key] = isSensitiveKey(key, nestedValue, r)
-                                        ? r.mask
-                                        : redactValue(
-                                                  nestedValue,
-                                                  r,
-                                                  state,
-                                                  depth + 1,
-                                          );
-                        }
-                } catch {
-                        truncated = true;
-                }
-
-                if (truncated) {
-                        out.__redaction_truncated__ = r.mask;
-                }
-
-                state.ancestors.delete(value);
-                return out;
+                return redactObject(value, r, state, depth);
         }
 
         return value;
 }
 
+function redactArray(
+        value: unknown[],
+        r: CompiledRedactor,
+        state: RedactionState,
+        depth: number,
+): unknown {
+        const existing = state.ancestors.get(value);
+        if (existing) return existing;
+
+        if (!canTraverse(depth, state)) return r.mask;
+
+        const out: unknown[] = [];
+        state.ancestors.set(value, out);
+
+        let length: number;
+        try {
+                length = value.length;
+        } catch {
+                state.ancestors.delete(value);
+                return r.mask;
+        }
+
+        const limit = Math.min(length, MAX_COLLECTION_ENTRIES);
+
+        for (let i = 0; i < limit; i += 1) {
+                let item: unknown;
+
+                try {
+                        item = value[i];
+                } catch {
+                        out.push(r.mask);
+                        continue;
+                }
+
+                out.push(redactValue(item, r, state, depth + 1));
+        }
+
+        if (length > limit) {
+                out.push(r.mask);
+        }
+
+        state.ancestors.delete(value);
+        return out;
+}
+
+function redactObject(
+        value: object,
+        r: CompiledRedactor,
+        state: RedactionState,
+        depth: number,
+): unknown {
+        const existing = state.ancestors.get(value);
+        if (existing) return existing;
+
+        if (!canTraverse(depth, state)) return r.mask;
+
+        const out: Record<string, unknown> = {};
+        state.ancestors.set(value, out);
+
+        let count = 0;
+        let truncated = false;
+
+        try {
+                for (const key in value as Record<string, unknown>) {
+                        if (
+                                !Object.prototype.propertyIsEnumerable.call(
+                                        value,
+                                        key,
+                                )
+                        ) {
+                                continue;
+                        }
+
+                        if (count >= MAX_COLLECTION_ENTRIES) {
+                                truncated = true;
+                                break;
+                        }
+
+                        let nestedValue: unknown;
+                        try {
+                                nestedValue = (value as Record<string, unknown>)[key];
+                        } catch {
+                                out[key] = r.mask;
+                                count += 1;
+                                continue;
+                        }
+
+                        count += 1;
+                        out[key] = isSensitiveKey(key, nestedValue, r)
+                                ? r.mask
+                                : redactValue(
+                                          nestedValue,
+                                          r,
+                                          state,
+                                          depth + 1,
+                                  );
+                }
+        } catch {
+                truncated = true;
+        }
+
+        if (truncated) {
+                out.__redaction_truncated__ = r.mask;
+        }
+
+        state.ancestors.delete(value);
+        return out;
+}
 const USAGE_TOKEN_KEYS = new Set([
         "input_tokens",
         "output_tokens",
@@ -299,12 +341,35 @@ function redactWith(
                 remainingWork: MAX_REDACTION_WORK,
         };
 
-        for (const [key, value] of Object.entries(attributes)) {
-                if (value === undefined) continue;
-                out[key] = isSensitiveKey(key, value, r)
-                        ? r.mask
-                        : (redactValue(value, r, state, 0) as Attributes[string]);
+        try {
+                for (const key in attributes as Record<string, unknown>) {
+                        if (
+                                !Object.prototype.propertyIsEnumerable.call(
+                                        attributes,
+                                        key,
+                                )
+                        ) {
+                                continue;
+                        }
+
+                        let value: unknown;
+                        try {
+                                value = (attributes as Record<string, unknown>)[key];
+                        } catch {
+                                out[key] = r.mask;
+                                continue;
+                        }
+
+                        if (value === undefined) continue;
+
+                        out[key] = isSensitiveKey(key, value, r)
+                                ? r.mask
+                                : (redactValue(value, r, state, 0) as Attributes[string]);
+                }
+        } catch {
+                out.__redaction_truncated__ = r.mask;
         }
+
         return out;
 }
 

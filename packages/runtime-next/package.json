@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-next",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "One-command Autter Runtime for Next.js: server OTel, browser tracker, relay route, and React error boundary",
 	"license": "MIT",
 	"type": "module",

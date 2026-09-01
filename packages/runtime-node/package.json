@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-node",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "Autter Runtime for Node.js: same-origin browser relay handler + curated OpenTelemetry server tracker",
 	"license": "MIT",
 	"type": "module",

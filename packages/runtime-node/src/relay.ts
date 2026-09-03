@@ -137,8 +137,9 @@ export function boundContext(value: unknown): unknown {
 		const out: Record<string, unknown> = {};
 		for (let i = 0; i < keys.length && i < CONTEXT_MAX_KEYS; i++) {
 			if (nodes >= CONTEXT_MAX_NODES) break;
+			const key = keys[i];
+			if (key === undefined) continue;
 			nodes++;
-			const key = keys[i]!;
 			let child: unknown;
 			try {
 				child = walk((obj as Record<string, unknown>)[key], depth + 1);
@@ -185,7 +186,14 @@ async function readBodyBounded(
 		if (!value) continue;
 		total += value.byteLength;
 		if (total > maxBody) {
-			await reader.cancel();
+			// Best-effort cancel: a stream whose cancel() throws or rejects
+			// must still surface as "too large" (413), never fall through to
+			// the caller's JSON-error branch and become a 400.
+			try {
+				await reader.cancel();
+			} catch {
+				/* ignore — the oversize decision is already made */
+			}
 			return { tooLarge: true };
 		}
 		chunks.push(value);

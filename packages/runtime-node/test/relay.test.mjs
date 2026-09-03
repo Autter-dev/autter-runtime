@@ -103,6 +103,32 @@ test("relay: fetch handler rejects an oversized body", async () => {
 	assert.equal(res.status, 413);
 });
 
+test("relay: oversized body stays 413 even when the stream's cancel() rejects", async () => {
+	const handler = createBrowserRelayFetchHandler({
+		apiKey: "autter_rt_test",
+		perIpRateLimit: false,
+		maxBodyBytes: 10,
+	});
+	const big = new Uint8Array(100);
+	const body = new ReadableStream({
+		pull(controller) {
+			controller.enqueue(big);
+		},
+		cancel() {
+			// a hostile/broken stream whose cancel throws must not downgrade 413 to 400
+			throw new Error("hostile cancel");
+		},
+	});
+	const res = await handler(
+		new Request("http://localhost/relay", {
+			method: "POST",
+			body,
+			duplex: "half",
+		}),
+	);
+	assert.equal(res.status, 413);
+});
+
 test("relay: fetch size limit allows a body within the byte budget", async () => {
 	const handler = createBrowserRelayFetchHandler({
 		apiKey: "autter_rt_test",

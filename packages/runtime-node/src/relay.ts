@@ -21,6 +21,15 @@ export interface RelayOptions {
 	 * `false` to disable (e.g. when a WAF already rate-limits).
 	 */
 	perIpRateLimit?: number | false;
+	/**
+	 * Trust the client-supplied `X-Forwarded-For` header when keying the per-IP
+	 * rate limit. Off by default: the header is spoofable, so an attacker could
+	 * rotate it to bypass the window and drive unbounded parsing/forwarding
+	 * under the server's ingest key. Enable ONLY behind a proxy/CDN you control
+	 * that overwrites the header. When off, the fetch handler keys a single
+	 * shared bucket, and the Node handler keys the real socket peer address.
+	 */
+	trustProxy?: boolean;
 	/** Called when the async forward fails (default: console.warn). */
 	onError?: (err: unknown) => void;
 }
@@ -74,6 +83,25 @@ const CONTEXT_MAX_STRING = 4000;
 const CONTEXT_MAX_ARRAY = 100;
 const CONTEXT_MAX_KEYS = 100;
 
+// Redaction — the relay attaches the server's private ingest key and forwards
+// browser-supplied context into privileged telemetry, so context must never
+// carry secrets. We redact on two axes, at every nesting level: by KEY NAME
+// (authorization, cookie, token, password, *_secret, *_key, session, jwt, …)
+// and by secret-shaped VALUE (Bearer/Basic auth strings, JWTs) even under a
+// benign/custom key. Numeric/boolean values under a matched key are kept —
+// they can never be a credential, and this preserves usage counts such as
+// `input_tokens`.
+const REDACTED = "[redacted]";
+const SECRET_KEY_RE =
+	/(password|passwd|pwd|passphrase|passcode|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|authorization|cookie|session[_-]?id|sessionid|session|credentials?|bearer|jwt|otp|x-api-key|signature)/i;
+const SECRET_VALUE_RE = /^\s*(bearer|basic)\s+\S+/i;
+const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+/;
+
+/** Redact a string that looks like a credential (auth header value / JWT). */
+function scrubSecretValue(s: string): string {
+	return SECRET_VALUE_RE.test(s) || JWT_RE.test(s) ? REDACTED : s;
+}
+
 /** UTF-8 byte length of a string (portable across edge runtimes). */
 export function byteLength(text: string): number {
 	return new TextEncoder().encode(text).length;
@@ -91,7 +119,7 @@ export function boundContext(value: unknown): unknown {
 	const walk = (v: unknown, depth: number): unknown => {
 		if (v === null) return null;
 		const t = typeof v;
-		if (t === "string") return (v as string).slice(0, CONTEXT_MAX_STRING);
+		if (t === "string") return scrubSecretValue((v as string).slice(0, CONTEXT_MAX_STRING));
 		if (t === "number" || t === "boolean") return v;
 		if (t !== "object") return undefined;
 		if (depth >= CONTEXT_MAX_DEPTH || nodes >= CONTEXT_MAX_NODES) return undefined;
@@ -140,6 +168,21 @@ export function boundContext(value: unknown): unknown {
 			const key = keys[i];
 			if (key === undefined) continue;
 			nodes++;
+			// Redact secret-bearing keys at any depth. Numeric/boolean values
+			// can't be credentials and are preserved (e.g. usage counts); any
+			// other value (string, nested object/array) is dropped entirely.
+			if (SECRET_KEY_RE.test(key)) {
+				let raw: unknown;
+				try {
+					raw = (obj as Record<string, unknown>)[key];
+				} catch {
+					out[key] = REDACTED;
+					continue;
+				}
+				const rt = typeof raw;
+				out[key] = rt === "number" || rt === "boolean" ? raw : REDACTED;
+				continue;
+			}
 			let child: unknown;
 			try {
 				child = walk((obj as Record<string, unknown>)[key], depth + 1);
@@ -186,14 +229,13 @@ async function readBodyBounded(
 		if (!value) continue;
 		total += value.byteLength;
 		if (total > maxBody) {
-			// Best-effort cancel: a stream whose cancel() throws or rejects
-			// must still surface as "too large" (413), never fall through to
-			// the caller's JSON-error branch and become a 400.
-			try {
-				await reader.cancel();
-			} catch {
-				/* ignore — the oversize decision is already made */
-			}
+			// Cancel is fire-and-forget: awaiting a cancel() that throws,
+			// rejects, or never settles would hang the response (or drop it to
+			// a 400). The oversize decision is already made — detach the cancel
+			// and return 413 immediately.
+			void Promise.resolve()
+				.then(() => reader.cancel())
+				.catch(() => {});
 			return { tooLarge: true };
 		}
 		chunks.push(value);
@@ -302,8 +344,14 @@ export function createBrowserRelayFetchHandler(
 			return new Response(null, { status: 405 });
 		}
 		if (limiter) {
-			const ip =
-				firstForwardedFor(request.headers.get("x-forwarded-for")) || "unknown";
+			// Only honor X-Forwarded-For behind an explicitly trusted proxy —
+			// otherwise a caller could spoof a fresh IP per request to bypass
+			// the window. With no trusted peer source in a fetch runtime, fall
+			// back to one shared bucket (a conservative global limit).
+			const ip = opts.trustProxy
+				? firstForwardedFor(request.headers.get("x-forwarded-for")) ||
+					"unknown"
+				: "shared";
 			if (!limiter.allow(ip)) {
 				return new Response(JSON.stringify({ error: "rate limit exceeded" }), {
 					status: 429,
@@ -388,8 +436,12 @@ export function createBrowserRelayHandler(
 			return;
 		}
 		if (limiter) {
+			// Prefer the real socket peer; only trust X-Forwarded-For when the
+			// caller has explicitly opted into a trusted-proxy deployment.
 			const ip =
-				firstForwardedFor(req.headers["x-forwarded-for"]) ||
+				(opts.trustProxy
+					? firstForwardedFor(req.headers["x-forwarded-for"])
+					: "") ||
 				req.socket?.remoteAddress ||
 				"unknown";
 			if (!limiter.allow(ip)) {

@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0] - 2026-09-07
+
+### Features
+
+- **Cross-language error grouping**: the ingester now parses native stack formats for Go, Rust, JVM (Java, Kotlin, Scala), and .NET, alongside JavaScript/TypeScript and Python. Each frame is reduced to a stable `function (file)` token, so errors group by their real code location instead of collapsing onto the message alone (`otlp-ingester`)
+
+### Fixes
+
+- Stop unrelated backend errors from grouping into one issue when their stack frames were discarded — Go and Rust frames were dropped entirely, and .NET/Rust frames lost the function name or kept volatile line numbers that fragmented one defect across deploys (`otlp-ingester`)
+
+### Internal
+
+- Add representative stack-trace fixtures and golden fingerprint tests for every supported language (`otlp-ingester`)
+
 ## [1.1.0] - 2026-09-01
 
 ### Features

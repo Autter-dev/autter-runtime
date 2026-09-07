@@ -816,14 +816,27 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		telemetryStats.markCaptured();
 		const isError = error instanceof Error;
 		const message = isError ? error.message : String(error);
-		const span = errorTracer.startSpan(isError ? error.name : "Error", {
-			attributes: {
-				"autter.severity": "error",
-				// Redaction is applied here, not at export time: PII must not
-				// leave the process even if an exporter misbehaves.
-				...activeRedactor(attributes),
-			},
-		});
+		// Redaction is applied here, not at export time: PII must not leave
+		// the process even if an exporter misbehaves.
+		const redacted = activeRedactor(attributes);
+
+		// Prefer the live request span (the HTTP server span inside an Express
+		// handler or error middleware) so the thrown exception and its failed
+		// request stay one issue. Opening a separate error span here is what
+		// used to split one failure into an "Error" group AND a "SpanError"
+		// group: the request span carried only an error status (no exception
+		// event), so the ingester synthesized a second SpanError occurrence.
+		// Recording the exception onto the request span gives it a real
+		// exception event (type, message, stack), so no SpanError is derived.
+		// Global handlers (uncaught/unhandled) run with no active span, so we
+		// still open a dedicated always-on error span for them.
+		const activeSpan = trace.getActiveSpan();
+		const reuseActive = activeSpan?.isRecording() === true;
+		const span = reuseActive
+			? (activeSpan as Span)
+			: errorTracer.startSpan(isError ? error.name : "Error");
+		span.setAttributes({ "autter.severity": "error", ...redacted });
+
 		if (isError && error.stack) {
 			span.recordException(error);
 		} else {
@@ -842,7 +855,9 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
-		span.end();
+		// Only end spans we own. The request span is owned by the HTTP
+		// instrumentation, which ends it when the response completes.
+		if (!reuseActive) span.end();
 	}
 
 	function captureMessage(

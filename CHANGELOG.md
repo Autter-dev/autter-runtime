@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1] - 2026-09-07
+
+### Fixes
+
+- **One failed request no longer splits into two error issues**: `captureException` records the exception onto the active HTTP request span instead of a separate error span, so a thrown Express error and its failed request stay one issue. Before, a single request produced both an `Error` group and a duplicate `SpanError` group. The exception stack trace is now kept on the request span as well (`runtime-node`)
+
 ## [1.2.0] - 2026-09-07
 
 ### Features

@@ -41,7 +41,7 @@ export function normalizeLatencyHistograms(request: OtlpMetricsRequest): Latency
 				if (hasStableDuration && metric.name === "http.server.duration") continue;
 				const multiplier = metric.name === "http.server.request.duration" ? 1000
 					: metric.name === "http.server.duration" ? 1 : null;
-				if (multiplier === null || ![2, "2", "AGGREGATION_TEMPORALITY_DELTA"].includes(metric.histogram?.aggregationTemporality ?? "")) continue;
+				if (multiplier === null || ![1, "1", "AGGREGATION_TEMPORALITY_DELTA"].includes(metric.histogram?.aggregationTemporality ?? "")) continue;
 				for (const point of metric.histogram?.dataPoints ?? []) {
 					const bounds = point.explicitBounds ?? [];
 					const counts = (point.bucketCounts ?? []).map(Number);

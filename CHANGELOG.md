@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.1] - 2026-09-08
+
+### Fixes
+
+- Accept OTLP delta temporality value `1` and reject cumulative value `2` in endpoint latency storage (`otlp-ingester`). This corrects the numeric metric format used by SDK exporters.
+- Add JSON and protobuf regression coverage for delta and cumulative histograms.
+
+### Upgrade
+
+- Self-hosted installations must deploy ingester 1.3.1 before endpoint regression detection is enabled. Node and Next.js SDK 1.3.0 remain compatible. Other package behavior is unchanged.
+- Allow fresh baseline data to collect after the correction. Histograms discarded by the previous ingester cannot be recovered.
+
 ## [1.3.0] - 2026-09-08
 
 ### Features

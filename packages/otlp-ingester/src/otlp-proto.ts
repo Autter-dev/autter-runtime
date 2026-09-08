@@ -69,9 +69,12 @@ message NumberDataPoint {
 }
 message Histogram { repeated HistogramDataPoint data_points = 1; int32 aggregation_temporality = 2; }
 message HistogramDataPoint {
+  fixed64 start_time_unix_nano = 2;
   fixed64 time_unix_nano = 3;
   fixed64 count = 4;
   optional double sum = 5;
+  repeated fixed64 bucket_counts = 6;
+  repeated double explicit_bounds = 7;
   repeated KeyValue attributes = 9;
 }
 `;

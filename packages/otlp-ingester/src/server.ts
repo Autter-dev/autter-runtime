@@ -5,6 +5,7 @@ import express, {
 } from "express";
 import { KeyResolver, RateLimiter } from "./auth.js";
 import { ClickHouseStore } from "./clickhouse.js";
+import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
 import {
 	deriveFields,
@@ -250,6 +251,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}
 		const metricPoints = normalizeMetrics(request);
 		try {
+			await store.insertLatencyHistograms(ctx, normalizeLatencyHistograms(request));
 			await store.insertMetricPoints(ctx, metricPoints);
 		} catch (err) {
 			storageError(res, err);

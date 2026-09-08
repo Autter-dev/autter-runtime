@@ -61,7 +61,10 @@ export interface OtlpTraceRequest {
 
 interface OtlpDataPoint {
 	attributes?: OtlpKeyValue[];
+	startTimeUnixNano?: string | number;
 	timeUnixNano?: string | number;
+	explicitBounds?: number[];
+	bucketCounts?: Array<string | number>;
 	count?: string | number;
 	sum?: number;
 	asInt?: string | number;
@@ -246,10 +249,12 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					name: span.name ?? "unnamed",
 					kind,
 					status: isError ? "error" : "ok",
-					route,
+					route: route ? normalizeRoute(route) : null,
 					statusCode,
 					durationMs,
-					attributes: null,
+					attributes: {
+						"http.request.method": (attrs.get("http.request.method") ?? attrs.get("http.method") ?? "").slice(0, 20),
+					},
 					startedAt,
 				});
 

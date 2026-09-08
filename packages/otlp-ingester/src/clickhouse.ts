@@ -4,6 +4,7 @@ import {
 	type ClickHouseSettings,
 } from "@clickhouse/client";
 import type { IngesterConfig } from "./config.js";
+import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
 import {
 	MIGRATIONS,
 	migrationsTableDDL,
@@ -66,6 +67,7 @@ export class ClickHouseStore {
 			this.config;
 		return [
 			`CREATE DATABASE IF NOT EXISTS ${db}`,
+			latencyTableDDL(db, metricsTtlDays),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -343,6 +345,23 @@ export class ClickHouseStore {
 				error_count: Math.max(0, Math.round(p.errorCount)),
 				duration_sum_ms: p.durationSumMs,
 				session_count: Math.max(0, Math.round(p.sessionCount)),
+			})),
+		});
+	}
+
+	async insertLatencyHistograms(ctx: IngestContext, points: LatencyHistogram[]): Promise<void> {
+		if (points.length === 0 || !this.configured) return;
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_latency_histograms"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: points.map((point) => ({
+				org_id: ctx.orgId, repository_id: ctx.repositoryId, point_id: point.pointId,
+				service: point.service, environment: point.environment, release: point.release,
+				method: point.method, route: point.route, bucket_at: point.bucketAt.toISOString(),
+				request_count: point.requestCount, error_count: point.errorCount,
+				duration_sum_ms: point.durationSumMs, bounds_ms: point.boundsMs, counts: point.counts,
 			})),
 		});
 	}

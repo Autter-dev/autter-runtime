@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.3.0] - 2026-09-08
+
+### Features
+
+- Preserve request-duration histogram buckets for endpoint latency detection. The ingester accepts delta histograms, removes duplicate points at query time, and stores the authenticated organization and repository IDs (`otlp-ingester`).
+- Add opt-in `retainTracesAboveMs` to retain local traces for slow server requests. Retention uses bounded buffers and leaves the existing error-retention setting unchanged (`runtime-node`).
+- Extend HTTP duration histogram bounds through two minutes and add a unique service instance ID (`runtime-node`).
+- Keep normalized routes and HTTP methods on stored spans for exact endpoint trace matching (`otlp-ingester`).
+
+### Upgrade
+
+- Deploy the ingester before enabling endpoint regression detection in the Autter backend. Migration `0005-latency-histograms` creates the required table.
+- Set the release commit SHA and enable slow-request retention before an incident occurs. Historical histogram buckets and discarded traces cannot be rebuilt.
+- The Next.js package now requires `@autter/runtime-node` version `^1.3.0`. Browser behavior is unchanged.
+- See `docs/ENDPOINT-REGRESSIONS.md` for setup and retention limits.
+
 ## [1.2.1] - 2026-09-07
 
 ### Fixes

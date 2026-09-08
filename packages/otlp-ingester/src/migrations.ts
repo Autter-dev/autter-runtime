@@ -33,6 +33,8 @@
  *   },
  */
 
+import { latencyTableDDL } from "./latency.js";
+
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
 	id: string;
@@ -120,6 +122,7 @@ export const MIGRATIONS: Migration[] = [
 			TTL toDateTime(started_at) + INTERVAL 90 DAY`,
 		],
 	},
+	{ id: "0005-latency-histograms", statements: [latencyTableDDL("{db}")] },
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

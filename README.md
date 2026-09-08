@@ -100,6 +100,8 @@ ClickHouse.
 
 ## Supported stacks
 
+For endpoint latency detection and slow-request retention, see [endpoint regression telemetry](docs/ENDPOINT-REGRESSIONS.md).
+
 | Stack | How | Key type |
 | --- | --- | --- |
 | React / any SPA / static site | `@autter/runtime-browser` (direct) | client key (publishable) |

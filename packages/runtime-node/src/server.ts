@@ -1,4 +1,5 @@
 import { ServerResponse, type IncomingMessage } from "node:http";
+import { randomUUID } from "node:crypto";
 import {
 	context,
 	trace,
@@ -19,7 +20,7 @@ import {
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
 import { Resource } from "@opentelemetry/resources";
-import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
+import { ExplicitBucketHistogramAggregation, PeriodicExportingMetricReader, View } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import {
 	BatchSpanProcessor,
@@ -103,6 +104,7 @@ export interface AutterServerOptions {
 	 * Default true.
 	 */
 	retainTracesOnError?: boolean;
+	retainTracesAboveMs?: number;
 	/** Metric export interval. Default 60_000 ms. */
 	metricIntervalMs?: number;
 	/** Capture crashing exceptions via process.uncaughtExceptionMonitor (default true). */
@@ -411,7 +413,11 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 	private bufferedSpans = 0;
 	private readonly sweeper: NodeJS.Timeout;
 
-	constructor(private readonly inner: SpanProcessor) {
+	constructor(
+		private readonly inner: SpanProcessor,
+		private readonly retainErrors = true,
+		private readonly slowThresholdMs = 0,
+	) {
 		this.sweeper = setInterval(() => this.sweep(), RETENTION_SWEEP_INTERVAL_MS);
 		// Never hold the process open just to babysit the buffer.
 		this.sweeper.unref?.();
@@ -427,7 +433,9 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		const entry = this.entryFor(ctx.traceId);
 		if (entry.retained) {
 			this.forward(span);
-		} else if (spanIndicatesError(span)) {
+		} else if ((this.retainErrors && spanIndicatesError(span)) ||
+			(this.slowThresholdMs > 0 && span.kind === SpanKind.SERVER &&
+				span.duration[0] * 1000 + span.duration[1] / 1e6 >= this.slowThresholdMs)) {
 			entry.retained = true;
 			this.flush(entry);
 			this.forward(span);
@@ -470,6 +478,10 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 	private entryFor(traceId: string): RetentionEntry {
 		let entry = this.traces.get(traceId);
 		if (!entry) {
+			if (this.traces.size >= RETENTION_MAX_BUFFERED_SPANS) {
+				const oldest = this.traces.keys().next().value;
+				if (oldest) this.drop(oldest);
+			}
 			entry = { spans: [], retained: false, firstSeenAtMs: Date.now() };
 			this.traces.set(traceId, entry);
 		}
@@ -720,6 +732,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 
 	const resource = new Resource({
 		[ATTR_SERVICE_NAME]: options.service,
+		"service.instance.id": randomUUID(),
 		...(options.release ? { [ATTR_SERVICE_VERSION]: options.release } : {}),
 		"deployment.environment": environment,
 		// Tells the ingester request metrics arrive on the metrics pipe, so
@@ -732,18 +745,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		root: new TraceIdRatioBasedSampler(options.traceSampleRate ?? 0.01),
 	});
 	const retainOnError = options.retainTracesOnError !== false;
+	const slowThresholdMs = Number.isFinite(options.retainTracesAboveMs)
+		? Math.max(0, options.retainTracesAboveMs!) : 0;
+	const retainTraces = retainOnError || slowThresholdMs > 0;
 	// Error-linked trace retention (default on): unsampled spans are still
 	// recorded in-process and briefly buffered, so a trace can be exported in
 	// full once it turns out to contain an error. Rescued spans ride their
 	// own batch processor on the errors' 2 s flush cadence.
-	let sampler: Sampler = retainOnError
+	let sampler: Sampler = retainTraces
 		? new RecordUnsampledSampler(headSampler)
 		: headSampler;
 	// LLM tracing is on by default: gen_ai/ai.* spans emitted through the
 	// global provider (Vercel AI SDK, GenAI instrumentations) skip head
 	// sampling so every model call reaches the ingester.
 	if (options.llmTracing !== false) sampler = new LlmAwareSampler(sampler);
-	const errorTraceBuffer = retainOnError
+	const errorTraceBuffer = retainTraces
 		? new ErrorTraceRetentionProcessor(
 				new BatchSpanProcessor(
 					new CountingExporter(
@@ -751,6 +767,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					),
 					{ scheduledDelayMillis: 2000 },
 				),
+				retainOnError,
+				slowThresholdMs,
 			)
 		: null;
 
@@ -780,6 +798,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			...(errorTraceBuffer ? [errorTraceBuffer] : []),
 		],
 		metricReader,
+		views: [
+			new View({ instrumentName: "http.server.duration", aggregation: new ExplicitBucketHistogramAggregation(
+				[5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000],
+			) }),
+			new View({ instrumentName: "http.server.request.duration", aggregation: new ExplicitBucketHistogramAggregation(
+				[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 20, 30, 60, 120],
+			) }),
+		],
 		instrumentations: [
 			new HttpInstrumentation({ responseHook: captureExpressRoute }),
 			...((options.instrumentations ?? []) as never[]),

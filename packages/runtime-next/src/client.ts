@@ -12,6 +12,7 @@
 export {
 	initAutterBrowser,
 	captureException,
+	captureOutcome,
 	captureMessage,
 	trackEvent,
 	setUser,

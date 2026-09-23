@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeRoute } from "./fingerprint.js";
 import {
 	asSeverity,
 	type RuntimeMetricPoint,
@@ -21,6 +22,9 @@ const browserEventSchema = z.object({
 		"message",
 		"session_start",
 		"track_event",
+		"outcome",
+		"request_failure",
+		"timing",
 	]),
 	timestamp: z.string().datetime(),
 	/** exception/message events: signal level. Defaults per type. */
@@ -28,6 +32,7 @@ const browserEventSchema = z.object({
 	message: z.string().max(4000).default(""),
 	/** track_event only: the event name (counted, never free-form PII). */
 	name: z.string().max(200).optional(),
+	durationMs: z.number().nonnegative().max(120000).optional(),
 	stack: z.string().max(32000).optional(),
 	errorType: z.string().max(200).optional(),
 	filename: z.string().max(1000).optional(),
@@ -53,6 +58,8 @@ const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 	exception: "Error",
 	unhandled_rejection: "UnhandledRejection",
 	message: "Message",
+	outcome: "OutcomeFailure",
+	request_failure: "HttpRequestError",
 };
 
 // Content-level gate for the free-form `context` bag. The schema whitelist
@@ -83,6 +90,8 @@ const TYPE_TO_SEVERITY: Record<string, RuntimeSeverity> = {
 	exception: "error",
 	unhandled_rejection: "error",
 	message: "warning",
+	outcome: "error",
+	request_failure: "error",
 };
 
 export interface NormalizedBrowser {
@@ -140,6 +149,14 @@ export function normalizeBrowserPayload(
 			if (name) bumpRollup(`event:${name}`, occurredAt, { requestCount: 1 });
 			continue;
 		}
+		if (event.type === "timing") {
+			const name = event.name === "browser.longtask" ? "browser.longtask"
+				: `browser.resource:${normalizeRoute((event.name ?? "").replace(/^browser\.resource:/, "").split("?")[0]!.replace(EMAIL_VALUE_RE, REDACTED))}`;
+			bumpRollup(name, occurredAt, { requestCount: 1 });
+			const point = rollups.get(`${name} ${Math.floor(occurredAt.getTime() / 60_000) * 60_000}`);
+			if (point) point.durationSumMs += event.durationMs ?? 0;
+			continue;
+		}
 
 		const severity = asSeverity(
 			event.severity,
@@ -162,7 +179,9 @@ export function normalizeBrowserPayload(
 			release: payload.release ?? null,
 			errorType:
 				event.errorType ?? TYPE_TO_ERROR_TYPE[event.type] ?? "Error",
-			message: event.message || "Unknown error",
+			message: event.type === "outcome" ? `${(event.name ?? "outcome").replace(EMAIL_VALUE_RE, REDACTED)}: ${event.message.replace(EMAIL_VALUE_RE, REDACTED)}`
+				: event.type === "request_failure" ? `${normalizeRoute((event.name ?? "request").split("?")[0]!.replace(EMAIL_VALUE_RE, REDACTED))}: ${event.message}`
+				: event.message || "Unknown error",
 			stack: event.stack ?? null,
 			route: event.route ? (event.route.split("?")[0] ?? null) : null,
 			method: null,

@@ -34,6 +34,10 @@ export interface AutterBrowserOptions {
 	sessionTracking?: boolean;
 	/** Last-chance hook: mutate or drop (return null) an event before send. */
 	beforeSend?: (event: BrowserEvent) => BrowserEvent | null;
+	/** Observe failed fetch and XHR requests and 5xx responses (default true). */
+	captureNetworkFailures?: boolean;
+	/** Observe long tasks and slow resource timings (default true). */
+	captureTimings?: boolean;
 }
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
@@ -44,7 +48,10 @@ export interface BrowserEvent {
 		| "unhandled_rejection"
 		| "message"
 		| "session_start"
-		| "track_event";
+		| "track_event"
+		| "outcome"
+		| "request_failure"
+		| "timing";
 	timestamp: string;
 	/** Signal level; the ingester defaults it per type when omitted. */
 	severity?: AutterSeverity;
@@ -57,6 +64,7 @@ export interface BrowserEvent {
 	column?: number;
 	route?: string;
 	context?: Record<string, unknown>;
+	durationMs?: number;
 }
 
 const MAX_QUEUE = 10;
@@ -73,6 +81,7 @@ let globalContext: Record<string, unknown> | undefined;
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 let sentCount = 0;
 let initialized = false;
+let timingCount = 0;
 
 function uid(): string {
 	try {
@@ -253,6 +262,16 @@ export function captureMessage(
 	enqueue(event, severity === "error" || severity === "fatal");
 }
 
+/** Report an application outcome that failed without throwing. Use a stable name. */
+export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
+	const event = baseEvent("outcome", String(message).replace(EMAIL_RE, MASK));
+	event.name = String(name).replace(EMAIL_RE, MASK).slice(0, 200);
+	event.errorType = "OutcomeFailure";
+	event.severity = "error";
+	if (context) event.context = { ...(event.context || {}), ...context };
+	enqueue(event, true);
+}
+
 /** Coarse usage signal — counts only, no PII in `props`. */
 export function trackEvent(
 	name: string,
@@ -278,6 +297,87 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 	opts = options as typeof opts;
 	sessionId = getSessionId();
 	initialized = true;
+	if (options.captureNetworkFailures !== false && typeof fetch === "function") {
+		const originalFetch = window.fetch.bind(window);
+		window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+			const started = performance.now();
+			const target = input instanceof Request ? input.url : String(input);
+			const isTelemetry = target.includes(options.endpoint);
+			const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
+			return originalFetch(input, init).then((response) => {
+				if (!isTelemetry && response.status >= 500) {
+					const event = baseEvent("request_failure", `Request returned ${response.status}`);
+					event.name = path;
+					event.errorType = "HttpRequestError";
+					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					enqueue(event, true);
+				}
+				return response;
+			}, (error: unknown) => {
+				if (!isTelemetry) {
+					const event = baseEvent("request_failure", "Request failed");
+					event.name = path;
+					event.errorType = "NetworkError";
+					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					enqueue(event, true);
+				}
+				throw error;
+			});
+		}) as typeof fetch;
+	}
+	if (options.captureNetworkFailures !== false && typeof XMLHttpRequest !== "undefined") {
+		const xhrUrls = new WeakMap<XMLHttpRequest, string>();
+		const originalOpen = XMLHttpRequest.prototype.open;
+		const originalSend = XMLHttpRequest.prototype.send;
+		XMLHttpRequest.prototype.open = (function (this: XMLHttpRequest, ...args: unknown[]) {
+			xhrUrls.set(this, String(args[1] ?? ""));
+			return Reflect.apply(originalOpen, this, args);
+		}) as typeof XMLHttpRequest.prototype.open;
+		XMLHttpRequest.prototype.send = function (...args: Parameters<XMLHttpRequest["send"]>) {
+			const target = xhrUrls.get(this) ?? "";
+			if (!target.includes(options.endpoint)) {
+				const started = performance.now();
+				const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
+				let recorded = false;
+				const record = (message: string, errorType: string) => {
+					if (recorded) return;
+					recorded = true;
+					const event = baseEvent("request_failure", message);
+					event.name = path;
+					event.errorType = errorType;
+					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					enqueue(event, true);
+				};
+				const onError = () => record("Request failed", "NetworkError");
+				const onTimeout = () => record("Request timed out", "NetworkError");
+				this.addEventListener("loadend", () => {
+					if (this.status >= 500) record(`Request returned ${this.status}`, "HttpRequestError");
+					this.removeEventListener("error", onError);
+					this.removeEventListener("timeout", onTimeout);
+				}, { once: true });
+				this.addEventListener("error", onError, { once: true });
+				this.addEventListener("timeout", onTimeout, { once: true });
+			}
+			return Reflect.apply(originalSend, this, args);
+		};
+	}
+	if (options.captureTimings !== false && typeof PerformanceObserver !== "undefined") {
+		try {
+			const observer = new PerformanceObserver((list) => {
+				for (const entry of list.getEntries()) {
+					if (entry.duration < 200 || entry.name.includes(options.endpoint) || timingCount >= 20) continue;
+					const event = baseEvent("timing", "");
+					event.name = entry.entryType === "longtask" ? "browser.longtask" : "browser.resource:" + (() => {
+						try { return new URL(entry.name, location.href).pathname; } catch { return "unknown"; }
+					})();
+					event.durationMs = Math.min(120000, Math.round(entry.duration));
+					timingCount++;
+					enqueue(event);
+				}
+			});
+			observer.observe({ entryTypes: ["longtask", "resource"] });
+		} catch { /* Browser does not support these entry types. */ }
+	}
 
 	window.addEventListener("error", (event: ErrorEvent) => {
 		const e = baseEvent("exception", event.message || "Unknown error");

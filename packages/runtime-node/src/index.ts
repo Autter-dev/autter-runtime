@@ -8,6 +8,7 @@ export {
 	initAutterServer,
 	captureException,
 	captureMessage,
+	reportOutcome,
 	withProcessSpan,
 	withLlmCall,
 	trackLlmCall,
@@ -36,3 +37,4 @@ export {
 	instrumentLlmClient,
 	type InstrumentLlmOptions,
 } from "./llm-instrument.js";
+export { startCaughtExceptionSampler } from "./caught-exceptions.js";

@@ -7,6 +7,7 @@ you from zero to seeing data in ClickHouse.
 - [1. Concepts (2 minutes)](#1-concepts)
 - [2. Run the ingester](#2-run-the-ingester)
 - [3. Instrument your backend](#3-instrument-your-backend)
+- [LLM instrumentation guide](LLM-INSTRUMENTATION.md)
 - [4. Instrument your frontend](#4-instrument-your-frontend)
 - [5. Next.js: both in one package](#5-nextjs-both-in-one-package)
 - [6. Other languages (Go, Rust, Python, …)](#6-other-languages)
@@ -138,6 +139,10 @@ enriched with `@opentelemetry/instrumentation-express` via the
 `instrumentations` option.
 
 ### Track LLM usage & cost
+
+For the complete `withLlmCall` / `trackLlmCall` API, emitted `gen_ai.*`
+attributes, and cross-language OTLP conventions, see the
+[LLM instrumentation guide](LLM-INSTRUMENTATION.md).
 
 `initAutterServer` initialises LLM tracing too: every recognised LLM call
 is recorded 100% (an LLM-aware sampler keeps GenAI spans even at 1% trace

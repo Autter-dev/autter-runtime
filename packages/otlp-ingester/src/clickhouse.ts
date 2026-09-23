@@ -5,6 +5,8 @@ import {
 } from "@clickhouse/client";
 import type { IngesterConfig } from "./config.js";
 import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
+import { profileTableDDL, type ProfileSample } from "./profiles.js";
+import { sourceMapTableDDL } from "./source-maps.js";
 import {
 	MIGRATIONS,
 	migrationsTableDDL,
@@ -68,6 +70,8 @@ export class ClickHouseStore {
 		return [
 			`CREATE DATABASE IF NOT EXISTS ${db}`,
 			latencyTableDDL(db, metricsTtlDays),
+			profileTableDDL(db),
+			sourceMapTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -284,6 +288,33 @@ export class ClickHouseStore {
 				attributes: JSON.stringify(s.attributes ?? {}),
 				started_at: s.startedAt.toISOString(),
 			})),
+		});
+	}
+
+	async insertProfileSamples(ctx: IngestContext, samples: ProfileSample[]): Promise<void> {
+		if (!samples.length) return;
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_profile_samples"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: samples.map((sample) => ({
+				org_id: ctx.orgId, repository_id: ctx.repositoryId,
+				profile_id: sample.profileId, sample_index: sample.sampleIndex, service: sample.service,
+				environment: sample.environment, release: sample.release,
+				trace_id: sample.traceId, observed_at: sample.observedAt.toISOString(),
+				sample_type: sample.sampleType, unit: sample.unit,
+				stack: sample.stack, value: sample.value,
+			})),
+		});
+	}
+
+	async insertSourceMap(ctx: IngestContext, sourceMap: { release: string; filename: string; map: string }): Promise<void> {
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_source_maps"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, ...sourceMap }],
 		});
 	}
 

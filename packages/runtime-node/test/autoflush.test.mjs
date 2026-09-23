@@ -26,6 +26,7 @@ function runChild(file, env = {}) {
 let collector;
 let collectorPort;
 let receivedBodies;
+const receivedBodyLog = [];
 
 before(async () => {
 	receivedBodies = [];
@@ -33,7 +34,9 @@ before(async () => {
 		const chunks = [];
 		req.on("data", (c) => chunks.push(c));
 		req.on("end", () => {
-			receivedBodies.push(Buffer.concat(chunks).toString("utf8"));
+			const body = Buffer.concat(chunks).toString("utf8");
+			receivedBodies.push(body);
+			receivedBodyLog.push(body);
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end("{}");
 		});
@@ -95,4 +98,25 @@ test("e2e: captured exception attributes are redacted on the wire", async () => 
 
 	// Debug mode reported exports.
 	assert.match(err, /exported \d+ span/);
+});
+
+test("e2e: uncaught exception flushes telemetry before exiting with Node's crash code", async () => {
+	const priorBodyCount = receivedBodyLog.length;
+	const { code, err, out } = await runChild(fixtures("uncaught-exception.mjs"), {
+		COLLECTOR_PORT: String(collectorPort),
+		AUTTER_DEBUG: "1",
+	});
+	assert.equal(code, 1);
+	assert.ok(receivedBodyLog.length > priorBodyCount, `collector received nothing before crash exit; stderr: ${err}`);
+	assert.match(receivedBodyLog.slice(priorBodyCount).join("\n"), /fatal flush regression/);
+	assert.match(err, /fatal flush regression/);
+	assert.match(`${out}\n${err}`, /telemetry flushed/);
+});
+
+test("an application's existing uncaught exception handler keeps its behavior", async () => {
+	const { code, out } = await runChild(fixtures("custom-uncaught-handler.mjs"), {
+		COLLECTOR_PORT: String(collectorPort),
+	});
+	assert.equal(code, 0);
+	assert.match(out, /application handler recovered/);
 });

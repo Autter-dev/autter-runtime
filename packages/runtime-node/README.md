@@ -187,6 +187,9 @@ engine — keep secrets out of attributes in the first place.
 
 ## 3. LLM tracing
 
+For the field contract, manual reporting patterns, and provider-agnostic
+OpenTelemetry setup, see the dedicated [LLM instrumentation guide](../../docs/LLM-INSTRUMENTATION.md).
+
 `initAutterServer` initialises LLM tracing automatically: any GenAI span —
 `gen_ai.*` semconv attributes or the Vercel AI SDK's `ai.*` spans — bypasses
 head sampling, so **every** model call is recorded with model, tokens,

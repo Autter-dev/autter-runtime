@@ -1,7 +1,7 @@
 # Stack integrations
 
-Autter Runtime is two credentials and three endpoints; everything else is
-per-stack sugar.
+Autter Runtime uses two key types and portable OTLP endpoints; optional
+profile and source-map uploads use the server key.
 
 | Credential | Where it lives | Can |
 | --- | --- | --- |
@@ -12,6 +12,8 @@ per-stack sugar.
 | --- | --- |
 | `POST /v1/traces`, `POST /v1/metrics` | OTLP/HTTP — **protobuf or JSON**, gzip ok |
 | `POST /v1/browser` | compact JSON (`@autter/runtime-browser` payload v1) |
+| `POST /v1/profiles` | symbolized pprof (server key only) |
+| `POST /v1/sourcemaps` | release-keyed source map JSON (server key only) |
 
 Any language with an OpenTelemetry SDK can send server telemetry — point
 its OTLP/HTTP exporter at the ingester and add the key as a header.

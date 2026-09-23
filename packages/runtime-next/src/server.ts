@@ -36,6 +36,7 @@ import {
 export {
 	captureException as captureServerException,
 	captureMessage as captureServerMessage,
+	reportOutcome as reportServerOutcome,
 	withProcessSpan,
 	withLlmCall,
 	trackLlmCall,

@@ -34,6 +34,8 @@
  */
 
 import { latencyTableDDL } from "./latency.js";
+import { profileTableDDL } from "./profiles.js";
+import { sourceMapTableDDL } from "./source-maps.js";
 
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
@@ -123,6 +125,8 @@ export const MIGRATIONS: Migration[] = [
 		],
 	},
 	{ id: "0005-latency-histograms", statements: [latencyTableDDL("{db}")] },
+	{ id: "0006-profile-samples", statements: [profileTableDDL("{db}")] },
+	{ id: "0007-source-maps", statements: [sourceMapTableDDL("{db}")] },
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

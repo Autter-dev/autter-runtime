@@ -9,6 +9,8 @@ import {
 	type RuntimeSpanRow,
 } from "./types.js";
 
+const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+
 /**
  * OTLP/HTTP JSON → runtime signal. Structural types cover only the fields
  * we read (the full OTLP schema is large and versioned; unknown fields pass
@@ -235,9 +237,13 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				const startedAt = nanosToDate(span.startTimeUnixNano);
 				const durationMs = spanDurationMs(span);
 				const kind = spanKind(span.kind);
+				const hasFailureEvent = (span.events ?? []).some((event) =>
+					event.name === "exception" || (event.name === "autter.outcome"
+						&& attrMap(event.attributes).get("autter.outcome.status") === "error"));
 				const isError =
-					isErrorStatus(span.status?.code) ||
-					(statusCode !== null && statusCode >= 500);
+					statusCode !== null && statusCode >= 400 && statusCode < 500
+						? hasFailureEvent
+						: hasFailureEvent || isErrorStatus(span.status?.code) || (statusCode !== null && statusCode >= 500);
 
 				spans.push({
 					service: resource.service,
@@ -266,6 +272,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				);
 				for (const event of exceptionEvents) {
 					const eventAttrs = attrMap(event.attributes);
+					const handled = eventAttrs.get("autter.handled") === "true";
 					occurrences.push({
 						source: "server",
 						severity: severityOf(eventAttrs, attrs),
@@ -284,19 +291,41 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						statusCode,
 						traceId: span.traceId ?? null,
 						sessionId: null,
-						attributes: null,
+						attributes: handled ? {
+							"autter.handled": true,
+							"autter.sampled": eventAttrs.get("autter.sampled") === "true",
+						} : null,
 						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 					});
 				}
-				if (exceptionEvents.length === 0 && isErrorStatus(span.status?.code)) {
+				const failedOutcomes = (span.events ?? []).filter((event) => {
+					if (event.name !== "autter.outcome") return false;
+					return attrMap(event.attributes).get("autter.outcome.status") === "error";
+				});
+				for (const event of failedOutcomes) {
+					const outcome = attrMap(event.attributes);
+					const name = (outcome.get("autter.outcome.name") ?? "operation").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 200);
+					occurrences.push({
+						source: "server", severity: "error", service: resource.service,
+						environment: resource.environment, release: resource.release,
+						errorType: "OutcomeFailure",
+						message: `${name}: ${(outcome.get("autter.outcome.message") ?? "failed").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 1000)}`,
+						stack: null, route, method: methodOf(attrs), statusCode,
+						traceId: span.traceId ?? null, sessionId: null, attributes: null,
+						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
+					});
+				}
+				if (exceptionEvents.length === 0 && failedOutcomes.length === 0 && isError) {
 					occurrences.push({
 						source: "server",
 						severity: severityOf(new Map(), attrs),
 						service: resource.service,
 						environment: resource.environment,
 						release: resource.release,
-						errorType: "SpanError",
-						message: span.status?.message || `${span.name ?? "span"} failed`,
+						errorType: statusCode !== null && statusCode >= 500 ? "HttpServerError" : "SpanError",
+						message: span.status?.message || (statusCode !== null && statusCode >= 500
+							? `${methodOf(attrs) ?? "HTTP"} ${route ?? span.name ?? "request"} returned ${statusCode}`
+							: `${span.name ?? "span"} failed`),
 						stack: null,
 						route,
 						method: methodOf(attrs),

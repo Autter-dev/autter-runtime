@@ -1,5 +1,12 @@
 # @autter/runtime-browser
 
+The tracker also observes failed fetch and XHR requests, HTTP 5xx responses, long tasks, and
+slow resources by default. Call `captureOutcome(name, message)` for a bad
+result returned without an exception. Set `captureNetworkFailures: false` or
+`captureTimings: false` to disable either observer. Production browser fixes
+can use release keyed source maps uploaded by CI; see
+`docs/CONTINUOUS-DETECTION.md` in the repository.
+
 Tiny, dependency-free browser error + usage tracker for Autter Runtime.
 **~1 KB brotlied** (5 KB CI budget), zero runtime dependencies, no OTel SDK,
 no console patching, no DOM recording, no offline storage.

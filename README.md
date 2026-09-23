@@ -132,6 +132,7 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 - [Stack integrations](docs/INTEGRATIONS.md) — React, Node, Next.js, Go, Rust, generic OTel
 - [Using Autter Runtime **without npm**](docs/WITHOUT-NPM.md) — any OTel SDK, an OTel Collector, or plain HTTP from any language
 - [Architecture & data model](docs/ARCHITECTURE.md)
+- [Continuous detection, profiles, and outcomes](docs/CONTINUOUS-DETECTION.md)
 - [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
 
 ## Contributing

@@ -45,6 +45,13 @@ Two key scopes separate frontend and backend credentials:
 | `runtime_spans` | MergeTree | `(org_id, repository_id, trace_id, started_at)` | 7 d |
 | `runtime_metrics_1m` | SummingMergeTree | `(org_id, repository_id, service, environment, release, route, bucket_at)` | 90 d |
 | `runtime_llm_calls` | MergeTree | `(org_id, repository_id, started_at)` | 90 d |
+| `runtime_profile_samples` | MergeTree | `(org_id, repository_id, service, environment, release, observed_at, profile_id)` | 7 d |
+| `runtime_source_maps` | ReplacingMergeTree | `(org_id, repository_id, release, filename)` | 30 d |
+
+Profile uploads are server key authenticated, limited to 1 MiB, and decoded
+from symbolized pprof into at most 1,000 stack samples. Source map uploads
+strip `sourcesContent` and are used only to resolve browser stack positions
+for matching releases. See [continuous detection](CONTINUOUS-DETECTION.md).
 
 `runtime_llm_calls` is per-call, not rolled up: LLM traffic is orders of
 magnitude smaller than HTTP, spend analysis needs per-call granularity

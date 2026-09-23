@@ -204,6 +204,8 @@ export interface AutterServer {
 		severity?: AutterSeverity,
 		attributes?: Attributes,
 	): void;
+	/** Report a failed result from code that returned normally. Name must be stable. */
+	reportOutcome(name: string, message: string, attributes?: Attributes): void;
 	/**
 	 * Wrap a named unit of work — a background job, queue consumer, cron
 	 * tick, or DB-heavy call — in an always-recorded span. Unlike regular
@@ -864,7 +866,17 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		span.setAttributes({ "autter.severity": "error", ...redacted });
 
 		if (isError && error.stack) {
-			span.recordException(error);
+			if (redacted["autter.handled"] === true) {
+				span.addEvent("exception", {
+					"exception.type": error.name,
+					"exception.message": message,
+					"exception.stacktrace": error.stack,
+					"autter.handled": true,
+					"autter.sampled": redacted["autter.sampled"] === true,
+				});
+			} else {
+				span.recordException(error);
+			}
 		} else {
 			// No usable stack — an Error thrown without one, or a non-Error
 			// value. Synthesize the call site (minus this frame) so the
@@ -878,6 +890,9 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 				"exception.type": isError ? error.name : "Error",
 				"exception.message": message,
 				...(stack ? { "exception.stacktrace": stack } : {}),
+				...(redacted["autter.handled"] === true
+					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
+					: {}),
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -918,29 +933,36 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		span.end();
 	}
 
+	function reportOutcome(name: string, message: string, attributes?: Attributes): void {
+		errorTraceBuffer?.retainActiveTrace();
+		telemetryStats.markCaptured();
+		const activeSpan = trace.getActiveSpan();
+		const reuseActive = activeSpan?.isRecording() === true;
+		const span = reuseActive ? activeSpan : errorTracer.startSpan("OutcomeFailure");
+		const safeOutcome = activeRedactor({ "autter.outcome.name": name.slice(0, 200), "autter.outcome.message": message.slice(0, 1000) });
+		const safeName = String(safeOutcome["autter.outcome.name"] ?? "operation");
+		const safeMessage = String(safeOutcome["autter.outcome.message"] ?? "failed");
+		span.addEvent("autter.outcome", {
+			...activeRedactor(attributes),
+			"autter.outcome.status": "error",
+			"autter.outcome.name": safeName,
+			"autter.outcome.message": safeMessage,
+		});
+		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
+		if (!reuseActive) span.end();
+	}
+
 	if (options.captureGlobalErrors !== false) {
 		// `uncaughtExceptionMonitor` observes crashes WITHOUT changing the
 		// process's exit semantics (unlike an `uncaughtException` listener).
 		// Best-effort: the batch may not fully flush before the process dies.
 		process.on("uncaughtExceptionMonitor", (err) => {
 			captureException(err, { "autter.unhandled": true });
-			void flushTarget.forceFlush();
+			if (options.autoFlush === false) void Promise.resolve(flushTarget.forceFlush()).catch(() => {});
 		});
-		// The async twin of an uncaught exception: a rejected promise with no
-		// `.catch`. Registering this listener also stops Node's default
-		// `throw` mode from crashing the process, so — unlike the monitor
-		// above — execution continues and the batch exporter flushes on its
-		// normal schedule.
-		process.on("unhandledRejection", (reason: unknown) => {
-			// A non-Error reason has no stack and no real type — usually
-			// injected junk rather than an app fault. Report it as a warning so
-			// it does not open a first-class issue. Mirrors the browser SDK's
-			// `unhandledrejection` handling.
-			captureException(reason, {
-				"autter.unhandled": true,
-				...(reason instanceof Error ? {} : { "autter.severity": "warning" }),
-			});
-		});
+		// In Node's default throw mode, an unhandled rejection reaches the
+		// uncaughtExceptionMonitor above. Installing an unhandledRejection
+		// listener would suppress that default crash, so leave it alone.
 	}
 
 	// Everything that buffers telemetry in-process, reachable as one unit:
@@ -976,6 +998,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const server: AutterServer = {
 		captureException,
 		captureMessage,
+		reportOutcome,
 		withProcessSpan: (name, fn, attributes) =>
 			runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
@@ -1071,6 +1094,23 @@ export function captureMessage(
 		"autter.severity": severity,
 	});
 	span.setStatus({ code: SpanStatusCode.ERROR, message });
+	span.end();
+}
+
+/** Portable OTLP `autter.outcome` event for failed results without exceptions. */
+export function reportOutcome(name: string, message: string, attributes?: Attributes): void {
+	if (active) return active.reportOutcome(name, message, attributes);
+	const span = trace.getTracer("autter-outcomes").startSpan("OutcomeFailure");
+	const safeOutcome = redactAttributes({ "autter.outcome.name": name.slice(0, 200), "autter.outcome.message": message.slice(0, 1000) });
+	const safeName = String(safeOutcome["autter.outcome.name"] ?? "operation");
+	const safeMessage = String(safeOutcome["autter.outcome.message"] ?? "failed");
+	span.addEvent("autter.outcome", {
+		...redactAttributes(attributes),
+		"autter.outcome.status": "error",
+		"autter.outcome.name": safeName,
+		"autter.outcome.message": safeMessage,
+	});
+	span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 	span.end();
 }
 

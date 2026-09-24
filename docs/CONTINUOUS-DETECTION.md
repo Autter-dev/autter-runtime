@@ -7,6 +7,11 @@ HTTP 4xx responses remain ordinary outcomes. Browser fetch and XHR failures, 5xx
 responses, long tasks, and slow resources are observed without request bodies,
 headers, query strings, or DOM content.
 
+Existing OTLP exporters benefit from server-side detection without an SDK
+upgrade. Install `@autter/runtime-node`, `@autter/runtime-browser`, or
+`@autter/runtime-next` version 1.3.2 or later to use the new outcome helpers
+and browser network and timing capture in an application.
+
 ## Report a failed outcome without throwing
 
 Use a stable operation name when code returns normally but the result is wrong:

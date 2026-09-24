@@ -80,11 +80,12 @@ export interface OtlpMetricsRequest {
 			metrics?: Array<{
 				name?: string;
 				unit?: string;
+				gauge?: { dataPoints?: OtlpDataPoint[] };
 				histogram?: {
 					dataPoints?: OtlpDataPoint[];
 					aggregationTemporality?: string | number;
 				};
-				sum?: { dataPoints?: OtlpDataPoint[] };
+				sum?: { dataPoints?: OtlpDataPoint[]; aggregationTemporality?: string | number };
 			}>;
 		}>;
 	}>;

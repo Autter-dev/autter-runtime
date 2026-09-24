@@ -36,6 +36,7 @@
 import { latencyTableDDL } from "./latency.js";
 import { profileTableDDL } from "./profiles.js";
 import { sourceMapTableDDL } from "./source-maps.js";
+import { memoryTableDDL, platformEventTableDDL } from "./memory.js";
 
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
@@ -127,6 +128,13 @@ export const MIGRATIONS: Migration[] = [
 	{ id: "0005-latency-histograms", statements: [latencyTableDDL("{db}")] },
 	{ id: "0006-profile-samples", statements: [profileTableDDL("{db}")] },
 	{ id: "0007-source-maps", statements: [sourceMapTableDDL("{db}")] },
+	{ id: "0008-memory-signals", statements: [memoryTableDDL("{db}"), platformEventTableDDL("{db}")] },
+	{ id: "0009-profile-instance", statements: [
+		`ALTER TABLE {db}.runtime_profile_samples ADD COLUMN IF NOT EXISTS instance_id String DEFAULT ''`,
+	] },
+	{ id: "0010-memory-temporality", statements: [
+		`ALTER TABLE {db}.runtime_memory_samples ADD COLUMN IF NOT EXISTS temporality LowCardinality(String) DEFAULT 'gauge'`,
+	] },
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

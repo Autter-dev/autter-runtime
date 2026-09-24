@@ -1,6 +1,6 @@
 # @autter/otlp-ingester
 
-Self-hostable ingest service for Autter Runtime. Receives OTLP/HTTP (JSON)
+Self-hostable ingest service for Autter Runtime. Receives OTLP/HTTP (protobuf or JSON)
 traces and metrics plus compact browser error payloads, normalises them into
 one per-repo signal model, fingerprints errors, and writes ClickHouse.
 
@@ -9,7 +9,9 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 | Route | Payload | Purpose |
 | --- | --- | --- |
 | `POST /v1/traces` | OTLP/JSON `ExportTraceServiceRequest` | Error spans → occurrences; all spans → `runtime_spans`; server spans → usage rollups; GenAI spans → `runtime_llm_calls` |
-| `POST /v1/metrics` | OTLP/JSON `ExportMetricsServiceRequest` | HTTP-server duration histograms → usage rollups |
+| `POST /v1/metrics` | OTLP `ExportMetricsServiceRequest` | HTTP-server duration histograms → usage rollups; portable process memory/GC metrics → per-instance memory samples |
+| `POST /v1/platform-events` | JSON, server key | ECS/Kubernetes OOM kills and restarts → memory incident correlation |
+| `POST /v1/profiles` | Symbolized pprof, server key | CPU/in-use heap profile samples |
 | `POST /v1/browser` | Browser payload `version: 1` | Errors/rejections → occurrences; session pings → rollups |
 | `GET /healthz` | — | Liveness + ClickHouse reachability |
 

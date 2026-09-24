@@ -53,6 +53,10 @@ How the signals map:
 - **Usage** — HTTP-server spans and the standard
   `http.server.request.duration` histogram fold into per-minute
   request/error/latency rollups automatically.
+- **Memory pressure** — RSS or runtime heap gauges from the same OTLP metric
+  exporter are stored by `service.instance.id` and can open a memory incident.
+  See the [portable metric contract](MEMORY-PRESSURE.md). Process metrics
+  must be enabled separately when the language SDK does not collect them.
 
 ### No OTel SDK at all?
 

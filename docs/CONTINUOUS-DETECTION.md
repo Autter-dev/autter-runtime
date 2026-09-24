@@ -1,5 +1,8 @@
 # Continuous runtime detection
 
+For process memory growth, OOM kills, and restart correlation, see
+[Memory pressure incidents](MEMORY-PRESSURE.md).
+
 Autter already ingests OTLP traces and metrics. The ingester now also makes an
 issue from a server or dependency span with `ERROR` status, an `exception`
 event, or an HTTP 5xx status, even when the application has no log statement.

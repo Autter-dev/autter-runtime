@@ -26,6 +26,7 @@ export interface ProfileSample {
 	environment: string;
 	release: string;
 	traceId: string;
+	instanceId: string;
 	observedAt: Date;
 	sampleType: string;
 	unit: string;
@@ -37,7 +38,7 @@ export function profileTableDDL(db: string): string {
 	return `CREATE TABLE IF NOT EXISTS ${db}.runtime_profile_samples (
 		org_id String, repository_id String, profile_id String, sample_index UInt16,
 		service LowCardinality(String), environment LowCardinality(String), release String,
-		trace_id String DEFAULT '', observed_at DateTime64(3, 'UTC'),
+		trace_id String DEFAULT '', instance_id String DEFAULT '', observed_at DateTime64(3, 'UTC'),
 		sample_type LowCardinality(String), unit LowCardinality(String),
 		stack Array(String), value UInt64
 	) ENGINE = MergeTree PARTITION BY toDate(observed_at)
@@ -46,7 +47,7 @@ export function profileTableDDL(db: string): string {
 }
 
 export function decodeProfile(body: Buffer, meta: {
-	service: string; environment: string; release: string; traceId: string;
+	service: string; environment: string; release: string; traceId: string; instanceId: string;
 }): ProfileSample[] {
 	if (body.length === 0 || body.length > 1024 * 1024) throw new Error("invalid profile size");
 	const payload = body[0] === 0x1f && body[1] === 0x8b
@@ -54,26 +55,29 @@ export function decodeProfile(body: Buffer, meta: {
 	const profile = schema.toObject(schema.decode(payload), { longs: String, arrays: true }) as {
 		sampleType?: Array<{ type?: string; unit?: string }>;
 		sample?: Array<{ locationId?: string[]; value?: string[] }>;
-		location?: Array<{ id?: string; line?: Array<{ functionId?: string }> }>;
-		function?: Array<{ id?: string; name?: string }>;
+		location?: Array<{ id?: string; line?: Array<{ functionId?: string; line?: string }> }>;
+		function?: Array<{ id?: string; name?: string; filename?: string }>;
 		stringTable?: string[];
 		timeNanos?: string;
 	};
 	const strings = profile.stringTable ?? [];
 	const locations = new Map((profile.location ?? []).map((location) => [location.id, location]));
 	const functions = new Map((profile.function ?? []).map((fn) => [fn.id, fn]));
-	const type = profile.sampleType?.[0];
+	const typeIndex = Math.max(0, (profile.sampleType ?? []).findIndex((t) => strings[Number(t.type ?? 0)] === "inuse_space"));
+	const type = profile.sampleType?.[typeIndex];
 	const observedMs = Number(BigInt(profile.timeNanos ?? "0") / 1_000_000n);
 	const observedAt = observedMs > 0 && observedMs <= Date.now() + 300_000 ? new Date(observedMs) : new Date();
 	const profileId = createHash("sha256").update(body).digest("hex").slice(0, 32);
 	const samples: ProfileSample[] = [];
 	for (const [sampleIndex, sample] of (profile.sample ?? []).slice(0, 1000).entries()) {
 		const stack = (sample.locationId ?? []).slice(0, 64).flatMap((id) => {
-			const fnId = locations.get(id)?.line?.[0]?.functionId;
-			const name = fnId ? strings[Number(functions.get(fnId)?.name ?? 0)] : undefined;
-			return name ? [name.slice(0, 200)] : [];
+			const locLine = locations.get(id)?.line?.[0];
+			const fn = locLine?.functionId ? functions.get(locLine.functionId) : undefined;
+			const name = fn ? strings[Number(fn.name ?? 0)] : undefined;
+			const filename = fn ? strings[Number(fn.filename ?? 0)] : undefined;
+			return name ? [`${name.slice(0, 150)}${filename ? ` (${filename.slice(0, 300)}:${Number(locLine?.line ?? 0)})` : ""}`] : [];
 		});
-		const value = Number(sample.value?.[0] ?? 0);
+		const value = Number(sample.value?.[typeIndex] ?? 0);
 		if (!stack.length || !Number.isSafeInteger(value) || value <= 0) continue;
 		samples.push({ profileId, sampleIndex, ...meta, observedAt,
 			sampleType: (strings[Number(type?.type ?? 0)] ?? "samples").slice(0, 80),

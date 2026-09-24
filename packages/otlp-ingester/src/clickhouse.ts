@@ -6,6 +6,7 @@ import {
 import type { IngesterConfig } from "./config.js";
 import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
 import { profileTableDDL, type ProfileSample } from "./profiles.js";
+import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
 import { sourceMapTableDDL } from "./source-maps.js";
 import {
 	MIGRATIONS,
@@ -71,6 +72,8 @@ export class ClickHouseStore {
 			`CREATE DATABASE IF NOT EXISTS ${db}`,
 			latencyTableDDL(db, metricsTtlDays),
 			profileTableDDL(db),
+			memoryTableDDL(db),
+			platformEventTableDDL(db),
 			sourceMapTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
@@ -302,11 +305,34 @@ export class ClickHouseStore {
 				org_id: ctx.orgId, repository_id: ctx.repositoryId,
 				profile_id: sample.profileId, sample_index: sample.sampleIndex, service: sample.service,
 				environment: sample.environment, release: sample.release,
-				trace_id: sample.traceId, observed_at: sample.observedAt.toISOString(),
+				trace_id: sample.traceId, instance_id: sample.instanceId, observed_at: sample.observedAt.toISOString(),
 				sample_type: sample.sampleType, unit: sample.unit,
 				stack: sample.stack, value: sample.value,
 			})),
 		});
+	}
+
+	async insertMemorySamples(ctx: IngestContext, samples: MemorySample[]): Promise<void> {
+		if (!samples.length) return;
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({ table: this.table("runtime_memory_samples"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: samples.map((s) => ({ org_id: ctx.orgId, repository_id: ctx.repositoryId,
+				service: s.service, environment: s.environment, release: s.release,
+				instance_id: s.instanceId, metric: s.metric, value: s.value, temporality: s.temporality,
+				observed_at: s.observedAt.toISOString() })) });
+	}
+
+	async insertPlatformEvent(ctx: IngestContext, event: PlatformEvent): Promise<void> {
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({ table: this.table("runtime_platform_events"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, event_id: event.eventId,
+				service: event.service, environment: event.environment, release: event.release,
+				instance_id: event.instanceId, platform: event.platform, kind: event.kind,
+				occurred_at: event.occurredAt }] });
 	}
 
 	async insertSourceMap(ctx: IngestContext, sourceMap: { release: string; filename: string; map: string }): Promise<void> {

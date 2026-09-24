@@ -38,6 +38,13 @@ npx skills add Autter-dev/autter-skills --all
 
 See [Autter-dev/autter-skills](https://github.com/Autter-dev/autter-skills).
 
+Server memory pressure detection works through the same OTLP/HTTP metric
+endpoint for **any language**. The Node package exports process metrics for
+you; Python, Go, Rust, JVM, .NET, and other services use their OTel meter
+provider or a process collector to emit the [portable memory metrics](docs/MEMORY-PRESSURE.md).
+An OOM kill must be forwarded by ECS or Kubernetes because the killed process
+cannot report it afterward.
+
 **Frontend** — errors + usage, automatic from init:
 
 ```ts

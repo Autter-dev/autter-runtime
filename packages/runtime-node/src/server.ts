@@ -56,6 +56,7 @@ import {
 	redactAttributes,
 	type RedactOptions,
 } from "./redact.js";
+import { startMemoryMetrics } from "./memory.js";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -88,6 +89,8 @@ export interface AutterServerOptions {
 	/** Ingester base URL. Default: https://otlp.autter.dev */
 	endpoint?: string;
 	service: string;
+	/** Stable for this process lifetime; use an ECS task/container ID or pod UID plus restart count to correlate platform events. */
+	instanceId?: string;
 	environment?: string;
 	/** e.g. a git SHA. Maps to service.version / release. */
 	release?: string;
@@ -107,6 +110,8 @@ export interface AutterServerOptions {
 	retainTracesAboveMs?: number;
 	/** Metric export interval. Default 60_000 ms. */
 	metricIntervalMs?: number;
+	/** Collect RSS, heap, limit, and GC signals per process instance. Default true. */
+	memoryMetrics?: boolean;
 	/** Capture crashing exceptions via process.uncaughtExceptionMonitor (default true). */
 	captureGlobalErrors?: boolean;
 	/**
@@ -734,7 +739,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 
 	const resource = new Resource({
 		[ATTR_SERVICE_NAME]: options.service,
-		"service.instance.id": randomUUID(),
+		"service.instance.id": (options.instanceId || process.env.AUTTER_RUNTIME_INSTANCE_ID || randomUUID()).slice(0, 128),
 		...(options.release ? { [ATTR_SERVICE_VERSION]: options.release } : {}),
 		"deployment.environment": environment,
 		// Tells the ingester request metrics arrive on the metrics pipe, so
@@ -814,6 +819,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		],
 	});
 	sdk.start();
+	const stopMemoryMetrics = options.memoryMetrics === false ? null : startMemoryMetrics();
 
 	// Errors, LLM calls, and process spans must never be lost to head
 	// sampling, so they go through a dedicated always-on provider with its
@@ -1004,6 +1010,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
+			stopMemoryMetrics?.();
 			active = null;
 			activeAlwaysOnProvider = null;
 			autoFlushHandle?.dispose();

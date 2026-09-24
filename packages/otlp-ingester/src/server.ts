@@ -24,6 +24,7 @@ import {
 } from "./normalize-otlp.js";
 import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
 import { decodeProfile } from "./profiles.js";
+import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
 import { validateSourceMap } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
 import type {
@@ -210,13 +211,14 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		const environment = req.header("x-autter-environment")?.trim() || "production";
 		const release = req.header("x-autter-release")?.trim() ?? "";
 		const traceId = req.header("x-autter-trace-id")?.trim() ?? "";
-		if (!/^[a-zA-Z0-9._-]{1,200}$/.test(service) || environment.length > 100 || release.length > 200 || (traceId && !/^[a-f0-9]{32}$/.test(traceId))) {
+		const instanceId = req.header("x-autter-instance-id")?.trim() ?? "";
+		if (!/^[a-zA-Z0-9._-]{1,200}$/.test(service) || environment.length > 100 || release.length > 200 || instanceId.length > 128 || (traceId && !/^[a-f0-9]{32}$/.test(traceId))) {
 			res.status(400).json({ error: "invalid profile metadata" });
 			return;
 		}
 		let samples;
 		try {
-			samples = decodeProfile(req.body, { service, environment, release, traceId });
+			samples = decodeProfile(req.body, { service, environment, release, traceId, instanceId });
 			if (!samples.length) throw new Error("empty profile");
 		} catch {
 			res.status(400).json({ error: "invalid or unsymbolized profile" });
@@ -234,6 +236,18 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		const sourceMap = validateSourceMap(req.body);
 		if (!sourceMap) { res.status(400).json({ error: "invalid source map" }); return; }
 		try { await store.insertSourceMap(ctx, sourceMap); res.status(202).json({ accepted: true }); }
+		catch (err) { storageError(res, err); }
+	});
+
+	/** ECS/Kubernetes event forwarders use the same server key as OTLP. */
+	app.post("/v1/platform-events", async (req, res) => {
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		const parsed = platformEventSchema.safeParse(req.body);
+		if (!parsed.success) { res.status(400).json({ error: "invalid platform event" }); return; }
+		const event = normalizePlatformEvent(parsed.data);
+		if (!event) { res.status(400).json({ error: "event timestamp outside retention window" }); return; }
+		try { await store.insertPlatformEvent(ctx, event); res.status(202).json({ accepted: true }); }
 		catch (err) { storageError(res, err); }
 	});
 
@@ -292,9 +306,11 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			request = req.body as OtlpMetricsRequest;
 		}
 		const metricPoints = normalizeMetrics(request);
+		const memorySamples = normalizeMemoryMetrics(request);
 		try {
 			await store.insertLatencyHistograms(ctx, normalizeLatencyHistograms(request));
 			await store.insertMetricPoints(ctx, metricPoints);
+			await store.insertMemorySamples(ctx, memorySamples);
 		} catch (err) {
 			storageError(res, err);
 			return;

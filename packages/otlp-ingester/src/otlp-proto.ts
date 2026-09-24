@@ -57,10 +57,12 @@ message ScopeMetrics { repeated Metric metrics = 2; }
 message Metric {
   string name = 1;
   string unit = 3;
+  Gauge gauge = 5;
   Sum sum = 7;
   Histogram histogram = 9;
 }
-message Sum { repeated NumberDataPoint data_points = 1; }
+message Gauge { repeated NumberDataPoint data_points = 1; }
+message Sum { repeated NumberDataPoint data_points = 1; int32 aggregation_temporality = 2; }
 message NumberDataPoint {
   fixed64 time_unix_nano = 3;
   double as_double = 4;

@@ -1,5 +1,11 @@
 # @autter/runtime-node
 
+The server tracker exports per-instance RSS, heap, memory limit, and GC
+metrics by default. See [memory pressure incidents](../../docs/MEMORY-PRESSURE.md)
+for ECS/Kubernetes OOM event forwarding and optional heap profiles. Set
+`memoryMetrics: false` only if another exporter already emits equivalent
+process metrics.
+
 Autter Runtime for Node.js — two halves in one package:
 
 1. **Same-origin browser relay** for `@autter/runtime-browser`

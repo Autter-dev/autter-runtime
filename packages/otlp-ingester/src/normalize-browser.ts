@@ -24,6 +24,7 @@ const browserEventSchema = z.object({
 		"track_event",
 		"outcome",
 		"request_failure",
+		"csp_violation",
 		"timing",
 	]),
 	timestamp: z.string().datetime(),
@@ -60,6 +61,7 @@ const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 	message: "Message",
 	outcome: "OutcomeFailure",
 	request_failure: "HttpRequestError",
+	csp_violation: "CspViolation",
 };
 
 // Content-level gate for the free-form `context` bag. The schema whitelist
@@ -92,6 +94,7 @@ const TYPE_TO_SEVERITY: Record<string, RuntimeSeverity> = {
 	message: "warning",
 	outcome: "error",
 	request_failure: "error",
+	csp_violation: "error",
 };
 
 export interface NormalizedBrowser {

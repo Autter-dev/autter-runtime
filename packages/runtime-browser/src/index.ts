@@ -38,6 +38,8 @@ export interface AutterBrowserOptions {
 	captureNetworkFailures?: boolean;
 	/** Observe long tasks and slow resource timings (default true). */
 	captureTimings?: boolean;
+	/** Attach the last safe click or form action to failures (default true). */
+	captureActions?: boolean;
 }
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
@@ -51,6 +53,7 @@ export interface BrowserEvent {
 		| "track_event"
 		| "outcome"
 		| "request_failure"
+		| "csp_violation"
 		| "timing";
 	timestamp: string;
 	/** Signal level; the ingester defaults it per type when omitted. */
@@ -82,6 +85,8 @@ let flushTimer: ReturnType<typeof setTimeout> | undefined;
 let sentCount = 0;
 let initialized = false;
 let timingCount = 0;
+let lastAction: { name: string; at: number; route: string } | undefined;
+const ACTION_WINDOW_MS = 30_000;
 
 function uid(): string {
 	try {
@@ -142,6 +147,17 @@ function route(): string {
 
 function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	if (!initialized || sentCount + queue.length >= MAX_EVENTS_PER_SESSION) return;
+	if (lastAction && !["session_start", "track_event", "timing"].includes(event.type)) {
+		const age = Date.now() - lastAction.at;
+		if (age >= 0 && age <= ACTION_WINDOW_MS) {
+			event.context = {
+				...(event.context || {}),
+				"autter.action": lastAction.name,
+				"autter.actionRoute": lastAction.route,
+				"autter.actionAgeMs": age,
+			};
+		}
+	}
 	// Scrub before beforeSend so the last-chance hook sees the final form.
 	if (event.context) event.context = redactContext(event.context);
 	if (opts.beforeSend) {
@@ -297,6 +313,24 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 	opts = options as typeof opts;
 	sessionId = getSessionId();
 	initialized = true;
+	if (options.captureActions !== false) {
+		const rememberAction = (event: Event) => {
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			const element = event.type === "submit"
+				? target.closest("form")
+				: target.closest("button, a, [role='button'], input[type='submit'], input[type='button']");
+			if (!element) return;
+			// Application-owned labels are opt-in. Never read text, values, hrefs,
+			// arbitrary ids, or form data from the DOM.
+			const explicit = element.getAttribute("data-autter-action");
+			const label = explicit && /^[a-zA-Z0-9_.:-]{1,80}$/.test(explicit)
+				? explicit : element.tagName.toLowerCase();
+			lastAction = { name: `${event.type}:${label}`, at: Date.now(), route: route() };
+		};
+		document.addEventListener("click", rememberAction, true);
+		document.addEventListener("submit", rememberAction, true);
+	}
 	if (options.captureNetworkFailures !== false && typeof fetch === "function") {
 		const originalFetch = window.fetch.bind(window);
 		window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -388,6 +422,20 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 		e.filename = stripQuery(event.filename);
 		if (event.lineno) e.line = event.lineno;
 		if (event.colno) e.column = event.colno;
+		enqueue(e, true);
+	});
+	window.addEventListener("securitypolicyviolation", (event: SecurityPolicyViolationEvent) => {
+		if (event.disposition === "report") return;
+		const directive = event.effectiveDirective || event.violatedDirective || "unknown";
+		const e = baseEvent("csp_violation", `Content Security Policy blocked ${directive}`);
+		e.errorType = "CspViolation";
+		e.severity = "error";
+		let blockedOrigin = event.blockedURI;
+		if (blockedOrigin && !["inline", "eval", "self"].includes(blockedOrigin)) {
+			try { blockedOrigin = new URL(blockedOrigin).origin; } catch { blockedOrigin = "other"; }
+		}
+		e.context = { ...(e.context || {}), cspDirective: directive.slice(0, 100),
+			...(blockedOrigin ? { cspBlockedOrigin: blockedOrigin.slice(0, 200) } : {}) };
 		enqueue(e, true);
 	});
 

@@ -1,9 +1,13 @@
 # @autter/runtime-browser
 
-The tracker also observes failed fetch and XHR requests, HTTP 5xx responses, long tasks, and
+The tracker also observes enforced Content Security Policy violations, failed fetch and XHR requests, HTTP 5xx responses, long tasks, and
 slow resources by default. Call `captureOutcome(name, message)` for a bad
-result returned without an exception. Set `captureNetworkFailures: false` or
-`captureTimings: false` to disable either observer. Production browser fixes
+result returned without an exception. Failures include the most recent button,
+link, or form action from the preceding 30 seconds. Use a stable, non-sensitive
+`data-autter-action="send-email"` attribute for a useful action name; otherwise
+only the element type is recorded. Set `captureActions: false` to disable this
+context. Set `captureNetworkFailures: false` or `captureTimings: false` to
+disable either observer. Production browser fixes
 can use release keyed source maps uploaded by CI; see
 `docs/CONTINUOUS-DETECTION.md` in the repository.
 
@@ -29,7 +33,7 @@ initAutterBrowser({
   release: "e4a218f",                // e.g. a git SHA
 });
 
-// Unhandled errors and promise rejections are captured automatically.
+// Unhandled errors, promise rejections, and enforced CSP blocks are captured automatically.
 
 // Handled errors:
 try {
@@ -66,7 +70,7 @@ initAutterBrowser({
 
 | Function | Notes |
 | --- | --- |
-| `initAutterBrowser(options)` | Installs `error`/`unhandledrejection` listeners, sends a session ping |
+| `initAutterBrowser(options)` | Installs error, rejection, CSP, and recent-action listeners; sends a session ping |
 | `captureException(error, context?)` | Handled errors; fast-flushed |
 | `captureMessage(message, severity?, context?)` | Warnings/info without an exception (`"warning"` default); grouped and aggregated like errors |
 | `trackEvent(name, props?)` | Usage counter; aggregated server-side per minute |
@@ -85,9 +89,10 @@ prevents error loops from flooding.
 
 ## What is never sent
 
-Full URLs with query strings, cookies, localStorage, DOM content, form
+Full URLs with query strings, cookies, localStorage, DOM text, form
 values, request headers/bodies, console history, IP addresses.
 Routes are `location.pathname` only; filenames are query-stripped.
+For CSP blocks, only the directive and blocked resource origin are retained.
 
 Custom `context` is free-form, so it is scrubbed before send: values under
 sensitive-looking keys (`email`, `password`, `token`, `secret`, `auth`,

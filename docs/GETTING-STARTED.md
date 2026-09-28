@@ -1,5 +1,7 @@
 # Getting started
 
+Already collecting logs in an external provider? See [External sources](EXTERNAL-SOURCES.md) for repository connectors. The SDK/OTel setup below applies when you instrument application code.
+
 Autter Runtime tracks **runtime errors and usage** from your frontend and
 backend with two small packages and one ingest endpoint. This guide takes
 you from zero to seeing data in ClickHouse.

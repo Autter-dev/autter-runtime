@@ -20,6 +20,10 @@ flowchart TD
     F --> H["Optional sink webhook → issue grouping"]
 ```
 
+## Existing external logs
+
+Connect Sentry, PostHog, Grafana/Loki, Datadog or webhooks in the Autter platform's repository Runtime settings. Independent platform workers store provider records and run eligible RCA/draft fixes. This path does not require installing these SDKs or changing the OTLP ingester. See [External sources](docs/EXTERNAL-SOURCES.md) for setup and the distinction from SDK telemetry.
+
 ## Install
 
 ```bash

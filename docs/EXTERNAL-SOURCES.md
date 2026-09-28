@@ -46,4 +46,4 @@ Do not forward secrets, cookies, request bodies or personal data unnecessarily. 
 
 Self-hosted platform operators must deploy the API, collector, analysis worker and existing PR executor with their database/GitHub/AI configuration. API and collectors need the same persistent connector encryption key. These workers are not included in the standalone OTLP ingester image.
 
-See the [public external-source guide](https://docs.autter.dev/runtime/external-sources) and [setup skill](https://github.com/Autter-dev/autter-skills/tree/main/autter-runtime-setup).
+See the [public external-source guide](https://github.com/Autter-dev/docs/blob/main/runtime/external-sources.mdx) and [setup skill](https://github.com/Autter-dev/autter-skills/tree/main/autter-runtime-setup).

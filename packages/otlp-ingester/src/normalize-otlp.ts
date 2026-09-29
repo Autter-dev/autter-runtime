@@ -220,6 +220,7 @@ const MAX_SPANS_PER_REQUEST = 5000;
 
 export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	const occurrences: RuntimeOccurrenceInput[] = [];
+	const occurrenceSpanIds: string[] = [];
 	const spans: RuntimeSpanRow[] = [];
 	const llmCalls: RuntimeLlmCall[] = [];
 	const rollups = new Map<string, RuntimeMetricPoint>();
@@ -274,6 +275,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				for (const event of exceptionEvents) {
 					const eventAttrs = attrMap(event.attributes);
 					const handled = eventAttrs.get("autter.handled") === "true";
+					occurrenceSpanIds.push(span.spanId ?? "");
 					occurrences.push({
 						source: "server",
 						severity: severityOf(eventAttrs, attrs),
@@ -306,6 +308,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				for (const event of failedOutcomes) {
 					const outcome = attrMap(event.attributes);
 					const name = (outcome.get("autter.outcome.name") ?? "operation").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 200);
+					occurrenceSpanIds.push(span.spanId ?? "");
 					occurrences.push({
 						source: "server", severity: "error", service: resource.service,
 						environment: resource.environment, release: resource.release,
@@ -317,6 +320,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					});
 				}
 				if (exceptionEvents.length === 0 && failedOutcomes.length === 0 && isError) {
+					occurrenceSpanIds.push(span.spanId ?? "");
 					occurrences.push({
 						source: "server",
 						severity: severityOf(new Map(), attrs),
@@ -403,6 +407,8 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 		}
 	}
 
+	inheritHttpFromParent(occurrences, occurrenceSpanIds, spans);
+
 	return {
 		occurrences,
 		spans,
@@ -410,6 +416,67 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 		llmCalls,
 		spanCount,
 	};
+}
+
+/**
+ * Exception spans are often children named "Error" with no HTTP attributes.
+ * Copy method, route, status, and duration from the server span in the same
+ * trace so the issue can name the API that failed.
+ */
+function inheritHttpFromParent(
+	occurrences: RuntimeOccurrenceInput[],
+	occurrenceSpanIds: string[],
+	spans: RuntimeSpanRow[],
+): void {
+	const byId = new Map<string, RuntimeSpanRow>();
+	for (const span of spans) {
+		if (span.spanId) byId.set(span.spanId, span);
+	}
+	for (let i = 0; i < occurrences.length; i++) {
+		const occurrence = occurrences[i];
+		const spanId = occurrenceSpanIds[i];
+		if (!occurrence || !spanId) continue;
+		const http = httpServerAncestor(byId, spanId);
+		if (!http) continue;
+		if (!occurrence.route && http.route) occurrence.route = http.route;
+		const method = methodFromSpan(http);
+		if (!occurrence.method && method) occurrence.method = method;
+		if (
+			(occurrence.statusCode == null || occurrence.statusCode === 0) &&
+			http.statusCode != null &&
+			http.statusCode > 0
+		) {
+			occurrence.statusCode = http.statusCode;
+		}
+		if (http.durationMs > 0) {
+			const attributes = { ...(occurrence.attributes ?? {}) };
+			if (attributes["http.server.duration_ms"] == null) {
+				attributes["http.server.duration_ms"] = Math.round(http.durationMs);
+				occurrence.attributes = attributes;
+			}
+		}
+	}
+}
+
+function httpServerAncestor(
+	byId: Map<string, RuntimeSpanRow>,
+	spanId: string,
+): RuntimeSpanRow | null {
+	let current = byId.get(spanId) ?? null;
+	const seen = new Set<string>();
+	while (current && current.spanId && !seen.has(current.spanId)) {
+		seen.add(current.spanId);
+		if (current.kind === "server") return current;
+		const parentId = current.parentSpanId;
+		if (!parentId) return null;
+		current = byId.get(parentId) ?? null;
+	}
+	return null;
+}
+
+function methodFromSpan(span: RuntimeSpanRow): string | null {
+	const raw = span.attributes?.["http.request.method"];
+	return typeof raw === "string" && raw.trim() ? raw.trim().toUpperCase().slice(0, 16) : null;
 }
 
 function minuteBucket(date: Date): Date {

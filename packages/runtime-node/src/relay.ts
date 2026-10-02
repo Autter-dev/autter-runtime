@@ -60,6 +60,7 @@ const EVENT_TYPES = new Set([
 	"track_event",
 	"outcome",
 	"request_failure",
+	"csp_violation",
 	"timing",
 ]);
 

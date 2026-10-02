@@ -2,8 +2,13 @@
 
 The tracker also observes enforced Content Security Policy violations, failed fetch and XHR requests, HTTP 5xx responses, long tasks, and
 slow resources by default. Call `captureOutcome(name, message)` for a bad
-result returned without an exception. Failures include the most recent button,
-link, or form action from the preceding 30 seconds. Use a stable, non-sensitive
+result returned without an exception. Failures include a coarse browser and
+operating system, the most recent button, link, or form action from the
+preceding 30 seconds, and a short trail of route changes and those actions.
+Exceptions and CSP blocks also include the script URLs on the page, with query
+strings removed. A cross-origin `Script error` is flagged when the browser
+hides the throwing file; the script list is the set that was loaded, not the
+hidden origin. Use a stable, non-sensitive
 `data-autter-action="send-email"` attribute for a useful action name; otherwise
 only the element type is recorded. Set `captureActions: false` to disable this
 context. Set `captureNetworkFailures: false` or `captureTimings: false` to
@@ -89,10 +94,12 @@ prevents error loops from flooding.
 
 ## What is never sent
 
-Full URLs with query strings, cookies, localStorage, DOM text, form
-values, request headers/bodies, console history, IP addresses.
-Routes are `location.pathname` only; filenames are query-stripped.
-For CSP blocks, only the directive and blocked resource origin are retained.
+Full URLs with query strings, the raw User-Agent header, cookies,
+localStorage, DOM text, form values, request headers/bodies, console history,
+IP addresses, and CSP policy text. Routes are `location.pathname` only.
+Browser and OS are a family plus major version. Filenames and script URLs are
+query-stripped. For CSP blocks, the directive, blocked resource origin, script
+path, and a short policy hash are retained.
 
 Custom `context` is free-form, so it is scrubbed before send: values under
 sensitive-looking keys (`email`, `password`, `token`, `secret`, `auth`,

@@ -204,3 +204,7 @@ new OTLPTraceExporter({
 ## License
 
 MIT
+
+### Investigating your system
+
+Use Dashboard Ask or `autter ask`, `autter logs`, and `autter threads` to investigate captured Runtime signals and resume saved debugging sessions. See [system investigations](docs/ASK.md).

@@ -92,3 +92,14 @@ calls with `experimental_telemetry: { isEnabled: true }` (and anything
 wrapped in `withLlmCall` or an `instrumentLlmClient` client) are recorded at
 100% — every call, with model, tokens, latency, and cost. See the
 [`@autter/runtime-node` README](../runtime-node) for the API.
+## Operation logging (1.4.0+)
+
+Import `withRuntimeOperation`, `runtimeLogger`, `createRuntimeLogger`,
+`flushRuntimeLogs`, and `runtimeLogStats` from `@autter/runtime-next/server`.
+Initialize through the existing `registerAutter` call in `instrumentation.ts`.
+These APIs require the Node runtime, a 1.4.0+ ingester, and matching platform
+evidence support. Client components keep `@autter/runtime-next/client`.
+See the [operation logging guide](../../docs/OPERATION-LOGGING.md) for measured
+steps, explicit business outcomes, privacy and flushing. Ordinary error logs
+are diagnostics; captured exceptions and declared failed outcomes use tracing
+for issue grouping.

@@ -50,7 +50,7 @@ test("sampled handled exception markers survive OTLP normalization", () => {
 			{ key: "autter.sampled", value: { boolValue: true } },
 		] }],
 	}] }] }] });
-	assert.deepEqual(result.occurrences[0]?.attributes, { "autter.handled": true, "autter.sampled": true });
+	assert.deepEqual(result.occurrences[0]?.attributes, { "exception.type": "ValueError", "autter.handled": true, "autter.sampled": true });
 });
 
 test("browser timing is aggregated; failed outcome becomes an issue", () => {

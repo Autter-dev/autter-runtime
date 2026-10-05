@@ -57,6 +57,7 @@ import {
 	type RedactOptions,
 } from "./redact.js";
 import { startMemoryMetrics } from "./memory.js";
+import { configureRuntimeLogger, flushRuntimeLogs, shutdownRuntimeLogger, type RuntimeLoggingOptions } from "./logger.js";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -84,6 +85,8 @@ import { startMemoryMetrics } from "./memory.js";
  */
 
 export interface AutterServerOptions {
+	/** Structured logs and completed operation summaries. */
+	logging?: RuntimeLoggingOptions;
 	/** Private ingest key (autter_rt_…). */
 	apiKey: string;
 	/** Ingester base URL. Default: https://otlp.autter.dev */
@@ -957,6 +960,11 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 		if (!reuseActive) span.end();
 	}
+	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment,
+		release: options.release, options: options.logging, redact: activeRedactor,
+		run: (name, fn, attributes) => runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
+		reportOutcome,
+	});
 
 	if (options.captureGlobalErrors !== false) {
 		// `uncaughtExceptionMonitor` observes crashes WITHOUT changing the
@@ -977,6 +985,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const flushTarget: FlushTarget = {
 		forceFlush: async () => {
 			const results = await Promise.allSettled([
+				flushRuntimeLogs(),
 				Promise.resolve().then(() => alwaysOnProvider.forceFlush()),
 				Promise.resolve().then(() => mainSpanProcessor.forceFlush()),
 				...(errorTraceBuffer
@@ -1010,6 +1019,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
+			const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
 			stopMemoryMetrics?.();
 			active = null;
 			activeAlwaysOnProvider = null;
@@ -1018,6 +1028,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			unregisterFlushTargets();
 			telemetryStats.markAllFlushed();
 			await Promise.allSettled([alwaysOnProvider.shutdown(), sdk.shutdown()]);
+			if (logShutdown[0]?.status === "rejected") throw logShutdown[0].reason;
 		},
 	};
 	active = server;

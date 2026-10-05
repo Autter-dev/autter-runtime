@@ -34,6 +34,17 @@ import {
 } from "@autter/runtime-node";
 
 export {
+	createRuntimeLogger,
+	runtimeLogger,
+	withRuntimeOperation,
+	flushRuntimeLogs,
+	runtimeLogStats,
+	type RuntimeOperation,
+	type RuntimeOutcome,
+	type RuntimeLogContext,
+	type RuntimeLogContextValue,
+	type RuntimeLogLevel,
+	type RuntimeLoggingOptions,
 	captureException as captureServerException,
 	captureMessage as captureServerMessage,
 	reportOutcome as reportServerOutcome,
@@ -46,6 +57,7 @@ export {
 	installAutterAutoFlush,
 	redactAttributes,
 } from "@autter/runtime-node";
+
 export type {
 	LlmCallHandle,
 	LlmCallInfo,

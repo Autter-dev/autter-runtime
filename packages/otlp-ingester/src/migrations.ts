@@ -36,6 +36,7 @@
 import { latencyTableDDL } from "./latency.js";
 import { profileTableDDL } from "./profiles.js";
 import { sourceMapTableDDL } from "./source-maps.js";
+import { logTableDDL } from "./logs.js";
 import { memoryTableDDL, platformEventTableDDL } from "./memory.js";
 
 export interface Migration {
@@ -135,6 +136,7 @@ export const MIGRATIONS: Migration[] = [
 	{ id: "0010-memory-temporality", statements: [
 		`ALTER TABLE {db}.runtime_memory_samples ADD COLUMN IF NOT EXISTS temporality LowCardinality(String) DEFAULT 'gauge'`,
 	] },
+	{ id: "0011-runtime-logs", statements: [logTableDDL("{db}")] },
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

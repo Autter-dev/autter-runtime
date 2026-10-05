@@ -8,6 +8,7 @@ import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
 import { profileTableDDL, type ProfileSample } from "./profiles.js";
 import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
 import { sourceMapTableDDL } from "./source-maps.js";
+import { logTableDDL, type RuntimeLogRecord } from "./logs.js";
 import {
 	MIGRATIONS,
 	migrationsTableDDL,
@@ -75,6 +76,7 @@ export class ClickHouseStore {
 			memoryTableDDL(db),
 			platformEventTableDDL(db),
 			sourceMapTableDDL(db),
+			logTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -292,6 +294,18 @@ export class ClickHouseStore {
 				started_at: s.startedAt.toISOString(),
 			})),
 		});
+	}
+
+	async insertLogs(ctx: IngestContext, logs: RuntimeLogRecord[]): Promise<void> {
+		if (!logs.length) return;
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({ table: this.table("runtime_logs"), format: "JSONEachRow", clickhouse_settings: INSERT_SETTINGS,
+			values: logs.map((row) => ({ org_id: ctx.orgId, repository_id: ctx.repositoryId, event_id: row.id,
+				service: row.service, environment: row.environment, release: row.release, trace_id: row.traceId,
+				span_id: row.spanId, operation_id: row.operationId, operation: row.operation, event_type: row.type,
+				severity: row.severity, message: row.message, outcome: row.outcome, duration_ms: row.durationMs,
+				attributes: JSON.stringify(row.attributes), occurred_at: row.occurredAt.toISOString() })) });
 	}
 
 	async insertProfileSamples(ctx: IngestContext, samples: ProfileSample[]): Promise<void> {

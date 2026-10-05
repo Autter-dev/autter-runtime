@@ -1,3 +1,9 @@
+# Operation logging
+
+For structured messages, completed operation summaries, and explicit outcomes,
+see [Operation logging and diagnostic context](OPERATION-LOGGING.md). These APIs
+require the updated Node/Next.js SDK and ingester described in that guide.
+
 # Getting started
 
 Already collecting logs in an external provider? See [External sources](EXTERNAL-SOURCES.md) for repository connectors. The SDK/OTel setup below applies when you instrument application code.

@@ -1,3 +1,10 @@
+# Operation logging
+
+Use `withRuntimeOperation`, `runtimeLogger`, and `createRuntimeLogger` to attach
+application context to logs and completed operations. See the full
+[operation logging guide](../../docs/OPERATION-LOGGING.md) for initialization,
+steps, outcomes, redaction, export lifecycle, and release requirements.
+
 # @autter/runtime-node
 
 The server tracker exports per-instance RSS, heap, memory limit, and GC

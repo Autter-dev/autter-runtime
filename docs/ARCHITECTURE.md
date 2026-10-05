@@ -43,6 +43,7 @@ Two key scopes separate frontend and backend credentials:
 | --- | --- | --- | --- |
 | `runtime_error_occurrences` | MergeTree | `(org_id, repository_id, fingerprint, occurred_at)` | 14 d |
 | `runtime_spans` | MergeTree | `(org_id, repository_id, trace_id, started_at)` | 7 d |
+| `runtime_logs` | ReplacingMergeTree | `(org_id, repository_id, occurred_at, event_id)` | 14 d |
 | `runtime_metrics_1m` | SummingMergeTree | `(org_id, repository_id, service, environment, release, route, bucket_at)` | 90 d |
 | `runtime_llm_calls` | MergeTree | `(org_id, repository_id, started_at)` | 90 d |
 | `runtime_profile_samples` | MergeTree | `(org_id, repository_id, service, environment, release, observed_at, profile_id)` | 7 d |

@@ -1,3 +1,4 @@
+import { decodeOtlpAttributes, sanitizeRuntimeContext, type OtlpValue } from "./context.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
 import {
@@ -23,12 +24,7 @@ const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 
 interface OtlpKeyValue {
 	key?: string;
-	value?: {
-		stringValue?: string;
-		intValue?: string | number;
-		doubleValue?: number;
-		boolValue?: boolean;
-	};
+	value?: OtlpValue;
 }
 
 interface OtlpEvent {
@@ -261,6 +257,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					statusCode,
 					durationMs,
 					attributes: {
+						...decodeOtlpAttributes(span.attributes),
 						"http.request.method": (attrs.get("http.request.method") ?? attrs.get("http.method") ?? "").slice(0, 20),
 					},
 					startedAt,
@@ -294,10 +291,8 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						statusCode,
 						traceId: span.traceId ?? null,
 						sessionId: null,
-						attributes: handled ? {
-							"autter.handled": true,
-							"autter.sampled": eventAttrs.get("autter.sampled") === "true",
-						} : null,
+						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
+							...(handled ? { "autter.handled": true, "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) }),
 						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 					});
 				}
@@ -314,8 +309,9 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						environment: resource.environment, release: resource.release,
 						errorType: "OutcomeFailure",
 						message: `${name}: ${(outcome.get("autter.outcome.message") ?? "failed").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 1000)}`,
-						stack: null, route, method: methodOf(attrs), statusCode,
-						traceId: span.traceId ?? null, sessionId: null, attributes: null,
+						stack: String(decodeOtlpAttributes(event.attributes)["autter.outcome.stack"] ?? "") || null, route, method: methodOf(attrs), statusCode,
+						traceId: span.traceId ?? null, sessionId: null,
+						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }),
 						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 					});
 				}
@@ -337,7 +333,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						statusCode,
 						traceId: span.traceId ?? null,
 						sessionId: null,
-						attributes: null,
+						attributes: decodeOtlpAttributes(span.attributes),
 						occurredAt: startedAt,
 					});
 				}

@@ -38,3 +38,16 @@ export {
 	type InstrumentLlmOptions,
 } from "./llm-instrument.js";
 export { startCaughtExceptionSampler } from "./caught-exceptions.js";
+export {
+	createRuntimeLogger,
+	runtimeLogger,
+	withRuntimeOperation,
+	flushRuntimeLogs,
+	runtimeLogStats,
+	type RuntimeLogContext,
+	type RuntimeLogContextValue,
+	type RuntimeLogLevel,
+	type RuntimeOutcome,
+	type RuntimeOperation,
+	type RuntimeLoggingOptions,
+} from "./logger.js";

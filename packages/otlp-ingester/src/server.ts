@@ -22,7 +22,8 @@ import {
 	type OtlpMetricsRequest,
 	type OtlpTraceRequest,
 } from "./normalize-otlp.js";
-import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
+import { decodeMetricsRequest, decodeTraceRequest, decodeLogsRequest } from "./otlp-proto.js";
+import { normalizeLogs, type OtlpLogsRequest } from "./logs.js";
 import { decodeProfile } from "./profiles.js";
 import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
 import { validateSourceMap } from "./source-maps.js";
@@ -288,6 +289,19 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		sink?.enqueue(ctx, fingerprinted, metricPoints, llmCalls);
+		otlpSuccess(req, res);
+	});
+
+	app.post("/v1/logs", async (req, res) => {
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		let logs;
+		try { logs = normalizeLogs(req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest); }
+		catch { res.status(400).json({ error: "invalid OTLP logs payload" }); return; }
+		try { await store.insertLogs(ctx, logs); }
+		catch (err) { storageError(res, err); return; }
+		// Logs are diagnostic evidence. Exceptions and failed outcomes use the trace sink,
+		// so one operation does not create duplicate issues through two export paths.
 		otlpSuccess(req, res);
 	});
 

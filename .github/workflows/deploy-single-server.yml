@@ -7,6 +7,12 @@ name: Deploy ingester (single server)
 # in particular the Caddyfile is never overwritten — boxes customize it with
 # extra routes, and a routine ingester roll must not clobber that.
 #
+# Ingester code changes deploy from workflow_run, after "Docker image (GHCR)"
+# has pushed that commit's image, and pin the box to its sha-<short> tag.
+# Triggering on the push itself raced the build: the deploy could pull the
+# previous :latest and finish before the new image existed. A box whose .env
+# pins INGESTER_TAG to anything other than latest keeps its pin.
+#
 # Repo VARIABLES required:
 #   SINGLE_SERVER_HOST          the box's IP or hostname
 #   SINGLE_SERVER_USER          SSH user (e.g. ubuntu)
@@ -17,10 +23,14 @@ name: Deploy ingester (single server)
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Docker image (GHCR)"]
+    types: [completed]
+    branches: [main]
+  # Compose/workflow-only changes need no new image; they roll the current one.
   push:
     branches: [main]
     paths:
-      - "packages/otlp-ingester/**"
       - "deploy/single-server/**"
       - ".github/workflows/deploy-single-server.yml"
 
@@ -34,8 +44,26 @@ concurrency:
 jobs:
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.event_name == 'workflow_dispatch' || vars.SINGLE_SERVER_AUTODEPLOY_ENABLED == 'true'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.SINGLE_SERVER_AUTODEPLOY_ENABLED == 'true' &&
+       (github.event_name == 'push' ||
+        (github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.conclusion == 'success')))
     steps:
+      - name: Resolve commit and image tag
+        id: target
+        env:
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ -n "$RUN_SHA" ]; then
+            echo "sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
+            # Matches docker/metadata-action's type=sha tag in docker.yml.
+            echo "tag=sha-${RUN_SHA::7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -45,7 +73,13 @@ jobs:
           script: |
             set -euo pipefail
             cd "${{ vars.SINGLE_SERVER_PATH }}"
-            curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/deploy/single-server/docker-compose.yml
+            curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.target.outputs.sha }}/deploy/single-server/docker-compose.yml
+            tag="${{ steps.target.outputs.tag }}"
+            pinned="$(sed -n 's/^INGESTER_TAG=//p' .env 2>/dev/null | tail -n1 || true)"
+            if [ -n "$tag" ] && { [ -z "$pinned" ] || [ "$pinned" = latest ]; }; then
+              export INGESTER_TAG="$tag"
+            fi
+            echo "Deploying otlp-ingester:${INGESTER_TAG:-${pinned:-latest}}"
             docker compose pull otlp-ingester
             docker compose up -d otlp-ingester
             docker image prune -f

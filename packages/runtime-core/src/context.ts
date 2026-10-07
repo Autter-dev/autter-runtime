@@ -28,6 +28,20 @@ export const LEVEL_SEVERITY: Record<RuntimeLogLevel, number> = {
 };
 
 /** Higher of two levels (by severity). */
+/**
+ * Drop query strings and fragments from every http(s) URL in `value`.
+ * Procedural on purpose: the equivalent single regex
+ * (`(https?:\/\/[^\s?#]+)[?#][^\s]*`) rescans the rest of the token from
+ * every "http://" inside it, which is quadratic on adversarial strings.
+ */
+export function stripUrlQueries(value: string): string {
+	return value.replace(/https?:\/\/[^\s]*/gi, (url) => {
+		const rest = url.slice(url.indexOf("://") + 3);
+		const cut = rest.search(/[?#]/);
+		return cut <= 0 ? url : url.slice(0, url.length - rest.length + cut);
+	});
+}
+
 export function maxLevel(
 	a: RuntimeLogLevel,
 	b: RuntimeLogLevel,
@@ -74,7 +88,7 @@ export function boundContext(
 			return "[truncated]";
 		}
 		if (typeof input === "string") {
-			const text = input.replace(/(https?:\/\/[^\s?#]+)[?#][^\s]*/gi, "$1");
+			const text = stripUrlQueries(input);
 			const kept = text.slice(0, Math.max(0, characters));
 			truncated ||= kept.length < text.length;
 			characters -= kept.length;

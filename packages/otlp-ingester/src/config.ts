@@ -33,6 +33,8 @@ export interface IngesterConfig {
 	rateLimitPerMinute: number;
 	/** Per-key requests per minute for publishable client keys. */
 	clientRateLimitPerMinute: number;
+	/** ClickHouse dedupe lookups per tenant per minute for /v1/logs promotion. */
+	promotionLookupsPerMinute?: number;
 	/** Retention, overridable per deployment. */
 	occurrenceTtlDays: number;
 	spanTtlDays: number;
@@ -91,6 +93,7 @@ export function loadConfig(): IngesterConfig {
 		maxBodyBytes: intEnv("MAX_BODY_BYTES", 1024 * 1024),
 		rateLimitPerMinute: intEnv("RATE_LIMIT_PER_MINUTE", 300),
 		clientRateLimitPerMinute: intEnv("CLIENT_RATE_LIMIT_PER_MINUTE", 120),
+		promotionLookupsPerMinute: intEnv("PROMOTION_LOOKUPS_PER_MINUTE", 30),
 		occurrenceTtlDays: intEnv("OCCURRENCE_TTL_DAYS", 14),
 		spanTtlDays: intEnv("SPAN_TTL_DAYS", 7),
 		metricsTtlDays: intEnv("METRICS_TTL_DAYS", 90),

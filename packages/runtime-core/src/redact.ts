@@ -9,13 +9,6 @@ import type { Attributes } from "./attributes.js";
  * masked wholesale, before anything is exported.
  */
 
-type AttrValue =
-	| string
-	| number
-	| boolean
-	| Array<string | number | boolean>
-	| object;
-
 export interface RedactOptions {
 	/**
 	 * Extra patterns matched against lower-cased attribute KEYS; a match
@@ -59,18 +52,25 @@ const SENSITIVE_KEY_PATTERNS: RegExp[] = [
 
 // Scrubbed INSIDE string values (matched substrings are replaced, the rest
 // of the value survives — useful context like a stack frame stays readable).
+//
+// Every pattern must stay linear on adversarial input: these run on
+// free-form log, error and context strings. A greedy run that can restart at
+// every offset of a long token (`[A-Z0-9._%+-]+@…` over "aaaa…", `xox…`
+// over "xoxb-xoxb-…") is O(n²), so patterns whose first class can repeat the
+// match start are anchored with a lookbehind that only lets a match begin at
+// the start of a run.
 const PRIVATE_KEY_BLOCK_RE =
 	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
-const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+const EMAIL_VALUE_RE = /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9]{20,}\b/g;
 const GITHUB_TOKEN_RE = /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g;
 const AWS_KEY_RE = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
-const SLACK_TOKEN_RE = /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g;
+const SLACK_TOKEN_RE = /(?<![A-Za-z0-9-])xox[baprs]-[A-Za-z0-9-]{10,}\b/g;
 const BEARER_RE = /\bbearer\s+[A-Za-z0-9._~+/=-]{10,}/gi;
 // postgres://user:password@host — credentials gone, host kept.
 const URL_CREDENTIALS_RE =
-	/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi;
+	/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi;
 
 interface CompiledRedactor {
 	keyPatterns: RegExp[];
@@ -119,12 +119,17 @@ function compile(options?: RedactOptions): CompiledRedactor {
 	};
 }
 
+/** Longest string scrubbed in full. Exporters drop records far smaller than
+ * this, so the cap only bounds redaction work on pathological input. */
+const MAX_SCRUB_CHARS = 256 * 1024;
+
 function redactString(value: string, r: CompiledRedactor): string {
-	let out = value.replace(r.privateKeyBlock, r.mask);
+	const input = value.length > MAX_SCRUB_CHARS ? value.slice(0, MAX_SCRUB_CHARS) : value;
+	let out = input.replace(r.privateKeyBlock, r.mask);
 	for (const re of r.valuePatterns) {
 		out = out.replace(re, r.mask);
 	}
-	out = out.replace(r.urlCredentials, "$1" + r.mask + "@");
+	out = out.replace(r.urlCredentials, `$1${r.mask}@`);
 	if (r.scrubEmailValues) {
 		out = out.replace(EMAIL_VALUE_RE, r.mask);
 	}
@@ -402,7 +407,7 @@ export function makeRedactor(
 	options?: boolean | RedactOptions,
 ): (attributes?: Attributes | null) => Attributes {
 	if (options === false) {
-		return (attributes) => ({ ...(attributes ?? {}) });
+		return (attributes) => ({ ...attributes });
 	}
 	const r = compile(options === true ? undefined : options);
 	return (attributes) => redactWith(attributes, r);

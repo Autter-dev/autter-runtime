@@ -123,8 +123,11 @@ function stripQuery(value: string | undefined): string | undefined {
 // anything leaves the page. Deliberately tiny: this bundle is size-capped.
 const SENSITIVE_KEY_RE =
 	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
-const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// Bounded quantifiers keep this linear (lookbehind would break older
+// Safari); scrub() also caps the input it scans.
+const EMAIL_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
 const MASK = "[redacted]";
+const scrub = (value: string) => value.slice(0, 8192).replace(EMAIL_RE, MASK);
 
 export function redactContext(
 	context: Record<string, unknown>,
@@ -135,7 +138,7 @@ export function redactContext(
 		out[key] = SENSITIVE_KEY_RE.test(key)
 			? MASK
 			: typeof value === "string"
-				? value.replace(EMAIL_RE, MASK)
+				? scrub(value)
 				: value;
 	}
 	return out;
@@ -155,7 +158,16 @@ const REQUEST_ID_RE = /^[\w.-]{8,128}$/;
 function errorContext(error: unknown): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	if (!error || typeof error !== "object") return out;
-	const e = error as Record<string, unknown>;
+	// Metadata is optional: a throwing getter or Proxy must never stop the
+	// original error from being reported, so read every field defensively.
+	const e: Record<string, unknown> = {};
+	for (const key of ["code", "why", "fix", "link", "expected", "requestId"]) {
+		try {
+			e[key] = (error as Record<string, unknown>)[key];
+		} catch {
+			/* ignore unreadable metadata */
+		}
+	}
 	if (typeof e.code === "string" && e.code.length <= 80 && CODE_RE.test(e.code)) {
 		out["autter.error.code"] = e.code;
 	}
@@ -172,7 +184,7 @@ function errorContext(error: unknown): Record<string, unknown> {
 }
 
 function addContext(event: BrowserEvent, extra: Record<string, unknown>): void {
-	if (Object.keys(extra).length > 0) event.context = { ...(event.context || {}), ...extra };
+	if (Object.keys(extra).length > 0) event.context = { ...event.context, ...extra };
 }
 
 /** `x-request-id` of a failed response → `autter.request.id`, linking the
@@ -341,7 +353,7 @@ function attachClient(event: BrowserEvent): void {
 		extra.cspPolicyHash = seenCspPolicyHash;
 	}
 	if (Object.keys(extra).length > 0) {
-		event.context = { ...(event.context || {}), ...extra };
+		event.context = { ...event.context, ...extra };
 	}
 }
 
@@ -508,8 +520,8 @@ export function captureMessage(
 
 /** Report an application outcome that failed without throwing. Use a stable name. */
 export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
-	const event = baseEvent("outcome", String(message).replace(EMAIL_RE, MASK));
-	event.name = String(name).replace(EMAIL_RE, MASK).slice(0, 200);
+	const event = baseEvent("outcome", scrub(String(message)));
+	event.name = scrub(String(name)).slice(0, 200);
 	event.errorType = "OutcomeFailure";
 	event.severity = "error";
 	if (context) event.context = { ...(event.context || {}), ...context };

@@ -80,7 +80,8 @@ const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 // @autter/runtime-node and redactContext() in @autter/runtime-browser.
 const SENSITIVE_KEY_RE =
 	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
-const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// Lookbehind keeps this linear on long runs (see runtime-core redact.ts).
+const EMAIL_VALUE_RE = /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const REDACTED = "[redacted]";
 
 function scrubContext(context: Record<string, unknown>): Record<string, unknown> {

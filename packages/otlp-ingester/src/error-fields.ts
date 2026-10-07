@@ -36,7 +36,7 @@ type AttributeSource =
 	| null
 	| undefined;
 
-const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const EMAIL_RE = /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 
 function lookup(sources: AttributeSource[], key: string): unknown {
 	for (const source of sources) {

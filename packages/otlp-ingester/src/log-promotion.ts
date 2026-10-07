@@ -22,11 +22,22 @@ import type {
  * - cross-batch: a trace id that already produced an occurrence for this
  *   tenant within ±PROMOTION_DEDUPE_WINDOW_MS (ClickHouse lookup) is skipped.
  * Records without a trace id are always promoted. The lookup is
- * best-effort: when it fails the record is promoted anyway — a rare
- * duplicate beats a silently dropped error.
+ * best-effort and bounded (see promotionLookups, plus a per-tenant lookup
+ * budget in server.ts): when it fails, is skipped or is over budget the
+ * record is promoted anyway — a rare duplicate beats a silently dropped
+ * error.
  */
 
 export const PROMOTION_DEDUPE_WINDOW_MS = 60_000;
+/** Widest single lookup window. Candidate timestamps come from the client,
+ * so one batch could otherwise ask ClickHouse to scan an arbitrary range. */
+export const MAX_LOOKUP_SPAN_MS = 10 * 60_000;
+/** At most this many lookup windows (queries) per request. */
+export const MAX_LOOKUP_WINDOWS = 4;
+/** Candidates outside [now − 24 h, now + 5 min] are never looked up: their
+ * trace cannot plausibly have a recent occurrence to dedupe against. */
+export const LOOKUP_PAST_MS = 24 * 60 * 60_000;
+export const LOOKUP_FUTURE_MS = 5 * 60_000;
 
 /** Promotion candidates in record order, deduped by trace id in-batch. */
 export function logPromotionCandidates(
@@ -46,15 +57,49 @@ export function logPromotionCandidates(
 	return out;
 }
 
-/** Lookup window around the candidates: [earliest − 60 s, latest + 60 s]. */
-export function promotionLookupWindow(
+export interface PromotionLookup {
+	from: Date;
+	to: Date;
+	traceIds: string[];
+}
+
+/**
+ * Bounded dedupe lookups for the candidates that carry a trace id: each
+ * window is [oldest − 60 s, newest + 60 s] over candidates taken newest first
+ * and spans at most MAX_LOOKUP_SPAN_MS; at most MAX_LOOKUP_WINDOWS windows are
+ * planned.
+ * Candidates outside the plausible time range or beyond the window cap are
+ * not looked up — they are still deduped in-batch and promoted.
+ */
+export function promotionLookups(
 	occurrences: RuntimeOccurrenceInput[],
-): { from: Date; to: Date } {
-	const times = occurrences.map((o) => o.occurredAt.getTime());
-	return {
-		from: new Date(Math.min(...times) - PROMOTION_DEDUPE_WINDOW_MS),
-		to: new Date(Math.max(...times) + PROMOTION_DEDUPE_WINDOW_MS),
-	};
+	now = Date.now(),
+): PromotionLookup[] {
+	const eligible = occurrences
+		.filter((o): o is RuntimeOccurrenceInput & { traceId: string } => !!o.traceId)
+		.map((o) => ({ traceId: o.traceId, at: o.occurredAt.getTime() }))
+		.filter((o) => o.at >= now - LOOKUP_PAST_MS && o.at <= now + LOOKUP_FUTURE_MS)
+		// Newest first: recent records are the likeliest duplicates of an
+		// occurrence the trace path just wrote, so they get the windows.
+		.sort((a, b) => b.at - a.at);
+	const lookups: PromotionLookup[] = [];
+	let start = 0;
+	while (start < eligible.length && lookups.length < MAX_LOOKUP_WINDOWS) {
+		const newest = eligible[start]!.at;
+		let end = start;
+		while (
+			end + 1 < eligible.length &&
+			newest - eligible[end + 1]!.at + 2 * PROMOTION_DEDUPE_WINDOW_MS <= MAX_LOOKUP_SPAN_MS
+		)
+			end++;
+		lookups.push({
+			from: new Date(eligible[end]!.at - PROMOTION_DEDUPE_WINDOW_MS),
+			to: new Date(newest + PROMOTION_DEDUPE_WINDOW_MS),
+			traceIds: [...new Set(eligible.slice(start, end + 1).map((o) => o.traceId))],
+		});
+		start = end + 1;
+	}
+	return lookups;
 }
 
 /**

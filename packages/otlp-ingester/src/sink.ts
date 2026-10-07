@@ -437,7 +437,7 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		...(traceId ? { traceId } : {}),
 		...(route ? { route } : {}),
 		...(method ? { method } : {}),
-		...(statusCode ? { statusCode } : {}),
+		...(statusCode != null ? { statusCode } : {}),
 		...(errorCode ? { errorCode } : {}),
 		...(why ? { why } : {}),
 		...(fix ? { fix } : {}),

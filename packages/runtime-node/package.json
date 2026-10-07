@@ -30,7 +30,7 @@
 	},
 	"scripts": {
 		"build": "tsup",
-		"test": "npm run build && npm run build -w @autter/otlp-ingester && node --test test/*.test.mjs"
+		"test": "npm run build -w @autter/runtime-core && npm run build && npm run build -w @autter/otlp-ingester && node --test test/*.test.mjs"
 	},
 	"dependencies": {
 		"@opentelemetry/api": "^1.9.0",

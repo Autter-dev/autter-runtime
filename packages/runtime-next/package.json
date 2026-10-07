@@ -39,7 +39,7 @@
 	},
 	"scripts": {
 		"build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
-		"test": "npm run build && node --test test/*.test.mjs"
+		"test": "npm run build -w @autter/runtime-core && npm run build -w @autter/runtime-node && npm run build -w @autter/runtime-edge && npm run build -w @autter/runtime-browser && npm run build && node --test test/*.test.mjs"
 	},
 	"dependencies": {
 		"@autter/runtime-browser": "^1.4.0",

@@ -231,3 +231,32 @@ test("context bounding redacts, strips reserved keys and orders logs last", () =
 		attributes: [{ key: "a", value: { doubleValue: 1 } }],
 	});
 });
+
+test("value redaction is linear on adversarial strings (no ReDoS)", async () => {
+	const { makeRedactor, boundContext } = await import("../dist/index.js");
+	const redact = makeRedactor(true);
+	const inputs = [
+		"a".repeat(262_144),
+		"a.".repeat(131_072),
+		"xoxb-".repeat(52_000),
+		"eyJ".repeat(87_000),
+		"xa+".repeat(87_000),
+		"http://".repeat(37_000),
+	];
+	for (const value of inputs) {
+		const started = performance.now();
+		redact({ value });
+		boundContext({ value }, redact);
+		assert.ok(performance.now() - started < 1000, `redaction too slow for ${value.slice(0, 8)}…`);
+	}
+	// Behaviour is unchanged for real secrets.
+	const out = redact({
+		mail: "contact jane.doe+x@example.co.uk now",
+		db: "postgres://user:pw@host/db",
+		slack: "token xoxb-1234567890-abcdef",
+	});
+	assert.equal(out.mail, "contact [redacted] now");
+	assert.equal(out.db, "postgres://[redacted]@host/db");
+	assert.equal(out.slack, "token [redacted]");
+	assert.equal(boundContext({ url: "see https://a.com/x?token=1#f and http://b.com?y" }, redact).url, "see https://a.com/x and http://b.com");
+});

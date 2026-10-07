@@ -65,6 +65,7 @@ The validator webhook may return the same extra fields:
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |
 | `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
+| `PROMOTION_LOOKUPS_PER_MINUTE` | `30` | Per-tenant ClickHouse dedupe lookups for `/v1/logs` error promotion; over budget, records are promoted with in-batch dedupe only |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 | `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
 | `LOG_TTL_DAYS` | `14` | Retention for `runtime_logs` (request summaries are always kept, never sampled, so this is the main volume knob). Unlike the other TTLs it is also applied to **existing** tables: at boot the ingester compares it with the table's TTL and runs `ALTER TABLE … MODIFY TTL` only when they differ; a failure is logged and retried next boot |

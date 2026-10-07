@@ -15,7 +15,15 @@ import {
 	occurrenceFingerprint,
 	validErrorCode,
 } from "./fingerprint.js";
-import { logPromotionCandidates } from "./log-promotion.js";
+import {
+	LOOKUP_PAST_MS,
+	MAX_LOOKUP_SPAN_MS,
+	MAX_LOOKUP_WINDOWS,
+	logPromotionCandidates,
+	promotionLookups,
+} from "./log-promotion.js";
+import { sanitizeRuntimeContext } from "./context.js";
+import { sinkOccurrence } from "./sink.js";
 import { logTableDDL, normalizeLogs, requestRollupViewDDL } from "./logs.js";
 import { MIGRATIONS } from "./migrations.js";
 import { normalizeBrowserPayload } from "./normalize-browser.js";
@@ -624,4 +632,45 @@ test("/v1/logs promotes logger-only errors with in-batch and ClickHouse dedupe",
 		await close(ch.server);
 		await close(sink);
 	}
+});
+
+test("promotion lookups are bounded in span, count and time range", () => {
+	const now = Date.parse("2026-10-08T12:00:00Z");
+	const occ = (traceId: string, at: number) =>
+		({ traceId, occurredAt: new Date(at) }) as Parameters<typeof promotionLookups>[0][number];
+	const lookups = promotionLookups(
+		[
+			occ("a".repeat(32), now - 1_000),
+			occ("b".repeat(32), now - 2_000),
+			// Far apart: each needs its own window.
+			...Array.from({ length: 10 }, (_, i) => occ(String(i).repeat(32), now - (i + 1) * 3_600_000)),
+			// Implausible client timestamps are never looked up.
+			occ("c".repeat(32), now - LOOKUP_PAST_MS - 1),
+			occ("d".repeat(32), now + 3_600_000),
+			{ traceId: null, occurredAt: new Date(now) } as Parameters<typeof promotionLookups>[0][number],
+		],
+		now,
+	);
+	assert.ok(lookups.length <= MAX_LOOKUP_WINDOWS);
+	for (const lookup of lookups) assert.ok(lookup.to.getTime() - lookup.from.getTime() <= MAX_LOOKUP_SPAN_MS);
+	const looked = lookups.flatMap((l) => l.traceIds);
+	assert.ok(!looked.includes("c".repeat(32)) && !looked.includes("d".repeat(32)));
+	const recent = lookups.find((l) => l.traceIds.includes("a".repeat(32)));
+	assert.ok(recent?.traceIds.includes("b".repeat(32)), "nearby candidates share one window");
+});
+
+test("sinkOccurrence keeps a numeric statusCode of 0", () => {
+	const base = { occurredAt: new Date(), traceId: null, route: null, method: null, statusCode: 0 };
+	assert.equal(sinkOccurrence(base as never).statusCode, 0);
+	assert.equal("statusCode" in sinkOccurrence({ ...base, statusCode: null } as never), false);
+});
+
+test("context sanitising is linear on adversarial strings (no ReDoS)", () => {
+	for (const value of ["a".repeat(1_000_000), "a.".repeat(500_000), "xoxb-".repeat(200_000), "http://".repeat(140_000)]) {
+		const started = performance.now();
+		sanitizeRuntimeContext({ value, stack: value });
+		assert.ok(performance.now() - started < 1000, `too slow for ${value.slice(0, 8)}…`);
+	}
+	const out = sanitizeRuntimeContext({ note: "mail jane@example.com see https://x.io/p?token=1" });
+	assert.equal(out.note, "mail [redacted] see https://x.io/p");
 });

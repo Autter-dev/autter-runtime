@@ -14,7 +14,7 @@ import {
 } from "./fingerprint.js";
 import {
 	logPromotionCandidates,
-	promotionLookupWindow,
+	promotionLookups,
 	promotionRollups,
 } from "./log-promotion.js";
 import {
@@ -55,6 +55,9 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	const keys = new KeyResolver(config);
 	const serverRateLimiter = new RateLimiter(config.rateLimitPerMinute);
 	const clientRateLimiter = new RateLimiter(config.clientRateLimitPerMinute);
+	// ClickHouse dedupe lookups made by /v1/logs promotion, per tenant. Far
+	// tighter than the request limit: each lookup is a query, not an insert.
+	const promotionLookupLimiter = new RateLimiter(config.promotionLookupsPerMinute ?? 30);
 
 	const app = express();
 	app.disable("x-powered-by");
@@ -203,25 +206,25 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		const candidates = logPromotionCandidates(logs);
 		if (candidates.length === 0) return [];
 		const fingerprinted = fingerprintAll(ctx, candidates);
-		const traceIds = [
-			...new Set(fingerprinted.map((o) => o.traceId).filter((t): t is string => !!t)),
-		];
-		if (traceIds.length === 0) return fingerprinted;
-		let seen = new Set<string>();
-		try {
-			const { from, to } = promotionLookupWindow(candidates);
-			seen = await store.recentOccurrenceTraceIds(
-				ctx,
-				traceIds,
-				from,
-				to,
-				fingerprinted.map((o) => o.occurrenceId),
-			);
-		} catch (err) {
-			console.warn(
-				"log promotion dedupe lookup failed — promoting without it:",
-				err instanceof Error ? err.message : err,
-			);
+		const seen = new Set<string>();
+		const ownIds = fingerprinted.map((o) => o.occurrenceId);
+		for (const lookup of promotionLookups(candidates)) {
+			if (!promotionLookupLimiter.allow(`${ctx.orgId}:${ctx.repositoryId}`)) break;
+			try {
+				const found = await store.recentOccurrenceTraceIds(
+					ctx,
+					lookup.traceIds,
+					lookup.from,
+					lookup.to,
+					ownIds,
+				);
+				for (const traceId of found) seen.add(traceId);
+			} catch (err) {
+				console.warn(
+					"log promotion dedupe lookup failed — promoting without it:",
+					err instanceof Error ? err.message : err,
+				);
+			}
 		}
 		return fingerprinted.filter((o) => !o.traceId || !seen.has(o.traceId));
 	}

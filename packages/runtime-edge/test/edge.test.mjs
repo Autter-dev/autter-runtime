@@ -141,3 +141,42 @@ test("the queue is bounded per isolate", async () => {
 		console.warn = warn;
 	}
 });
+
+test("queued records keep their own destination and are not queued without a key", async () => {
+	const posts = [];
+	const fakeFetch = async (url, init) => {
+		// Hold delivery so both requests' records are queued before any flush.
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		posts.push({ auth: init.headers.authorization, body: JSON.parse(init.body) });
+		return new Response("{}", { status: 200 });
+	};
+	const worker = withAutter(
+		(env) => ({ apiKey: env.KEY, service: env.SERVICE, environment: "test", fetch: fakeFetch }),
+		async () => new Response("ok"),
+	);
+	const run = async (env) => {
+		const pending = [];
+		await worker.fetch(new Request("https://edge.test/a"), env, { waitUntil: (p) => pending.push(p) });
+		return pending;
+	};
+	const pending = [
+		...(await run({ SERVICE: "no-key" })),
+		...(await run({ KEY: "key-a", SERVICE: "svc-a" })),
+		...(await run({ KEY: "key-b", SERVICE: "svc-b" })),
+	];
+	await Promise.all(pending);
+	await worker.flush();
+	const service = (post) =>
+		post.body.resourceLogs[0].resource.attributes.find((a) => a.key === "service.name").value.stringValue;
+	const recordCount = (post) => post.body.resourceLogs[0].scopeLogs[0].logRecords.length;
+	// One summary per request: the key-less request's record must not ride
+	// along in another request's batch.
+	assert.deepEqual(posts.map(recordCount), [1, 1]);
+	assert.deepEqual(
+		posts.map((p) => [p.auth, service(p)]).sort(),
+		[
+			["Bearer key-a", "svc-a"],
+			["Bearer key-b", "svc-b"],
+		],
+	);
+});

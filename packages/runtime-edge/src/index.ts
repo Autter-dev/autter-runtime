@@ -134,11 +134,49 @@ export type AutterEdgeHandler<Env, Ctx> = ((
 	flush(): Promise<void>;
 };
 
+/** Where a record is delivered. Captured when the record is queued so a
+ * later flush never sends it with another request's key or resource. */
+interface Destination {
+	endpoint: string;
+	apiKey: string;
+	service: string;
+	environment: string;
+	release?: string;
+	fetch: typeof fetch;
+}
+
+interface QueuedRecord {
+	record: OtlpLogRecord;
+	bytes: number;
+	destination: Destination;
+}
+
 interface Exporter {
-	queue: OtlpLogRecord[];
+	queue: QueuedRecord[];
 	bytes: number;
 	dropped: number;
 	flushing: Promise<void> | null;
+}
+
+function destinationOf(opts: AutterEdgeOptions & { apiKey: string }): Destination {
+	return {
+		endpoint: (opts.endpoint ?? "https://otlp.autter.dev").replace(/\/$/, ""),
+		apiKey: opts.apiKey,
+		service: opts.service,
+		environment: opts.environment ?? "production",
+		...(opts.release ? { release: opts.release } : {}),
+		fetch: opts.fetch ?? globalThis.fetch.bind(globalThis),
+	};
+}
+
+function sameDestination(a: Destination, b: Destination): boolean {
+	return (
+		a.endpoint === b.endpoint &&
+		a.apiKey === b.apiKey &&
+		a.service === b.service &&
+		a.environment === b.environment &&
+		a.release === b.release
+	);
 }
 
 const encoder = new TextEncoder();
@@ -193,24 +231,33 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 ): AutterEdgeHandler<Env, Ctx> {
 	// Per isolate: buffered records survive between requests until flushed.
 	const exporter: Exporter = { queue: [], bytes: 0, dropped: 0, flushing: null };
-	let lastOptions: AutterEdgeOptions | null = null;
 	let warnedNoKey = false;
 
-	const deliver = async (opts: AutterEdgeOptions): Promise<void> => {
+	// Sends every queued record to the destination captured when it was
+	// queued, in batches of up to 50 records that share one destination.
+	const deliver = async (): Promise<void> => {
 		if (exporter.flushing) await exporter.flushing.catch(() => {});
-		if (!opts.apiKey || !exporter.queue.length) return;
-		const endpoint = (opts.endpoint ?? "https://otlp.autter.dev").replace(/\/$/, "");
-		const doFetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
+		if (!exporter.queue.length) return;
 		exporter.flushing = (async () => {
 			while (exporter.queue.length) {
-				const batch = exporter.queue.splice(0, 50);
-				for (const record of batch) exporter.bytes -= encoder.encode(JSON.stringify(record)).length;
+				const destination = exporter.queue[0]!.destination;
+				let take = 0;
+				while (
+					take < exporter.queue.length &&
+					take < 50 &&
+					sameDestination(exporter.queue[take]!.destination, destination)
+				)
+					take++;
+				const entries = exporter.queue.splice(0, take);
+				for (const entry of entries) exporter.bytes -= entry.bytes;
+				const batch = entries.map((entry) => entry.record);
+				const { endpoint, apiKey, fetch: doFetch } = destination;
 				const body = JSON.stringify(
 					buildOtlpLogsRequest(
 						{
-							service: opts.service,
-							environment: opts.environment ?? "production",
-							...(opts.release ? { release: opts.release } : {}),
+							service: destination.service,
+							environment: destination.environment,
+							...(destination.release ? { release: destination.release } : {}),
 						},
 						batch,
 					),
@@ -222,7 +269,7 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 							method: "POST",
 							headers: {
 								"content-type": "application/json",
-								authorization: `Bearer ${opts.apiKey}`,
+								authorization: `Bearer ${apiKey}`,
 							},
 							body,
 						});
@@ -248,7 +295,6 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 
 	const wrapped = async (request: Request, env?: Env, ctx?: Ctx): Promise<Response> => {
 		const opts = resolveOptions(options, env as Env);
-		lastOptions = opts;
 		const header = (opts.requestIdHeader ?? DEFAULT_REQUEST_ID_HEADER).toLowerCase();
 		const redact = makeRedactor(opts.redactAttributes ?? true);
 		let pathname = "/";
@@ -283,7 +329,13 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 			}
 		}
 		const records = runtime.finish(status, request.signal?.aborted === true);
+		// Without a key nothing is queued: a later request with a key must not
+		// send these records under its own key, service or environment.
+		const destination = opts.apiKey ? destinationOf({ ...opts, apiKey: opts.apiKey }) : null;
 		for (const record of records) {
+			if (opts.console)
+				console.log(JSON.stringify({ ...record.attributes, level: record.level, message: record.message }));
+			if (!destination) continue;
 			const encoded = toOtlpLogRecord(record);
 			const bytes = encoder.encode(JSON.stringify(encoded)).length;
 			if (
@@ -294,12 +346,10 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 				exporter.dropped++;
 				continue;
 			}
-			exporter.queue.push(encoded);
+			exporter.queue.push({ record: encoded, bytes, destination });
 			exporter.bytes += bytes;
-			if (opts.console)
-				console.log(JSON.stringify({ ...record.attributes, level: record.level, message: record.message }));
 		}
-		const flush = deliver(opts).catch(() => {});
+		const flush = deliver().catch(() => {});
 		const waitUntil =
 			(ctx as Partial<EdgeExecutionContext> | undefined)?.waitUntil ??
 			(env as Partial<EdgeExecutionContext> | undefined)?.waitUntil;
@@ -318,7 +368,7 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 	};
 	return Object.assign(wrapped, {
 		fetch: wrapped,
-		flush: () => (lastOptions ? deliver(lastOptions) : Promise.resolve()),
+		flush: () => deliver(),
 	});
 }
 

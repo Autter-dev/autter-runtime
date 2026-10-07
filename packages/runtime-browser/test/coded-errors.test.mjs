@@ -118,3 +118,25 @@ test("failed fetch and XHR responses carry x-request-id as autter.request.id", a
 		["request_failure", "/api/pay", "req_xhr0000001"],
 	]);
 });
+
+test("throwing metadata getters never stop the original error being reported", async () => {
+	const hostile = new Error("boom");
+	Object.defineProperty(hostile, "code", { get() { throw new Error("getter exploded"); } });
+	const proxied = new Proxy(new Error("proxied"), {
+		get(target, key) {
+			if (key === "why") throw new Error("trap");
+			return Reflect.get(target, key);
+		},
+	});
+	captureException(hostile);
+	captureException(proxied);
+	const events = await drain();
+	assert.deepEqual(events.map((e) => e.message), ["boom", "proxied"]);
+});
+
+test("email scrubbing stays fast on long adversarial context values", async () => {
+	const started = performance.now();
+	captureException(new Error("long"), { note: "a".repeat(1_000_000), dots: "a.".repeat(500_000) });
+	assert.ok(performance.now() - started < 1000, "scrub must be bounded");
+	await drain();
+});

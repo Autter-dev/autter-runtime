@@ -25,7 +25,7 @@
 	},
 	"scripts": {
 		"build": "tsup",
-		"test": "npm run build && node --test test/*.test.mjs"
+		"test": "npm run build -w @autter/runtime-core && npm run build && node --test test/*.test.mjs"
 	},
 	"devDependencies": {
 		"@autter/runtime-core": "0.0.0",

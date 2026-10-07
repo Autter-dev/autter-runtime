@@ -6,17 +6,22 @@ export function sanitizeRuntimeContext(
 	const seen = new WeakSet<object>();
 	const scrub = (value: string) =>
 		value
-			.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted]")
+			.replace(/(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted]")
 			.replace(
-				/\b(?:bearer\s+[A-Za-z0-9._~+\/=~-]{10,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|autter_(?:rt|pat)_[A-Za-z0-9_-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/gi,
+				/\b(?:bearer\s+[A-Za-z0-9._~+\/=~-]{10,}|(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|(?<![A-Za-z0-9-])xox[baprs]-[A-Za-z0-9-]{10,}|(?<![A-Za-z0-9_-])autter_(?:rt|pat)_[A-Za-z0-9_-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/gi,
 				"[redacted]",
 			)
 			.replace(
 				/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
 				"[redacted]",
 			)
-			.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[redacted]@")
-			.replace(/(https?:\/\/[^\s?#]+)[?#][^\s]*/gi, "$1");
+			.replace(/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[redacted]@")
+			// Query strings: procedural, see stripUrlQueries.
+			.replace(/https?:\/\/[^\s]*/gi, (url) => {
+				const rest = url.slice(url.indexOf("://") + 3);
+				const cut = rest.search(/[?#]/);
+				return cut <= 0 ? url : url.slice(0, url.length - rest.length + cut);
+			});
 	const visit = (value: unknown, key: string, depth: number): unknown => {
 		if (--budget < 0 || depth > 6) return "[truncated]";
 		if (/__proto__|constructor|prototype/i.test(key)) return undefined;
@@ -46,7 +51,10 @@ export function sanitizeRuntimeContext(
 			const text = /(?:url|path|route|target)$/i.test(key)
 				? value.split(/[?#]/)[0]!
 				: value;
-			return scrub(text).slice(0, /stack/i.test(key) ? 32000 : 2048);
+			// Cut before scrubbing so scrub work is bounded by the stored size;
+			// the slack keeps a secret straddling the cut whole for the scrubber.
+			const limit = /stack/i.test(key) ? 32000 : 2048;
+			return scrub(text.slice(0, limit + 512)).slice(0, limit);
 		}
 		if (typeof value === "number")
 			return Number.isFinite(value) ? value : undefined;

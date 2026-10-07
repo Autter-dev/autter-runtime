@@ -69,6 +69,7 @@ test("log ingestion authenticates, preserves tenant mapping and refuses malforme
 		spanTtlDays: 7,
 		metricsTtlDays: 90,
 		llmCallTtlDays: 90,
+		logTtlDays: 14,
 	};
 	const app = createIngesterApp(config).app.listen();
 	const url = await new Promise<string>((resolve) =>

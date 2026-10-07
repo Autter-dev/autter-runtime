@@ -44,6 +44,22 @@ export interface RuntimeOccurrenceInput {
 	sessionId: string | null;
 	attributes: Record<string, unknown> | null;
 	occurredAt: Date;
+	/**
+	 * Declared error metadata (`autter.error.*`, see error-fields.ts) —
+	 * optional and omitted when absent. A valid `errorCode` switches the
+	 * fingerprint to the source-independent "code-v1" scheme.
+	 */
+	errorCode?: string;
+	/** Declared cause (≤1000 chars). */
+	why?: string;
+	/** Declared remedy (≤1000 chars). */
+	fix?: string;
+	/** Docs link — http(s) only, ≤500 chars. */
+	link?: string;
+	/** Expected business failure (declines, validation): recorded, never paged. */
+	expected?: boolean;
+	/** `autter.request.id` — joins the occurrence to its request summary. */
+	requestId?: string;
 }
 
 /**
@@ -54,6 +70,8 @@ export interface RuntimeOccurrenceInput {
 export interface RuntimeOccurrence extends RuntimeOccurrenceInput {
 	occurrenceId: string;
 	fingerprint: string;
+	/** "code-v1" when grouped by a valid error code, else "message-v1". */
+	fingerprintScheme: "message-v1" | "code-v1";
 	/** normalizeRoute(route) — "/users/:id/orders/:id"; GROUP BY-safe. */
 	routeNormalized: string;
 	/** normalizeMessage(message) — ids/numbers/strings templated out. */

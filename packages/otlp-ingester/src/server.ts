@@ -9,9 +9,14 @@ import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
 import {
 	deriveFields,
-	fingerprintOccurrence,
+	occurrenceFingerprint,
 	occurrenceIdFor,
 } from "./fingerprint.js";
+import {
+	logPromotionCandidates,
+	promotionLookupWindow,
+	promotionRollups,
+} from "./log-promotion.js";
 import {
 	browserPayloadSchema,
 	normalizeBrowserPayload,
@@ -176,14 +181,49 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		inputs: RuntimeOccurrenceInput[],
 	): RuntimeOccurrence[] {
 		return inputs.map((input, index) => {
-			const fingerprint = fingerprintOccurrence(input);
+			const { fingerprint, scheme } = occurrenceFingerprint(input);
 			return {
 				...input,
 				occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
 				fingerprint,
+				fingerprintScheme: scheme,
 				...deriveFields(input),
 			};
 		});
+	}
+
+	/** Fingerprint log-promotion candidates and drop the ones whose trace
+	 * already produced an occurrence (in this batch, or within ±60 s). Ids
+	 * are assigned BEFORE the lookup so they stay stable across retries
+	 * whatever the lookup returns. */
+	async function promoteLogs(
+		ctx: IngestContext,
+		logs: ReturnType<typeof normalizeLogs>,
+	): Promise<RuntimeOccurrence[]> {
+		const candidates = logPromotionCandidates(logs);
+		if (candidates.length === 0) return [];
+		const fingerprinted = fingerprintAll(ctx, candidates);
+		const traceIds = [
+			...new Set(fingerprinted.map((o) => o.traceId).filter((t): t is string => !!t)),
+		];
+		if (traceIds.length === 0) return fingerprinted;
+		let seen = new Set<string>();
+		try {
+			const { from, to } = promotionLookupWindow(candidates);
+			seen = await store.recentOccurrenceTraceIds(
+				ctx,
+				traceIds,
+				from,
+				to,
+				fingerprinted.map((o) => o.occurrenceId),
+			);
+		} catch (err) {
+			console.warn(
+				"log promotion dedupe lookup failed — promoting without it:",
+				err instanceof Error ? err.message : err,
+			);
+		}
+		return fingerprinted.filter((o) => !o.traceId || !seen.has(o.traceId));
 	}
 
 	function storageError(res: Response, err: unknown): void {
@@ -298,10 +338,21 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		let logs;
 		try { logs = normalizeLogs(req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest); }
 		catch { res.status(400).json({ error: "invalid OTLP logs payload" }); return; }
-		try { await store.insertLogs(ctx, logs); }
+		// Logs are diagnostic evidence; exceptions and failed outcomes normally
+		// reach grouping through the trace path. The exception: logger-only /
+		// edge SDKs mark span-less error records `autter.capture.mode = "log"`,
+		// and those are promoted to occurrences here — see log-promotion.ts.
+		const promoted = await promoteLogs(ctx, logs);
+		const metricPoints = promotionRollups(promoted);
+		try {
+			await Promise.all([
+				store.insertLogs(ctx, logs),
+				store.insertOccurrences(ctx, promoted),
+				store.insertMetricPoints(ctx, metricPoints),
+			]);
+		}
 		catch (err) { storageError(res, err); return; }
-		// Logs are diagnostic evidence. Exceptions and failed outcomes use the trace sink,
-		// so one operation does not create duplicate issues through two export paths.
+		sink?.enqueue(ctx, promoted, metricPoints);
 		otlpSuccess(req, res);
 	});
 

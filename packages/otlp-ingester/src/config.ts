@@ -38,6 +38,12 @@ export interface IngesterConfig {
 	spanTtlDays: number;
 	metricsTtlDays: number;
 	llmCallTtlDays: number;
+	/**
+	 * runtime_logs retention (LOG_TTL_DAYS, default 14). Request summaries are
+	 * always kept (never sampled), so this is the main volume knob. Applied to
+	 * fresh tables by the baseline and to existing ones at boot.
+	 */
+	logTtlDays: number;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -91,6 +97,7 @@ export function loadConfig(): IngesterConfig {
 		// LLM calls keep the metrics horizon, not the span one — cost trends
 		// need months, and per-call volume is small next to HTTP spans.
 		llmCallTtlDays: intEnv("LLM_CALL_TTL_DAYS", 90),
+		logTtlDays: intEnv("LOG_TTL_DAYS", 14),
 	};
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {
 		throw new Error(

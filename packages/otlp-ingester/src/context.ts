@@ -21,7 +21,9 @@ export function sanitizeRuntimeContext(
 		if (--budget < 0 || depth > 6) return "[truncated]";
 		if (/__proto__|constructor|prototype/i.test(key)) return undefined;
 		const usage =
-			/(?:^|\.)(?:input|output|total|prompt|completion)_?tokens$/i.test(key) &&
+			// Numeric token COUNTS (incl. the AI rollup's cache_read_tokens) are
+			// usage, not secrets.
+			/(?:^|\.)(?:input|output|total|prompt|completion|cache_read|cache_creation)_?tokens$/i.test(key) &&
 			typeof value === "number" &&
 			Number.isFinite(value) &&
 			value >= 0;

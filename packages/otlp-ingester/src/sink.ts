@@ -203,10 +203,7 @@ export class SinkForwarder {
 			batchId,
 			orgId: ctx.orgId,
 			repositoryId: ctx.repositoryId,
-			occurrences: occurrences.map((o) => ({
-				...o,
-				occurredAt: o.occurredAt.toISOString(),
-			})),
+			occurrences: occurrences.map(sinkOccurrence),
 			metrics: metricPoints.map((p) => ({
 				...p,
 				bucketAt: p.bucketAt.toISOString(),
@@ -410,6 +407,44 @@ export class SinkForwarder {
 		this.enforceBounds();
 		this.scheduleWake();
 	}
+}
+
+/**
+ * Wire shape of one occurrence (payload `version: 1`). 1.5.0 adds, all
+ * optional and omitted when absent: errorCode, why, fix, link, expected,
+ * requestId, traceId, route, method, statusCode, fingerprintScheme. The
+ * request-context four were previously spread as `null` when unknown and
+ * are now simply left out, matching the documented optional-string shape.
+ * Older consumers ignore unknown keys, so the version stays 1.
+ */
+export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
+	const {
+		traceId,
+		route,
+		method,
+		statusCode,
+		errorCode,
+		why,
+		fix,
+		link,
+		expected,
+		requestId,
+		...rest
+	} = o;
+	return {
+		...rest,
+		occurredAt: o.occurredAt.toISOString(),
+		...(traceId ? { traceId } : {}),
+		...(route ? { route } : {}),
+		...(method ? { method } : {}),
+		...(statusCode ? { statusCode } : {}),
+		...(errorCode ? { errorCode } : {}),
+		...(why ? { why } : {}),
+		...(fix ? { fix } : {}),
+		...(link ? { link } : {}),
+		...(expected ? { expected: true } : {}),
+		...(requestId ? { requestId } : {}),
+	};
 }
 
 /** ISO range across every signal in the batch — the replay hint on drops. */

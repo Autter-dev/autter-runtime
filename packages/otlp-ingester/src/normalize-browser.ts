@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { liftErrorFields } from "./error-fields.js";
 import { normalizeRoute } from "./fingerprint.js";
 import {
 	asSeverity,
@@ -41,6 +42,14 @@ const browserEventSchema = z.object({
 	column: z.number().int().nonnegative().optional(),
 	/** Path only; query strings are stripped defensively anyway. */
 	route: z.string().max(1000).optional(),
+	/**
+	 * Free-form, scrubbed context. runtime-browser ≥1.4.0 also sends the
+	 * declared-error keys `autter.error.code|why|fix|link|expected` (from
+	 * coded errors / `autterErrorFromResponse`) and `autter.request.id` (the
+	 * `x-request-id` of a failed fetch/XHR). They are validated one by one
+	 * in normalizeBrowserPayload — a malformed value is dropped on its own
+	 * instead of rejecting the whole beacon.
+	 */
 	context: z.record(z.unknown()).optional(),
 });
 
@@ -198,6 +207,7 @@ export function normalizeBrowserPayload(
 				...(event.context ? { context: scrubContext(event.context) } : {}),
 			},
 			occurredAt,
+			...liftErrorFields(event.context),
 		});
 	}
 

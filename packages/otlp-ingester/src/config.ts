@@ -38,6 +38,15 @@ export interface IngesterConfig {
 	spanTtlDays: number;
 	metricsTtlDays: number;
 	llmCallTtlDays: number;
+	/**
+	 * Extra regex sources scrubbed from stored/forwarded free text and
+	 * attribute values, and extra regex sources for sensitive attribute
+	 * keys — on top of the built-in secret/PII patterns (see redact.ts).
+	 * Env: AUTTER_REDACT_VALUE_PATTERNS / AUTTER_REDACT_KEY_PATTERNS (JSON
+	 * arrays of strings).
+	 */
+	redactValuePatterns?: string[];
+	redactKeyPatterns?: string[];
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -45,6 +54,19 @@ function intEnv(name: string, fallback: number): number {
 	if (!raw) return fallback;
 	const value = Number.parseInt(raw, 10);
 	return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** JSON array of regex sources; invalid input fails startup loudly rather
+ * than silently running without the operator's extra patterns. */
+function patternListEnv(name: string): string[] {
+	const raw = process.env[name];
+	if (!raw) return [];
+	const parsed: unknown = JSON.parse(raw);
+	if (!Array.isArray(parsed) || !parsed.every((p) => typeof p === "string")) {
+		throw new Error(`${name} must be a JSON array of regex source strings`);
+	}
+	for (const source of parsed) new RegExp(source as string);
+	return parsed as string[];
 }
 
 function parseIngestKeys(raw: string | undefined): StaticIngestKey[] {
@@ -91,6 +113,8 @@ export function loadConfig(): IngesterConfig {
 		// LLM calls keep the metrics horizon, not the span one — cost trends
 		// need months, and per-call volume is small next to HTTP spans.
 		llmCallTtlDays: intEnv("LLM_CALL_TTL_DAYS", 90),
+		redactValuePatterns: patternListEnv("AUTTER_REDACT_VALUE_PATTERNS"),
+		redactKeyPatterns: patternListEnv("AUTTER_REDACT_KEY_PATTERNS"),
 	};
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {
 		throw new Error(

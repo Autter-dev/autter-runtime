@@ -55,7 +55,9 @@ import {
 	makeRedactor,
 	redactAttributes,
 	type RedactOptions,
+	type Redactor,
 } from "./redact.js";
+import { RedactingSpanExporter } from "./redact-exporter.js";
 import { startMemoryMetrics } from "./memory.js";
 import { configureRuntimeLogger, flushRuntimeLogs, shutdownRuntimeLogger, type RuntimeLoggingOptions } from "./logger.js";
 
@@ -125,12 +127,17 @@ export interface AutterServerOptions {
 	 */
 	autoFlush?: boolean;
 	/**
-	 * Mask PII/secrets in custom attributes before they leave the process:
-	 * emails, tokens (JWT, sk-, gh_, AWS, Slack), bearer headers,
-	 * `scheme://user:pass@` URLs, and anything whose attribute KEY looks
-	 * sensitive (password/token/secret/cookie/…). Mirrors the browser
-	 * relay's whitelist sanitiser. `true`/undefined = defaults; pass a
-	 * RedactOptions object to extend the patterns; `false` disables.
+	 * Mask secrets/PII before anything leaves the process — custom
+	 * attributes, exception messages and stack traces, span status
+	 * messages, URLs/query strings and attributes set by any
+	 * instrumentation (scrubbed again at export), and structured logs:
+	 * JWTs, bearer/basic credentials, Cookie/Authorization header text,
+	 * `scheme://user:pass@` connection strings, vendor API keys (sk-, sk_live_,
+	 * ghp_, xox*-, AIza, AKIA, …), PEM private keys, `password=`/`?token=`
+	 * assignments, emails, card numbers, and anything whose attribute KEY
+	 * looks sensitive (password/token/secret/cookie/authorization/session/…).
+	 * `true`/undefined = defaults; pass a RedactOptions object to add your
+	 * own key/value patterns; `false` disables (not recommended).
 	 * Default true.
 	 */
 	redactAttributes?: boolean | RedactOptions;
@@ -585,7 +592,7 @@ async function runLlmSpan<T>(
 		setCost: (usd) => span.setAttribute("autter.llm.cost_usd", usd),
 		setResponseModel,
 		setModel: setResponseModel,
-		setAttributes: (attributes) => span.setAttributes(attributes),
+		setAttributes: (attributes) => span.setAttributes(activeRedactor(attributes)),
 	};
 	try {
 		const result = await context.with(
@@ -595,14 +602,8 @@ async function runLlmSpan<T>(
 		span.setStatus({ code: SpanStatusCode.OK });
 		return result;
 	} catch (err) {
-		if (err instanceof Error) {
-			span.recordException(err);
-			span.setAttribute("error.type", err.name);
-		}
-		span.setStatus({
-			code: SpanStatusCode.ERROR,
-			message: err instanceof Error ? err.message : String(err),
-		});
+		recordError(span, err);
+		if (err instanceof Error) span.setAttribute("error.type", err.name);
 		throw err;
 	} finally {
 		span.end();
@@ -622,15 +623,10 @@ function recordLlmCall(tracer: Tracer, call: TrackedLlmCall): void {
 		},
 	);
 	if (call.error !== undefined && call.error !== null) {
+		recordError(span, call.error);
 		if (call.error instanceof Error) {
-			span.recordException(call.error);
 			span.setAttribute("error.type", call.error.name);
 		}
-		span.setStatus({
-			code: SpanStatusCode.ERROR,
-			message:
-				call.error instanceof Error ? call.error.message : String(call.error),
-		});
 	} else {
 		span.setStatus({ code: SpanStatusCode.OK });
 	}
@@ -652,15 +648,40 @@ async function runWithSpan<T>(
 		span.setStatus({ code: SpanStatusCode.OK });
 		return result;
 	} catch (err) {
-		if (err instanceof Error) span.recordException(err);
-		span.setStatus({
-			code: SpanStatusCode.ERROR,
-			message: err instanceof Error ? err.message : String(err),
-		});
+		recordError(span, err);
 		throw err;
 	} finally {
 		span.end();
 	}
+}
+
+/**
+ * Record a thrown value on a span with its message and stack scrubbed —
+ * the redacting replacement for `span.recordException(err)` + an error
+ * status. Same wire shape as OTel's recordException (an "exception" event
+ * with exception.type/message/stacktrace).
+ * @internal
+ */
+export function recordError(span: Span, err: unknown): void {
+	const isError = err instanceof Error;
+	const message = activeRedactor.text(isError ? err.message : String(err));
+	// Like recordException, only real Errors get an exception event; other
+	// thrown values keep just the (scrubbed) error status.
+	if (isError) {
+		span.addEvent("exception", {
+			"exception.type": err.name,
+			"exception.message": message,
+			...(err.stack
+				? { "exception.stacktrace": activeRedactor.text(err.stack) }
+				: {}),
+		});
+	}
+	span.setStatus({ code: SpanStatusCode.ERROR, message });
+}
+
+/** @internal Redact attributes with the active configuration. */
+export function redactWithActive(attributes?: Attributes | null): Attributes {
+	return activeRedactor(attributes);
 }
 
 /** Express (4/5) assigns routing state onto the core request object; a
@@ -722,7 +743,7 @@ let activeAlwaysOnProvider: BasicTracerProvider | null = null;
 
 /** Compiled attribute redactor — defaults until initAutterServer applies its
  * own configuration. Used by every capture path including LLM attributes. */
-let activeRedactor = makeRedactor(true);
+let activeRedactor: Redactor = makeRedactor(true);
 
 export function initAutterServer(options: AutterServerOptions): AutterServer {
 	if (active) return active;
@@ -732,6 +753,16 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		"",
 	);
 	const headers = { authorization: `Bearer ${options.apiKey}` };
+	// Every trace exporter scrubs spans on the way out, whoever created them
+	// (see redact-exporter.ts). Reads the active redactor lazily so the
+	// configuration below applies.
+	const traceExporter = () =>
+		new CountingExporter(
+			new RedactingSpanExporter(
+				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+				() => activeRedactor,
+			),
+		);
 	const environment = options.environment ?? process.env.NODE_ENV ?? "production";
 
 	// Debug mode: option OR AUTTER_DEBUG env (lifecycle seeds itself from the
@@ -771,22 +802,13 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	if (options.llmTracing !== false) sampler = new LlmAwareSampler(sampler);
 	const errorTraceBuffer = retainTraces
 		? new ErrorTraceRetentionProcessor(
-				new BatchSpanProcessor(
-					new CountingExporter(
-						new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
-					),
-					{ scheduledDelayMillis: 2000 },
-				),
+				new BatchSpanProcessor(traceExporter(), { scheduledDelayMillis: 2000 }),
 				retainOnError,
 				slowThresholdMs,
 			)
 		: null;
 
-	const mainSpanProcessor = new BatchSpanProcessor(
-		new CountingExporter(
-			new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
-		),
-	);
+	const mainSpanProcessor = new BatchSpanProcessor(traceExporter());
 	const metricReader = new PeriodicExportingMetricReader({
 		exporter: new OTLPMetricExporter({
 			url: `${endpoint}/v1/metrics`,
@@ -831,12 +853,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		resource,
 		sampler: new AlwaysOnSampler(),
 		spanProcessors: [
-			new BatchSpanProcessor(
-				new CountingExporter(
-					new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
-				),
-				{ scheduledDelayMillis: 2000 },
-			),
+			new BatchSpanProcessor(traceExporter(), { scheduledDelayMillis: 2000 }),
 		],
 	});
 	const errorTracer = alwaysOnProvider.getTracer("autter-errors");
@@ -852,9 +869,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		errorTraceBuffer?.retainActiveTrace();
 		telemetryStats.markCaptured();
 		const isError = error instanceof Error;
-		const message = isError ? error.message : String(error);
-		// Redaction is applied here, not at export time: PII must not leave
-		// the process even if an exporter misbehaves.
+		// Redaction is applied here AND at export time: secrets must not
+		// leave the process even if an exporter misbehaves. Messages and
+		// stacks are scrubbed too — `connect ECONNREFUSED
+		// postgres://admin:hunter2@…` is the typical leak, not attributes.
+		const message = activeRedactor.text(isError ? error.message : String(error));
+		const stackText = isError && error.stack ? activeRedactor.text(error.stack) : "";
 		const redacted = activeRedactor(attributes);
 
 		// Prefer the live request span (the HTTP server span inside an Express
@@ -874,18 +894,15 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			: errorTracer.startSpan(isError ? error.name : "Error");
 		span.setAttributes({ "autter.severity": "error", ...redacted });
 
-		if (isError && error.stack) {
-			if (redacted["autter.handled"] === true) {
-				span.addEvent("exception", {
-					"exception.type": error.name,
-					"exception.message": message,
-					"exception.stacktrace": error.stack,
-					"autter.handled": true,
-					"autter.sampled": redacted["autter.sampled"] === true,
-				});
-			} else {
-				span.recordException(error);
-			}
+		if (isError && stackText) {
+			span.addEvent("exception", {
+				"exception.type": error.name,
+				"exception.message": message,
+				"exception.stacktrace": stackText,
+				...(redacted["autter.handled"] === true
+					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
+					: {}),
+			});
 		} else {
 			// No usable stack — an Error thrown without one, or a non-Error
 			// value. Synthesize the call site (minus this frame) so the
@@ -898,7 +915,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			span.addEvent("exception", {
 				"exception.type": isError ? error.name : "Error",
 				"exception.message": message,
-				...(stack ? { "exception.stacktrace": stack } : {}),
+				...(stack ? { "exception.stacktrace": activeRedactor.text(stack) } : {}),
 				...(redacted["autter.handled"] === true
 					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
 					: {}),
@@ -929,16 +946,17 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			?.split("\n")
 			.filter((line, i) => i === 0 || !line.includes("captureMessage"))
 			.join("\n");
+		const safeMessage = activeRedactor.text(message);
 		const span = errorTracer.startSpan("Message", {
 			attributes: { "autter.severity": severity, ...activeRedactor(attributes) },
 		});
 		span.addEvent("exception", {
 			"exception.type": "Message",
-			"exception.message": message,
-			...(stack ? { "exception.stacktrace": stack } : {}),
+			"exception.message": safeMessage,
+			...(stack ? { "exception.stacktrace": activeRedactor.text(stack) } : {}),
 			"autter.severity": severity,
 		});
-		span.setStatus({ code: SpanStatusCode.ERROR, message });
+		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 		span.end();
 	}
 
@@ -1046,14 +1064,14 @@ export function captureException(
 		active.captureException(error, attributes);
 		return;
 	}
+	// Before initAutterServer the span rides the host's global provider,
+	// whose exporter we don't control — so scrub here, at capture time.
 	const span = trace
 		.getTracer("autter-errors")
-		.startSpan(error instanceof Error ? error.name : "Error", { attributes });
-	if (error instanceof Error) span.recordException(error);
-	span.setStatus({
-		code: SpanStatusCode.ERROR,
-		message: error instanceof Error ? error.message : String(error),
-	});
+		.startSpan(error instanceof Error ? error.name : "Error", {
+			attributes: activeRedactor(attributes),
+		});
+	recordError(span, error);
 	span.end();
 }
 
@@ -1068,7 +1086,12 @@ export function withProcessSpan<T>(
 	attributes?: Attributes,
 ): Promise<T> {
 	if (active) return active.withProcessSpan(name, fn, attributes);
-	return runWithSpan(trace.getTracer("autter-processes"), name, fn, attributes);
+	return runWithSpan(
+		trace.getTracer("autter-processes"),
+		name,
+		fn,
+		activeRedactor(attributes),
+	);
 }
 
 /**
@@ -1103,15 +1126,16 @@ export function captureMessage(
 		active.captureMessage(message, severity, attributes);
 		return;
 	}
+	const safeMessage = activeRedactor.text(message);
 	const span = trace.getTracer("autter-errors").startSpan("Message", {
-		attributes: { "autter.severity": severity, ...attributes },
+		attributes: { "autter.severity": severity, ...activeRedactor(attributes) },
 	});
 	span.addEvent("exception", {
 		"exception.type": "Message",
-		"exception.message": message,
+		"exception.message": safeMessage,
 		"autter.severity": severity,
 	});
-	span.setStatus({ code: SpanStatusCode.ERROR, message });
+	span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 	span.end();
 }
 

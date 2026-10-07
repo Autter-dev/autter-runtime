@@ -4,7 +4,7 @@ import {
 	type Attributes,
 	type Span,
 } from "@opentelemetry/api";
-import { autterLlmTracer } from "./server.js";
+import { autterLlmTracer, recordError, redactWithActive } from "./server.js";
 
 /**
  * One-line LLM client auto-instrumentation:
@@ -115,11 +115,9 @@ function applyUsage(span: Span, usage: UsageShape): void {
 }
 
 function endWithError(span: Span, err: unknown): void {
-	if (err instanceof Error) span.recordException(err);
-	span.setStatus({
-		code: SpanStatusCode.ERROR,
-		message: err instanceof Error ? err.message : String(err),
-	});
+	// Provider errors echo request details (API key fragments, prompt
+	// snippets, account emails) — recorded with message/stack scrubbed.
+	recordError(span, err);
 	span.end();
 }
 
@@ -223,7 +221,7 @@ export function instrumentLlmClient<T extends object>(
 				"gen_ai.system": provider,
 				"gen_ai.request.model": request.model,
 				...(userId ? { "autter.user_id": userId } : {}),
-				...options?.attributes,
+				...redactWithActive(options?.attributes),
 			},
 		});
 		let result: unknown;

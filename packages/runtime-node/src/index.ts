@@ -31,6 +31,7 @@ export {
 } from "./lifecycle.js";
 export {
 	redactAttributes,
+	redactText,
 	type RedactOptions,
 } from "./redact.js";
 export {

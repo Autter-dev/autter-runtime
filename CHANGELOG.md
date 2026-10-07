@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- Scrub secrets and PII from exception messages, stack traces and span status messages, not only custom attributes; re-scrub every span at export so third-party instrumentations, HTTP URLs (`?token=`) and `recordException` calls are covered; scrub `LlmCallHandle.setAttributes`, `instrumentLlmClient` attributes and provider errors, and module-level captures made before `initAutterServer` (`runtime-node`).
+- New value patterns everywhere: Basic auth, `Authorization:`/`Cookie:`/`Set-Cookie:` header text, connection strings with empty usernames or `@` in the password, `sk-proj-`/`sk-ant-`, Stripe, GitHub fine-grained, GitLab, npm, SendGrid and Google API keys, `password=`/`?token=`/`?api_key=` assignments, Luhn-valid card numbers. New sensitive keys: any `…authorization` header key, `session`/`sessionid`/`sid`, `pwd`, `dsn`, bounded `ssn`. Custom value patterns now apply globally (`runtime-node`, `runtime-browser`, `otlp-ingester`).
+- The browser relay scrubs message, stack, name and nested context (`redact` option) (`runtime-node`).
+- Browser SDK scrubs messages, stacks and nested context; new `redact: { keys, values } | false` option and `scrubText` export (`runtime-browser`).
+- Ingester scrubs occurrence message/stack/route, span names, browser context (deep) and LLM-call attributes before storage and the sink webhook; extra patterns via `AUTTER_REDACT_VALUE_PATTERNS` / `AUTTER_REDACT_KEY_PATTERNS` (`otlp-ingester`).
+- Python adapter: new stdlib-only `adapters/python/redact.py` (`redact_text`, `redact_attributes`, `configure`); the caught-exception sampler scrubs tracebacks with it.
+- Shared parity vectors in `test-vectors/redaction.json` run against every implementation.
+
+### Behavior notes
+
+- Error messages that contained secrets now fingerprint on their scrubbed form, so such issues may regroup once (they previously split per secret value).
+
 ## [1.3.1] - 2026-09-08
 
 ### Fixes

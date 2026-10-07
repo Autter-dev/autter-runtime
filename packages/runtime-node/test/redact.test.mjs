@@ -281,3 +281,84 @@ test("handles circular references without leaking sensitive values", () => {
         assert.equal(out.context.nested.safe, "ok");
         assert.equal(out.context.self, MASK);
 });
+
+// ---------------------------------------------------------------------------
+// Shared vectors (test-vectors/redaction.json) — the same cases run against
+// the browser SDK, the ingester, and the Python adapter, so every layer
+// agrees on what a secret looks like.
+// ---------------------------------------------------------------------------
+import { readFileSync } from "node:fs";
+import { redactText, sanitizeBrowserPayload } from "../dist/index.js";
+
+const vectors = JSON.parse(
+	readFileSync(new URL("../../../test-vectors/redaction.json", import.meta.url), "utf8"),
+);
+const join = (value) => (Array.isArray(value) ? value.join("") : value);
+
+for (const vector of vectors.text) {
+	if (vector.skip?.includes("node")) continue;
+	test(`redactText vector: ${vector.name}`, () => {
+		assert.equal(redactText(join(vector.input)), join(vector.expect));
+	});
+}
+
+test("sensitive keys are masked case-insensitively at any depth", () => {
+	for (const key of vectors.keys.sensitive) {
+		const out = redactAttributes({ outer: { inner: [{ [key]: "raw-value" }] } });
+		assert.equal(out.outer.inner[0][key], MASK, key);
+	}
+	for (const key of vectors.keys.safe) {
+		const out = redactAttributes({ outer: { [key]: "kept" } });
+		assert.equal(out.outer[key], "kept", key);
+	}
+});
+
+test("secrets inside nested string values are scrubbed, not just keys", () => {
+	const out = redactAttributes({
+		job: { args: ["--db", "postgres://u:pw123@db/x"], note: "Cookie: a=b" },
+	});
+	assert.deepEqual(out.job.args, ["--db", `postgres://${MASK}@db/x`]);
+	assert.equal(out.job.note, `Cookie: ${MASK}`);
+});
+
+test("stringified stack traces are scanned line by line", () => {
+	const err = new Error("auth failed: Authorization: Bearer abcdefghijklmnop123456");
+	const out = redactText(err.stack);
+	assert.ok(!out.includes("abcdefghijklmnop123456"));
+	assert.match(out, /^Error: auth failed: Authorization: \[redacted\]\n\s+at /);
+});
+
+test("custom value patterns apply to every match even without the g flag", () => {
+	const out = redactText("CUST-1 and CUST-2", {
+		additionalValuePatterns: [/CUST-\d/],
+	});
+	assert.equal(out, `${MASK} and ${MASK}`);
+});
+
+test("custom key patterns extend the built-in list", () => {
+	const out = redactAttributes({ tenant_ref: "t-1", other: "x" }, {
+		additionalKeyPatterns: [/tenant_ref/],
+	});
+	assert.deepEqual(out, { tenant_ref: MASK, other: "x" });
+});
+
+test("the browser relay scrubs message, stack, name and nested context", () => {
+	const payload = sanitizeBrowserPayload({
+		version: 1,
+		service: "web",
+		environment: "production",
+		events: [{
+			type: "exception",
+			timestamp: "2026-01-01T00:00:00.000Z",
+			message: "fetch failed for https://api.test/x?token=abc123secret",
+			stack: "Error: x\n    at f (https://app.test/a.js:1:1) jane@example.com",
+			name: "/verify/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.SflKxwRJSMeKKF2QT4fwpM",
+			context: { form: { password: "p@ss", plan: "pro" }, note: "sk-abcdefghijklmnopqrstuvwxyz" },
+		}],
+	});
+	const [event] = payload.events;
+	assert.equal(event.message, `fetch failed for https://api.test/x?token=${MASK}`);
+	assert.ok(!event.stack.includes("jane@example.com"));
+	assert.equal(event.name, `/verify/${MASK}`);
+	assert.deepEqual(event.context, { form: { password: MASK, plan: "pro" }, note: MASK });
+});

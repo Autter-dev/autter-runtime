@@ -1,4 +1,5 @@
 import { estimateLlmCostUsd } from "./llm-pricing.js";
+import { isSensitiveKey, scrubText } from "./redact.js";
 import type { RuntimeLlmCall } from "./types.js";
 
 /**
@@ -160,7 +161,7 @@ export function extractLlmCall(
 					200,
 				)
 			: "",
-		userId: (
+		userId: scrubText(
 			strAttr(
 				attrs,
 				"autter.user_id",
@@ -168,19 +169,25 @@ export function extractLlmCall(
 				"ai.telemetry.metadata.user_id",
 				"enduser.id",
 				"user.id",
-			) ?? ""
+			) ?? "",
 		).slice(0, 200),
-		sessionId: (
+		sessionId: scrubText(
 			strAttr(
 				attrs,
 				"autter.session_id",
 				"ai.telemetry.metadata.sessionId",
 				"session.id",
-			) ?? ""
+			) ?? "",
 		).slice(0, 200),
 		attributes: llmAttributeSubset(attrs),
 		startedAt: facts.startedAt,
 	};
+}
+
+/** Numeric token/usage counters are kept even though their keys contain
+ * "token" — cost tracking depends on them. */
+function isUsageCount(key: string, value: string): boolean {
+	return /tokens?$|token_?count$|usage/i.test(key) && /^\d+(\.\d+)?$/.test(value);
 }
 
 /**
@@ -201,7 +208,14 @@ function llmAttributeSubset(
 		) {
 			continue;
 		}
-		const trimmed = value.length > 500 ? `${value.slice(0, 500)}…` : value;
+		// Prompts/completions (ai.prompt, gen_ai.prompt, …) land here: scrub
+		// before the size cap so a secret straddling it can't half-survive.
+		const safe = isUsageCount(key, value)
+			? value
+			: isSensitiveKey(key)
+				? "[redacted]"
+				: scrubText(value);
+		const trimmed = safe.length > 500 ? `${safe.slice(0, 500)}…` : safe;
 		size += key.length + trimmed.length;
 		if (size > 4000) break;
 		subset[key] = trimmed;

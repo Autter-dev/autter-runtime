@@ -28,6 +28,7 @@ import { decodeProfile } from "./profiles.js";
 import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
 import { validateSourceMap } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
+import { configureRedaction, scrubOccurrence } from "./redact.js";
 import type {
 	IngestContext,
 	RuntimeOccurrence,
@@ -42,6 +43,7 @@ export interface IngesterApp {
 }
 
 export function createIngesterApp(config: IngesterConfig): IngesterApp {
+	configureRedaction(config);
 	const store = new ClickHouseStore(config);
 	// Fingerprinted occurrences feed the consumer's issue grouping, metric
 	// points feed the request/error-rate rollups, LLM calls feed spend
@@ -175,7 +177,13 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		ctx: IngestContext,
 		inputs: RuntimeOccurrenceInput[],
 	): RuntimeOccurrence[] {
-		return inputs.map((input, index) => {
+		return inputs.map((raw, index) => {
+			// Second line of defence, before fingerprinting, storage, and the
+			// sink (which feeds LLM fix generation): scrub secrets from the
+			// free-text fields old SDKs and third-party OTLP senders pass
+			// through verbatim. Attributes were already sanitised by the
+			// normalisers (sanitizeRuntimeContext).
+			const input = scrubOccurrence(raw);
 			const fingerprint = fingerprintOccurrence(input);
 			return {
 				...input,

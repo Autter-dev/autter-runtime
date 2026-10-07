@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Attributes } from "@opentelemetry/api";
+import { makeRedactor, type RedactOptions, type Redactor } from "./redact.js";
 
 /**
  * Same-origin browser relay. The browser tracker posts to a route on the
@@ -23,6 +25,15 @@ export interface RelayOptions {
 	perIpRateLimit?: number | false;
 	/** Called when the async forward fails (default: console.warn). */
 	onError?: (err: unknown) => void;
+	/**
+	 * Scrub secrets/PII from browser events (message, stack, name, nested
+	 * context) before they leave your server — the same patterns as
+	 * `initAutterServer({ redactAttributes })`. Catches old browser SDK
+	 * versions and anything the browser's lean redactor misses. Pass a
+	 * RedactOptions object to add your own patterns; `false` disables.
+	 * Default true.
+	 */
+	redact?: boolean | RedactOptions;
 }
 
 class IpWindow {
@@ -69,7 +80,12 @@ const SEVERITIES = new Set(["fatal", "error", "warning", "info"]);
 // Whitelist sanitiser — anything not listed here is dropped, so a
 // compromised or buggy client can't smuggle cookies/DOM/bodies through the
 // relay. Returns null when the payload is structurally invalid.
-export function sanitizeBrowserPayload(raw: unknown): object | null {
+const defaultRelayRedactor = makeRedactor(true);
+
+export function sanitizeBrowserPayload(
+	raw: unknown,
+	redactor: Redactor = defaultRelayRedactor,
+): object | null {
 	if (typeof raw !== "object" || raw === null) return null;
 	const p = raw as Record<string, unknown>;
 	if (p.version !== 1) return null;
@@ -90,12 +106,16 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 				? { severity: e.severity }
 				: {}),
 			message:
-				typeof e.message === "string" ? e.message.slice(0, 4000) : "",
-			...(typeof e.name === "string" ? { name: e.name.slice(0, 200) } : {}),
+				typeof e.message === "string"
+					? redactor.text(e.message.slice(0, 4000))
+					: "",
+			...(typeof e.name === "string"
+				? { name: redactor.text(e.name.slice(0, 200)) }
+				: {}),
 			...(typeof e.durationMs === "number" && Number.isFinite(e.durationMs)
 				? { durationMs: Math.max(0, Math.min(120000, e.durationMs)) } : {}),
 			...(typeof e.stack === "string"
-				? { stack: e.stack.slice(0, 32000) }
+				? { stack: redactor.text(e.stack.slice(0, 32000)) }
 				: {}),
 			...(typeof e.errorType === "string"
 				? { errorType: e.errorType.slice(0, 200) }
@@ -108,8 +128,10 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 			...(typeof e.route === "string"
 				? { route: e.route.split("?")[0]!.slice(0, 1000) }
 				: {}),
-			...(typeof e.context === "object" && e.context !== null
-				? { context: e.context }
+			...(typeof e.context === "object" &&
+			e.context !== null &&
+			!Array.isArray(e.context)
+				? { context: redactor(e.context as Attributes) }
 				: {}),
 		});
 	}
@@ -154,6 +176,10 @@ export function createBrowserRelayFetchHandler(
 	opts: RelayOptions,
 ): (request: Request) => Promise<Response> {
 	const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+	const redactor =
+		opts.redact === undefined || opts.redact === true
+			? defaultRelayRedactor
+			: makeRedactor(opts.redact);
 	const limiter =
 		opts.perIpRateLimit === false
 			? null
@@ -185,7 +211,7 @@ export function createBrowserRelayFetchHandler(
 				status: 400,
 			});
 		}
-		const payload = sanitizeBrowserPayload(raw);
+		const payload = sanitizeBrowserPayload(raw, redactor);
 		if (!payload) {
 			return new Response(JSON.stringify({ error: "invalid payload" }), {
 				status: 400,
@@ -211,6 +237,10 @@ export function createBrowserRelayHandler(
 	res: ServerResponse,
 ) => void {
 	const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+	const redactor =
+		opts.redact === undefined || opts.redact === true
+			? defaultRelayRedactor
+			: makeRedactor(opts.redact);
 	const limiter =
 		opts.perIpRateLimit === false
 			? null
@@ -227,7 +257,7 @@ export function createBrowserRelayHandler(
 	}
 
 	function handleParsed(raw: unknown, res: ServerResponse): void {
-		const payload = sanitizeBrowserPayload(raw);
+		const payload = sanitizeBrowserPayload(raw, redactor);
 		if (!payload) {
 			respond(res, 400, { error: "invalid payload" });
 			return;

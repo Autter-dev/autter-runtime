@@ -67,6 +67,14 @@ OTel `exception` event with `autter.handled=true` and
 overhead, applies to the current and newly created threads, and should be
 enabled only for targeted diagnosis. Other languages can send the same event.
 
+The sampler scrubs each traceback (which includes `str(exc)`) for secrets
+and PII before calling `emit`, using `adapters/python/redact.py` (stdlib
+only; copy it next to `caught_exceptions.py`). Use the same module for your
+own `record_exception` calls — `redact_text(str(exc))`,
+`redact_text(traceback_text)`, `redact_attributes(context)` — and
+`configure(value_patterns=[...], key_patterns=[...])` for custom patterns.
+The ingester scrubs again server-side.
+
 ```python
 from opentelemetry import trace
 from caught_exceptions import install_caught_sampler

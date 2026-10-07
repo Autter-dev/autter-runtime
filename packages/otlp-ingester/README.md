@@ -66,6 +66,8 @@ The validator webhook may return the same extra fields:
 | `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 | `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
+| `AUTTER_REDACT_VALUE_PATTERNS` | — | JSON array of extra regex sources masked in stored/forwarded text and attribute values (built-in secret/PII patterns always apply) |
+| `AUTTER_REDACT_KEY_PATTERNS` | — | JSON array of extra regex sources for attribute keys whose values are masked wholesale |
 
 ## LLM / GenAI calls
 

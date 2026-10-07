@@ -56,6 +56,7 @@ export {
 	makeSafeCapture,
 	installAutterAutoFlush,
 	redactAttributes,
+	redactText,
 } from "@autter/runtime-node";
 
 export type {

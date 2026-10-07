@@ -155,23 +155,39 @@ default 1% sampling the span contribution is negligible; if you set
 Tail-retained error traces don't distort this: their spans carry
 `autter.tail_retained` and the ingester keeps them out of span-fed rollups.
 
-### Privacy: custom attributes are redacted before they leave the process
+### Privacy: secrets and PII are scrubbed before they leave the process
 
-The browser relay whitelist-sanitises everything a client posts — but the
-server tracker accepts free-form attributes from *your* code, where a stray
-`captureException(err, { "user.email": … })` would otherwise go out
-verbatim. Custom attributes are therefore scrubbed at capture time by
-default:
+Error context is where secrets leak: `connect ECONNREFUSED
+postgres://admin:hunter2@db…` in an exception message, a provider error
+echoing an API key, a `?token=` in a request URL, a stray
+`captureException(err, { "user.email": … })`. Everything the SDK exports is
+therefore scrubbed by default — custom attributes, exception messages and
+stack traces, span status messages, LLM call attributes and errors,
+structured logs, and the browser events the relay forwards. A final pass at
+export time scrubs every span regardless of who created it (HTTP
+instrumentation URLs, third-party instrumentations, `recordException` in
+your own code).
 
-- values that look like emails, JWTs, `sk-…`/`ghp_…`/AWS/Slack tokens,
-  `Bearer …` headers, or `scheme://user:pass@host` URLs are masked;
+- secrets inside any string are masked in place, keeping the rest of the
+  message/stack readable: JWTs, `Bearer`/`Basic` credentials,
+  `Authorization:`/`Cookie:`/`Set-Cookie:` header text,
+  `scheme://user:pass@host` connection strings (postgres, mysql,
+  mongodb+srv, redis, …), vendor keys (`sk-…`, `sk_live_…`, `ghp_…`,
+  `github_pat_…`, `xox?-…`, `AIza…`, `AKIA…`, …), PEM private keys,
+  `password=`/`?token=`/`?api_key=`-style assignments, emails, and
+  Luhn-valid card numbers;
 - attributes whose **key** looks sensitive (`password`, `token`, `secret`,
-  `api_key`, `authorization`, `cookie`, `ssn`, `card_number`, …) are masked
-  wholesale;
-- non-sensitive keys and primitives pass through untouched, so grouping and
-  dashboards keep working.
+  `api_key`, `authorization`, `cookie`, `session`, `ssn`, `card_number`, …)
+  are masked wholesale, at any nesting depth;
+- non-sensitive keys, numbers (including LLM token counts) and booleans pass
+  through untouched, so grouping, dashboards and cost tracking keep working.
 
-Disable or extend it per service:
+The same patterns run in the browser SDK, the relay, the Python adapter,
+and again in the ingester before storage (shared test vectors in
+`test-vectors/redaction.json`).
+
+Extend it (applies to messages, stacks and URLs too) or disable it per
+service:
 
 ```ts
 initAutterServer({
@@ -193,7 +209,9 @@ const safe = makeSafeCapture();
 safe.captureException(err, { "user.email": email }); // masked before export
 ```
 
-The raw primitive is exported too (`redactAttributes(attrs, options)`).
+The raw primitives are exported too (`redactAttributes(attrs, options)`,
+`redactText(text, options)`). The browser relay takes the same options as
+`createBrowserRelayHandler({ ..., redact })`.
 This closes the server-side gap to match the browser relay's payload
 whitelist; it is best-effort scrubbing of obvious PII shapes, not a DLP
 engine — keep secrets out of attributes in the first place.

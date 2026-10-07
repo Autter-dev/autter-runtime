@@ -7,3 +7,6 @@ examples/express-app/public/sdk/
 .env.*
 !.env.example
 .DS_Store
+
+# Local runtime files written by fileSink in development
+.autter/

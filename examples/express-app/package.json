@@ -10,7 +10,7 @@
 	},
 	"dependencies": {
 		"@autter/runtime-browser": "^1.0.0",
-		"@autter/runtime-node": "^1.0.0",
+		"@autter/runtime-node": "^1.5.0",
 		"express": "^4.21.2"
 	}
 }

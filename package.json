@@ -13,8 +13,9 @@
 		"examples/*"
 	],
 	"scripts": {
-		"build": "npm run build -w @autter/runtime-browser -w @autter/runtime-node -w @autter/otlp-ingester && npm run build -w @autter/runtime-next",
-		"dev": "npm run dev -w @autter/otlp-ingester"
+		"build": "npm run build -w @autter/runtime-core && npm run build -w @autter/runtime-node -w @autter/runtime-edge -w @autter/runtime-browser -w @autter/otlp-ingester && npm run build -w @autter/runtime-next",
+		"dev": "npm run dev -w @autter/otlp-ingester",
+		"test": "npm run test -w @autter/runtime-core -w @autter/runtime-node -w @autter/runtime-edge -w @autter/runtime-next"
 	},
 	"engines": {
 		"node": ">=20"

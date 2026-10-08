@@ -51,7 +51,8 @@ def install_caught_sampler(
             return hook
         seen.add(identity)
         sent += 1
-        stack = redact_text("".join(traceback.format_exception(exc_type, exc_value, tb, limit=8))[:8000])
+        # Scrub with slack, then cut: a secret straddling the cut stays whole.
+        stack = redact_text("".join(traceback.format_exception(exc_type, exc_value, tb, limit=8))[:8512])[:8000]
         try:
             emit(exc_type.__name__, stack)
         except Exception:

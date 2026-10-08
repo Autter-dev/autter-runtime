@@ -362,3 +362,20 @@ test("the browser relay scrubs message, stack, name and nested context", () => {
 	assert.equal(event.name, `/verify/${MASK}`);
 	assert.deepEqual(event.context, { form: { password: MASK, plan: "pro" }, note: MASK });
 });
+
+test("JWT pattern stays linear on long dash-joined runs", async () => {
+	const { redactText } = await import("../dist/index.js");
+	const started = Date.now();
+	redactText("eyJ-".repeat(16384));
+	assert.ok(Date.now() - started < 500, `took ${Date.now() - started}ms`);
+});
+
+test("custom key and value patterns ignore g/y flags", () => {
+	const keys = redactAttributes(
+		{ internal_a: "x", internal_b: "y", internal_c: "z" },
+		{ additionalKeyPatterns: [/internal/g] },
+	);
+	assert.deepEqual(keys, { internal_a: MASK, internal_b: MASK, internal_c: MASK });
+	const values = redactAttributes({ note: "id CUST-123 and CUST-456" }, { additionalValuePatterns: [/CUST-\d+/y] });
+	assert.equal(values.note, `id ${MASK} and ${MASK}`);
+});

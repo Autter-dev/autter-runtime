@@ -60,7 +60,15 @@ setTimeout(async () => {
 		"ai.usage.promptTokens": 42,
 	});
 	foreign.recordException(new Error("upstream said password=foreignpw1 for x"));
+	foreign.addEvent("retry with Bearer eventnamesecret1234");
 	foreign.end();
+	// Link attributes are serialised with the span too.
+	trace
+		.getTracer("third-party")
+		.startSpan("consume", {
+			links: [{ context: foreign.spanContext(), attributes: { note: "Bearer linkbearersecret123" } }],
+		})
+		.end();
 
 	setTimeout(() => {
 		process.kill(process.pid, "SIGTERM");

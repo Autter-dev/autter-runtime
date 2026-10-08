@@ -20,7 +20,9 @@ const PRIVATE_KEY_BLOCK_RE =
 	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
 const PREFIXED_SECRET_RE =
 	/\b(?:sk-[A-Za-z0-9_-]{20,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|whsec_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,}|(?:AKIA|ASIA)[0-9A-Z]{16}|npm_[A-Za-z0-9]{36}|autter_(?:rt|pat)_[A-Za-z0-9_-]{10,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})/g;
-const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+// Lookbehind, not \b: a \b start at every "eyJ" after a "-" made this
+// quadratic ("eyJ-" x 16k took 3.4 s per string).
+const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
 const AUTH_SCHEME_RE =
 	/\b(?:bearer\s+[A-Za-z0-9._~+/=-]{10,}|basic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2})/gi;
 const HEADER_VALUE_RE =
@@ -78,9 +80,13 @@ function luhnValid(candidate: string): boolean {
 }
 
 /** Scrub secrets/PII embedded in one string; the rest of it survives. */
+/** Longest string scanned (same cap as the Node SDK). Callers that store
+ * less cut first; anything longer is truncated rather than stored unscanned. */
+const MAX_SCRUB_CHARS = 64 * 1024;
+
 export function scrubText(value: string): string {
 	if (typeof value !== "string" || value === "") return value;
-	let out = value
+	let out = (value.length > MAX_SCRUB_CHARS ? value.slice(0, MAX_SCRUB_CHARS) : value)
 		.replace(PRIVATE_KEY_BLOCK_RE, MASK)
 		.replace(PREFIXED_SECRET_RE, MASK)
 		.replace(JWT_RE, MASK)

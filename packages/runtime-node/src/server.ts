@@ -57,7 +57,7 @@ import {
 	type RedactOptions,
 	type Redactor,
 } from "./redact.js";
-import { RedactingSpanExporter } from "./redact-exporter.js";
+import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporter.js";
 import { startMemoryMetrics } from "./memory.js";
 import {
 	configureRuntimeLogger,
@@ -869,15 +869,18 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 
 	const mainSpanProcessor = new BatchSpanProcessor(traceExporter());
 	const metricReader = new PeriodicExportingMetricReader({
-		exporter: new OTLPMetricExporter({
-			url: `${endpoint}/v1/metrics`,
-			headers,
-			// Deltas, not lifetime totals: the ingester SUMs data points
-			// into runtime_metrics_1m, and the default (cumulative)
-			// temporality would re-count every past request on each
-			// 60 s export.
-			temporalityPreference: AggregationTemporalityPreference.DELTA,
-		}),
+		exporter: new RedactingMetricExporter(
+			new OTLPMetricExporter({
+				url: `${endpoint}/v1/metrics`,
+				headers,
+				// Deltas, not lifetime totals: the ingester SUMs data points
+				// into runtime_metrics_1m, and the default (cumulative)
+				// temporality would re-count every past request on each
+				// 60 s export.
+				temporalityPreference: AggregationTemporalityPreference.DELTA,
+			}),
+			() => activeRedactor,
+		),
 		exportIntervalMillis: options.metricIntervalMs ?? 60_000,
 	});
 

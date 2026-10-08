@@ -72,7 +72,7 @@ const SENSITIVE_KEY_PATTERNS: RegExp[] = [
 	/(^|[._-])session$|^(j|php)?sess(ion)?id$|^sid$|connect\.sid/,
 	/phone|msisdn/,
 	/(^|[^a-z])ssn($|[^a-z])|social[-_ ]?security/,
-	/cvv|cvc|card([-_. ]?(number|num|no))?$/,
+	/cvv|cvc|(^|[^a-z])card([-_. ]?(number|num|no))?$/,
 	/credit[-_.]?card/,
 	/connection[-_.]?string|(^|[._-])dsn$/,
 	/recovery[-_.]?code|\botp\b|magic[-_.]?link/,
@@ -89,7 +89,9 @@ const PRIVATE_KEY_BLOCK_RE =
 /** Vendor credentials recognisable by prefix alone. */
 const PREFIXED_SECRET_RE =
 	/\b(?:sk-[A-Za-z0-9_-]{20,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|whsec_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,}|(?:AKIA|ASIA)[0-9A-Z]{16}|npm_[A-Za-z0-9]{36}|autter_(?:rt|pat)_[A-Za-z0-9_-]{10,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})/g;
-const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+// Lookbehind, not \b: with \b a match may start at every "eyJ" after a
+// "-", and each start rescans the rest of the run ("eyJ-" x 16k took 5 s).
+const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
 /** `Bearer <token>` and `Basic <base64>` (the latter must look encoded, so
  * the phrase "basic authentication" survives). */
 const AUTH_SCHEME_RE =
@@ -135,18 +137,20 @@ interface CompiledRedactor {
 	scrubCardNumbers: boolean;
 }
 
+/** Key patterns are used with .test(): drop g/y so lastIndex never carries
+ * over from one key to the next (with /x/g every other matching key leaked). */
 function toCaseInsensitive(pattern: RegExp | string): RegExp {
-	return typeof pattern === "string"
-		? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
-		: new RegExp(pattern.source, pattern.flags.includes("i") ? pattern.flags : `${pattern.flags}i`);
+	if (typeof pattern === "string")
+		return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+	const flags = pattern.flags.replace(/[gyi]/g, "");
+	return new RegExp(pattern.source, `${flags}i`);
 }
 
 /** Value patterns must be global, or String#replace masks only the first hit. */
 function toGlobal(pattern: RegExp | string): RegExp {
 	if (typeof pattern === "string") return new RegExp(pattern, "gi");
-	return pattern.global
-		? pattern
-		: new RegExp(pattern.source, `${pattern.flags}g`);
+	// Sticky would only match at lastIndex, i.e. never mid-string.
+	return new RegExp(pattern.source, `${pattern.flags.replace(/[gy]/g, "")}g`);
 }
 
 function compile(options?: RedactOptions): CompiledRedactor {

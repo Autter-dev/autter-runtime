@@ -83,6 +83,22 @@ class Attributes(unittest.TestCase):
         self.assertTrue(redact._enabled)
 
 
+class Hardening(unittest.TestCase):
+    def test_jwt_pattern_is_linear(self):
+        import time
+
+        started = time.monotonic()
+        redact_text("eyJ-" * 16384)
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_broken_str_is_masked_not_raised(self):
+        class Broken:
+            def __str__(self):
+                raise RuntimeError("no")
+
+        self.assertEqual(redact_attributes({"x": Broken()}), {"x": MASK})
+
+
 class CaughtExceptionSampler(unittest.TestCase):
     def test_traceback_message_is_scrubbed_before_emit(self):
         emitted: list[tuple[str, str]] = []

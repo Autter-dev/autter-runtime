@@ -80,6 +80,8 @@ test("e2e: captured exception attributes are redacted on the wire", async () => 
 	const { code, err } = await runChild(fixtures("e2e-redaction.mjs"), {
 		COLLECTOR_PORT: String(collectorPort),
 		AUTTER_DEBUG: "1",
+		// Resource attributes come from the environment and detectors.
+		OTEL_RESOURCE_ATTRIBUTES: "deploy.token=resattrsecret42",
 	});
 	assert.equal(code, 143);
 
@@ -105,8 +107,12 @@ test("e2e: captured exception attributes are redacted on the wire", async () => 
 		"foreigntoken123",
 		"foreignbearer12345",
 		"foreignpw1",
+		"eventnamesecret1234", // event name
+		"linkbearersecret123", // link attributes
+		"resattrsecret42", // resource attributes
 	]) {
-		assert.ok(!wire.includes(secret), `secret leaked on the wire: ${secret}`);
+		const hit = receivedBodies.find((body) => body.includes(secret));
+		assert.ok(!hit, `secret leaked on the wire: ${secret} in ${hit?.slice(0, 300)}`);
 	}
 
 	// Mask present; non-sensitive context intact.

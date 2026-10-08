@@ -33,7 +33,7 @@
 		"directory": "packages/runtime-next"
 	},
 	"scripts": {
-		"build": "tsup"
+		"build": "node ../../scripts/ensure-built.mjs runtime-node runtime-browser && tsup"
 	},
 	"dependencies": {
 		"@autter/runtime-browser": "^1.3.3",

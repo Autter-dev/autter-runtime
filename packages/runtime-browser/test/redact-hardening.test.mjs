@@ -2,10 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { captureException, captureMessage, flush, initAutterBrowser, scrubText } from "../dist/index.js";
 
-test("JWT scrubbing stays linear on long dash-joined runs", () => {
-	const started = Date.now();
-	scrubText("eyJ-".repeat(16384));
-	assert.ok(Date.now() - started < 500, `took ${Date.now() - started}ms`);
+test("scrubbing stays bounded on hostile input", () => {
+	for (const input of ["eyJ-".repeat(16384), "a@".repeat(500_000), "a.".repeat(500_000)]) {
+		const started = Date.now();
+		scrubText(input);
+		assert.ok(Date.now() - started < 500, `took ${Date.now() - started}ms`);
+	}
 });
 
 test("custom patterns ignore g/y, cut-off secrets are masked whole, hostile context never throws", async () => {

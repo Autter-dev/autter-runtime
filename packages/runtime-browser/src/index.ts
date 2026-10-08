@@ -168,7 +168,9 @@ function redactOptions(): { keys?: RegExp; values?: RegExp[] } | false | undefin
 export function scrubText(value: string): string {
 	const custom = redactOptions();
 	if (custom === false) return value;
-	let out = String(value)
+	// Capped: context values are otherwise unbounded (a 1 MB value took
+	// ~0.6 s on the main thread). Stacks are cut to 32 000 after this.
+	let out = String(value).slice(0, 32768)
 		.replace(SECRET_RE, MASK)
 		.replace(JWT_RE, "$1" + MASK)
 		.replace(HEADER_RE, "$1" + MASK)

@@ -26,6 +26,8 @@ test("operation context isolates concurrent requests and exports outcomes, steps
 		captureGlobalErrors: false,
 		autoFlush: false,
 		logging: { console: false },
+		// These collectors treat every request as a log export.
+		compatCheck: false,
 	});
 	try {
 		await Promise.all(
@@ -133,6 +135,8 @@ test("export retries retain buffered records, enforce limits and report undelive
 		captureGlobalErrors: false,
 		autoFlush: false,
 		logging: { console: false },
+		// These collectors treat every request as a log export.
+		compatCheck: false,
 	});
 	try {
 		const before = runtimeLogStats().dropped;

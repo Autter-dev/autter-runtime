@@ -31,6 +31,7 @@ export {
 } from "./lifecycle.js";
 export {
 	redactAttributes,
+	redactText,
 	type RedactOptions,
 } from "./redact.js";
 export {
@@ -91,3 +92,14 @@ export {
 	type ConsoleSinkOptions,
 	type FileSinkOptions,
 } from "./sinks.js";
+export {
+	fetchIngesterCompat,
+	evaluateCompat,
+	COMPAT_MANIFEST,
+	INGESTER_VERSION_HEADER,
+	SDK_IDENTITY,
+	type CompatIssue,
+	type IngesterCompatInfo,
+	type SdkIdentity,
+} from "./compat.js";
+export { runDoctor, type DoctorOptions, type DoctorReport } from "./doctor.js";

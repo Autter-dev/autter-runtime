@@ -14,7 +14,10 @@ Existing OTLP exporters benefit from server-side detection without an SDK
 upgrade when the ingester is 1.3.2 or later. Install
 `@autter/runtime-node`, `@autter/runtime-browser`, or `@autter/runtime-next`
 version 1.3.2 or later to use the new outcome helpers
-and browser network and timing capture in an application.
+and browser network and timing capture in an application. Ingesters older
+than 1.3.2 reject browser batches containing the new event types, so upgrade
+the ingester first. [Version compatibility](COMPATIBILITY.md) explains the
+built-in check and `doctor` command.
 
 ## Report a failed outcome without throwing
 
@@ -118,6 +121,14 @@ OTel `exception` event with `autter.handled=true` and
 `autter.sampled=true` on an always-on span. Python tracing also has material
 overhead, applies to the current and newly created threads, and should be
 enabled only for targeted diagnosis. Other languages can send the same event.
+
+The sampler scrubs each traceback (which includes `str(exc)`) for secrets
+and PII before calling `emit`, using `adapters/python/redact.py` (stdlib
+only; copy it next to `caught_exceptions.py`). Use the same module for your
+own `record_exception` calls — `redact_text(str(exc))`,
+`redact_text(traceback_text)`, `redact_attributes(context)` — and
+`configure(value_patterns=[...], key_patterns=[...])` for custom patterns.
+The ingester scrubs again server-side.
 
 ```python
 from opentelemetry import trace

@@ -13,6 +13,7 @@ import {
 	type OtlpLogRecord,
 	type RuntimeEvent,
 } from "@autter/runtime-core";
+import { noteCompatFeature, observeIngesterResponse } from "./compat.js";
 
 /**
  * Where runtime records go. The logger pipeline is
@@ -39,6 +40,8 @@ export interface RuntimeSinkContext {
 	service: string;
 	environment: string;
 	release?: string;
+	/** SDK identity for the `telemetry.distro.*` resource attributes. */
+	distro?: { name: string; version: string };
 }
 
 export interface CapturedException {
@@ -131,6 +134,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 							service: active.service,
 							environment: active.environment,
 							...(active.release ? { release: active.release } : {}),
+							...(active.distro ? { distro: active.distro } : {}),
 						},
 						batch.map((entry) => entry.record),
 					),
@@ -151,6 +155,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 								Math.max(1, Math.min(3000, deadline - Date.now())),
 							),
 						});
+						observeIngesterResponse({ status: response.status, headers: response.headers, route: "/v1/logs" });
 						if (!response.ok)
 							throw new Error(`Runtime log export failed (${response.status})`);
 						failure = undefined;
@@ -205,6 +210,9 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 			}
 			queue.push({ record, bytes });
 			queueBytes += bytes;
+			// Operation logging needs ingester >= 1.4.0 (/v1/logs + runtime_logs);
+			// the one-time compat check warns if the ingester is older.
+			noteCompatFeature("operation_logging");
 			scheduleFlush();
 		},
 		flush,

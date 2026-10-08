@@ -303,11 +303,20 @@ counters, not an analytics event store).
 Forbidden at the schema level (rejected/stripped): full URLs with query
 strings, cookies, DOM content, form values, request headers/bodies, emails.
 
-Server-side custom attributes are guarded at the source instead: the Node
-SDK masks email/token/credential-shaped values and sensitive-keyed
-attributes before export (`redactAttributes`, on by default), so OTLP spans
-never carry a stray `user.email` even though the OTLP schema itself accepts
-free-form attributes.
+Server-side telemetry is guarded at the source instead: the Node SDK masks
+secret/PII-shaped values (tokens, keys, credentials in connection strings
+and URLs, emails, card numbers) and sensitive-keyed attributes in
+attributes, exception messages, stack traces and status messages, and
+re-scrubs every span at export (`redactAttributes`, on by default). The
+browser SDK, the relay and the Python adapter apply the same patterns.
+
+Because old SDKs and plain OTel senders scrub nothing, the ingester scrubs
+again before storage and before the sink webhook (which feeds downstream
+LLM-assisted fixing): occurrence message/stack/route, span names, all
+attribute bags, and LLM-call attributes (`src/redact.ts`; extend with
+`AUTTER_REDACT_VALUE_PATTERNS` / `AUTTER_REDACT_KEY_PATTERNS`, JSON arrays
+of regex sources). Messages containing secrets therefore fingerprint on
+their scrubbed form.
 
 ## Sink webhook (v1)
 

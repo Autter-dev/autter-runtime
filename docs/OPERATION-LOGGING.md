@@ -3,6 +3,9 @@
 Operation logging starts in `@autter/runtime-node` and `@autter/runtime-next`
 version **1.4.0**. Update the ingester to **1.4.0** before upgrading SDKs: it creates
 `runtime_logs` through migration `0011-runtime-logs` and accepts `/v1/logs`.
+You don't need to check this by hand. The SDK warns once at runtime when your
+ingester is too old, and `npx @autter/runtime-node doctor` reports every
+mismatch. See [Version compatibility](COMPATIBILITY.md).
 
 **1.5.0** (ingester 1.5.0 first) adds request summaries, `runtimeContext`, inline
 messages, `kind` on every summary, coded errors, `fork`/carriers, the AI rollup,

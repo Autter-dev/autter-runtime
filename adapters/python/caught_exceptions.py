@@ -4,17 +4,25 @@ The hook sees every Python exception event, including deliberately handled
 ones. It has substantial overhead and must be explicitly enabled. Pass an
 ``emit(name, stack)`` callback that records a standard OTel exception event
 with ``autter.handled=true`` and ``autter.sampled=true`` on an always-on span.
+
+The formatted traceback includes ``str(exc)``, so it is scrubbed for secrets
+and PII (connection strings, tokens, API keys, emails, …) with
+:func:`redact.redact_text` before ``emit`` sees it.
 """
 
 from __future__ import annotations
 
 import random
-import re
 import sys
 import threading
 import time
 import traceback
 from collections.abc import Callable
+
+try:  # imported as part of a package
+    from .redact import redact_text
+except ImportError:  # copied next to the app as a plain module
+    from redact import redact_text
 
 
 def install_caught_sampler(
@@ -43,8 +51,7 @@ def install_caught_sampler(
             return hook
         seen.add(identity)
         sent += 1
-        stack = "".join(traceback.format_exception(exc_type, exc_value, tb, limit=8))[:8000]
-        stack = re.sub(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[redacted]", stack, flags=re.I)
+        stack = redact_text("".join(traceback.format_exception(exc_type, exc_value, tb, limit=8))[:8000])
         try:
             emit(exc_type.__name__, stack)
         except Exception:

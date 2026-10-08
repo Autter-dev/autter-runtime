@@ -123,7 +123,8 @@ page to read it.
 | `setUser(id)` | **Opaque id only** — never an email |
 | `setContext(ctx)` | Attached to subsequent events |
 | `flush()` | Force-send the queue (also runs on page hide/unload) |
-| `redactContext(ctx)` | Mask obvious PII in a context bag (applied to every event automatically) |
+| `redactContext(ctx)` | Mask secrets/PII in a context bag, nested (applied to every event automatically) |
+| `scrubText(text)` | Mask secrets/PII inside a string (applied to every message, stack and name automatically) |
 
 ## Batching & delivery
 
@@ -143,9 +144,22 @@ query-stripped. For CSP blocks, the directive, blocked resource origin, script
 path, and a short policy hash are retained. Of response headers, only
 `x-request-id` is read, and only on failed (5xx) requests.
 
-Custom `context` is free-form, so it is scrubbed before send: values under
-sensitive-looking keys (`email`, `password`, `token`, `secret`, `auth`,
-`cookie`, `api_key`, `card_number`, …) are replaced with `[redacted]`, and
-email-shaped substrings are masked inside ordinary string values. This
-mirrors the server SDK's `redactAttributes`; the relay and ingester apply
-the same rules as defense-in-depth.
+Messages, stack traces and custom `context` (at any depth) are scrubbed
+before send: values under sensitive-looking keys (`email`, `password`,
+`token`, `secret`, `auth`, `cookie`, `session`, `api_key`, `card_number`, …)
+are replaced with `[redacted]`, and secrets inside strings — JWTs,
+`Bearer`/`Basic` credentials, `Cookie:`/`Authorization:` text, connection
+strings with credentials, common API keys, `?token=`/`password=`
+assignments, emails, card numbers — are masked in place. This mirrors the
+server SDK's `redactText`/`redactAttributes`; the relay and ingester apply
+the full server-side rule set again as defense-in-depth.
+
+Add your own patterns (or opt out, not recommended):
+
+```ts
+initAutterBrowser({
+  ...,
+  redact: { keys: /^internal_ref$/, values: [/ORD-\d{5}/g] },
+  // redact: false,
+});
+```

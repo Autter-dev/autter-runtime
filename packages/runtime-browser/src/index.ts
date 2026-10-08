@@ -5,13 +5,15 @@
  * - zero runtime dependencies, < 5 KB gzipped (CI-enforced)
  * - no OTel SDK, no console patching, no DOM recording, no offline storage
  * - privacy by construction: pathname-only routes, no cookies / form values /
- *   request bodies; query strings stripped everywhere; custom context is
- *   scrubbed for obvious PII (emails, sensitive keys) before send
+ *   request bodies; query strings stripped everywhere; messages, stacks and
+ *   (nested) custom context are scrubbed for secrets and PII before send
  *
  * Payload contract: `/v1/browser` version 1 of the Autter otlp-ingester,
  * normally reached through the customer's same-origin relay
  * (`createBrowserRelayHandler` in @autter/runtime-node).
  */
+
+import { version as SDK_VERSION } from "../package.json";
 
 export interface AutterBrowserOptions {
 	/**
@@ -40,6 +42,14 @@ export interface AutterBrowserOptions {
 	captureTimings?: boolean;
 	/** Attach the last safe click or form action to failures (default true). */
 	captureActions?: boolean;
+	/**
+	 * Secret/PII scrubbing of messages, stacks, and context (on by default).
+	 * Add your own patterns with `{ keys, values }` — `keys` masks whole
+	 * context values whose key matches, `values` (use the `g` flag) masks
+	 * matching substrings anywhere. `false` disables (not recommended; the
+	 * relay and ingester still scrub).
+	 */
+	redact?: false | { keys?: RegExp; values?: RegExp[] };
 }
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
@@ -117,29 +127,75 @@ function stripQuery(value: string | undefined): string | undefined {
 	return value ? value.split("?")[0] : undefined;
 }
 
-// Mini redaction — the browser twin of redactAttributes() in
-// @autter/runtime-node. Custom context is free-form, so values under
-// sensitive-looking keys and email-shaped strings are masked before
-// anything leaves the page. Deliberately tiny: this bundle is size-capped.
+// Mini redaction — the browser twin of redactText()/redactAttributes() in
+// @autter/runtime-node (parity checked by test-vectors/redaction.json).
+// Deliberately compact: this bundle is size-capped.
 const SENSITIVE_KEY_RE =
-	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
-// Bounded quantifiers keep this linear (lookbehind would break older
-// Safari); scrub() also caps the input it scans.
+	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|private[-_.]?key|(^|[._-])session$|^(j|php)?sess(ion)?id$|^sid$|(^|[^a-z])ssn($|[^a-z])|cvv|card([-_. ]?(number|num|no))?$/i;
 const EMAIL_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
+// Vendor-prefixed keys, JWTs, Bearer/Basic credentials. Server-only shapes
+// (PEM blocks, npm/GitLab/SendGrid tokens) are left to the relay/ingester.
+const SECRET_RE =
+	/\b(sk-[\w-]{20,}|[sr]k_(live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[\w-]{30,}|(AKIA|ASIA)[0-9A-Z]{16}|eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}|bearer\s+[\w.~+/=-]{10,}|basic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2})/gi;
+const HEADER_RE =
+	/((^|[^\w-])(proxy-)?(authorization|(set-)?cookie)["']?\s*[:=]\s*["']?)[^"'\r\n]+/gim;
+const ASSIGN_RE =
+	/(password|passwd|pwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|signature|session[_-]?id|sessionid|ssn)(["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&,;)}\]\[<>]+)/gi;
+const URL_CRED_RE =
+	/\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/:@"'<>]*:[^\s/"'<>]*|[^\s/:@"'<>]{16,})@/gi;
+const CARD_RE = /\b(4\d{3}|5[1-5]\d{2}|2[2-7]\d{2}|3[47]\d{2}|6(011|5\d{2}))([ -]?\d){9,15}\b/g;
 const MASK = "[redacted]";
-const scrub = (value: string) => value.slice(0, 8192).replace(EMAIL_RE, MASK);
+
+function luhn(value: string): boolean {
+	const digits = value.replace(/\D/g, "");
+	let sum = 0;
+	for (let i = 0; i < digits.length; i++) {
+		let d = +digits[digits.length - 1 - i]!;
+		if (i % 2) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+		sum += d;
+	}
+	return sum % 10 === 0;
+}
+
+function redactOptions(): { keys?: RegExp; values?: RegExp[] } | false | undefined {
+	return opts ? opts.redact : undefined;
+}
+
+/** Scrub secrets/PII embedded in one string (message, stack, URL, value). */
+export function scrubText(value: string): string {
+	const custom = redactOptions();
+	if (custom === false) return value;
+	let out = String(value)
+		.replace(SECRET_RE, MASK)
+		.replace(HEADER_RE, "$1" + MASK)
+		.replace(ASSIGN_RE, (_m, key: string, sep: string, val: string) =>
+			key + sep + (/^["']/.test(val) ? val[0] + MASK + val[0] : MASK))
+		.replace(URL_CRED_RE, "$1" + MASK + "@")
+		.replace(CARD_RE, (m) => (luhn(m) ? MASK : m))
+		.replace(EMAIL_RE, MASK);
+	for (const re of (custom && custom.values) || []) out = out.replace(re, MASK);
+	return out;
+}
+
+function scrubValue(value: unknown, depth: number): unknown {
+	if (typeof value === "string") return scrubText(value);
+	if (!value || typeof value !== "object") return value;
+	if (depth > 5) return MASK;
+	if (Array.isArray(value)) return value.slice(0, 50).map((item) => scrubValue(item, depth + 1));
+	return redactContext(value as Record<string, unknown>, depth + 1);
+}
 
 export function redactContext(
 	context: Record<string, unknown>,
+	depth = 0,
 ): Record<string, unknown> {
+	const custom = redactOptions();
+	if (custom === false) return context;
 	const out: Record<string, unknown> = {};
 	for (const key in context) {
-		const value = context[key];
-		out[key] = SENSITIVE_KEY_RE.test(key)
+		out[key] = SENSITIVE_KEY_RE.test(key) || (custom && custom.keys && custom.keys.test(key))
 			? MASK
-			: typeof value === "string"
-				? scrub(value)
-				: value;
+			: scrubValue(context[key], depth);
 	}
 	return out;
 }
@@ -398,6 +454,9 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	}
 	attachClient(event);
 	// Scrub before beforeSend so the last-chance hook sees the final form.
+	event.message = scrubText(event.message);
+	if (event.stack) event.stack = scrubText(event.stack);
+	if (event.name) event.name = scrubText(event.name);
 	if (event.context) event.context = redactContext(event.context);
 	if (opts.beforeSend) {
 		const mapped = opts.beforeSend(event);
@@ -450,6 +509,9 @@ export function flush(): void {
 		service: opts.service,
 		environment: opts.environment || "production",
 		...(opts.release ? { release: opts.release } : {}),
+		// SDK version: the ingester records it so version mismatches are
+		// visible (and checked server-side by the relay). Ignored by older ingesters.
+		sdk: SDK_VERSION,
 		events,
 	});
 	// Direct mode: key as query param (sendBeacon can't set headers) and
@@ -520,8 +582,8 @@ export function captureMessage(
 
 /** Report an application outcome that failed without throwing. Use a stable name. */
 export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
-	const event = baseEvent("outcome", scrub(String(message)));
-	event.name = scrub(String(name)).slice(0, 200);
+	const event = baseEvent("outcome", message);
+	event.name = String(name).slice(0, 200);
 	event.errorType = "OutcomeFailure";
 	event.severity = "error";
 	if (context) event.context = { ...(event.context || {}), ...context };

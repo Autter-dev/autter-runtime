@@ -5,16 +5,17 @@ profile and source-map uploads use the server key.
 
 | Credential | Where it lives | Can |
 | --- | --- | --- |
-| **Server key** `autter_rt_…` | backend env vars only | send OTLP traces/metrics + relay browser events |
+| **Server key** `autter_rt_…` | backend env vars / edge secret bindings only | send OTLP traces/metrics/logs + relay browser events |
 | **Client key** `autter_rtc_…` | frontend bundles (publishable) | send browser events only, origin-restricted |
 
 | Endpoint | Format |
 | --- | --- |
-| `POST /v1/traces`, `POST /v1/metrics` | OTLP/HTTP — **protobuf or JSON**, gzip ok |
+| `POST /v1/traces`, `POST /v1/metrics`, `POST /v1/logs` | OTLP/HTTP — **protobuf or JSON**, gzip ok |
 | `POST /v1/browser` | compact JSON (`@autter/runtime-browser` payload v1) |
 | `POST /v1/profiles` | symbolized pprof (server key only) |
 | `POST /v1/sourcemaps` | release-keyed source map JSON (server key only) |
 | `POST /v1/platform-events` | ECS/Kubernetes OOM and restart JSON (server key only) |
+| `GET /v1/compat` | ingester version, schema level and supported features (public; see [Version compatibility](COMPATIBILITY.md)) |
 
 Any language with an OpenTelemetry SDK can send server telemetry — point
 its OTLP/HTTP exporter at the ingester and add the key as a header.
@@ -74,10 +75,43 @@ initAutterServer({
 Relay for your frontend: `app.post("/api/autter-runtime", createBrowserRelayHandler({ apiKey }))`.
 ESM-only apps need OTel's loader hook (see the package README).
 
+Request summaries and coded errors (1.5.0, ingester 1.5.0 first):
+
+| Framework | Wiring |
+| --- | --- |
+| Express / Connect | `app.use(autterRequests())` early, `app.use(autterErrorResponse())` last |
+| Fastify | `app.register(autterFastify)`; use `toClientError(err, runtimeContext.requestId)` in `setErrorHandler` |
+| Koa / Hono on Node / custom fetch handlers | `withRuntimeRequest(handler)` around the fetch-style handler, or `withRuntimeOperation` per request |
+| NestJS (Express adapter) | `app.use(autterRequests())` in `main.ts`; an exception filter calling `toClientError` |
+
+App already runs its own OpenTelemetry SDK? Use `initAutterLogging` instead of
+`initAutterServer` — requests, operations and coded errors without a second
+NodeSDK. Details: [Requests, coded errors and background work](REQUESTS-AND-ERRORS.md).
+
+## Edge runtimes (Cloudflare Workers, Vercel Edge, Deno, Bun)
+
+```bash
+npm install @autter/runtime-edge
+```
+
+```ts
+import { withAutter } from "@autter/runtime-edge";
+export default withAutter(
+  (env) => ({ apiKey: env.AUTTER_RUNTIME_KEY, service: "edge-api" }),
+  async (request, env, ctx, rt) => new Response("ok"),
+);
+```
+
+Zero dependencies; request summaries, request ids and coded errors over
+`/v1/logs`, delivered through `ctx.waitUntil`. Needs a **server** key from a
+secret binding. Next.js `middleware.ts`: import from `@autter/runtime-next/edge`.
+
 ## Next.js
 
 `npm install @autter/runtime-next` — three files (instrumentation.ts, relay
-route, client init + boundary). See the package README.
+route, client init + boundary). See the package README. Route handlers:
+`export const POST = withRuntimeRequest(handler)` (flush wired to `after()`);
+`middleware.ts`: `@autter/runtime-next/edge`.
 
 ## Go
 
@@ -126,6 +160,15 @@ OTEL_TRACES_SAMPLER_ARG=0.01
 
 Errors surface as issues when spans carry `exception` events (every SDK's
 `record_exception` / `RecordError` does this) or `ERROR` status.
+
+**Coded errors** (any language): add `autter.error.code` (matching
+`^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$`, ≤ 80 chars) and optionally
+`autter.error.why`, `autter.error.fix`, `autter.error.link` and
+`autter.error.expected` (boolean) to the exception event or the span. Coded
+errors group by service + code across messages and sources; `expected` errors
+never open incidents. Request summaries from other languages are OTLP log
+records with `autter.event.type=operation`, `autter.operation.kind=request`,
+`autter.request.id`, `http.route` and `http.response.status_code`.
 
 **Warnings** (any language): add an `autter.severity` attribute to the
 exception event — `"fatal" | "error" | "warning" | "info"` (default

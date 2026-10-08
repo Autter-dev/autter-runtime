@@ -30,7 +30,7 @@ you from zero to seeing data in ClickHouse.
 | --- | --- | --- |
 | Looks like | `autter_rt_…` | `autter_rtc_…` |
 | Secrecy | **secret** — env vars only, never in a browser bundle | **publishable** — safe to ship in frontend JS |
-| Can send | OTLP traces + metrics, browser events | browser events only (`/v1/browser`) |
+| Can send | OTLP traces + metrics + logs, browser events | browser events only (`/v1/browser`) |
 | Extra protection | — | per-key origin allow-list, tighter rate limit |
 
 **Two ways to send browser events:**
@@ -51,6 +51,8 @@ you from zero to seeing data in ClickHouse.
 | Handled errors | `captureException(err)` | `captureException(err)` |
 | Usage | session pings + `trackEvent()` | request counts/durations per route (automatic) |
 | Traces | — (by design; no OTel in the browser) | ~1% sampled, plus **every erroring trace kept in full** |
+| Request summaries | request id on failed fetch/XHR (links to the server request) | one record per request with route, status, outcome, context, inline messages — **always kept** (`autterRequests`, 1.5.0) |
+| Coded errors | `code`/`why`/`fix` duck-typed by `captureException` | `defineRuntimeErrors` / any error with `code` — **one issue per code** |
 | LLM usage & cost | — | `withLlmCall()` / Vercel AI SDK telemetry / GenAI semconv — always 100% (model, tokens, cost) |
 
 **What is never sent:** cookies, DOM content, form values, request/response
@@ -68,8 +70,16 @@ writes ClickHouse. For a local try-out:
 ```bash
 git clone https://github.com/Autter-dev/autter-runtime
 cd autter-runtime
-docker compose up   # ClickHouse + ingester on :4318, key "dev-key"
+export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
+(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
+docker compose up   # ClickHouse + ingester on :4318
 ```
+
+The generated key is kept in your shell and the Compose mapping is stored in
+the git-ignored `.env` file. Use the same key in your local SDK configuration;
+never commit `.env` or paste the key into tracked files. If you skip key setup,
+the ingester starts without an authentication source and rejects ingest
+requests with HTTP 401.
 
 > **That's all the clone is for.** It runs the ingester — you never add
 > code to this checkout. Every step from here on (installing packages,
@@ -145,6 +155,37 @@ ESM-only app? Use `--import` plus OTel's loader hook (see the
 [package README](../packages/runtime-node)). Express route timings can be
 enriched with `@opentelemetry/instrumentation-express` via the
 `instrumentations` option.
+
+### Request summaries and coded errors (1.5.0)
+
+Requires ingester 1.5.0. One record per request, always kept, with the request
+id echoed to the client:
+
+```js
+const { autterRequests, autterErrorResponse, defineRuntimeErrors, runtimeContext } =
+  require("@autter/runtime-node");
+
+const billingErrors = defineRuntimeErrors("billing", {
+  declined: { status: 402, message: "Payment declined", expected: true,
+              fix: "Ask the customer for another card" },
+});
+
+app.use(autterRequests({ ignore: ["/healthz"] }));   // before your routes
+app.post("/checkout", async (req, res) => {
+  runtimeContext.set({ cart: { items: req.body.items.length } });
+  if (!(await charge(req.body))) throw billingErrors.declined();  // Express 5; next(err) on 4
+  res.json({ ok: true });
+});
+app.use(autterErrorResponse());                       // after your routes
+```
+
+Errors with the same code become one issue; `expected` ones are recorded but
+never open incidents. Already running your own OpenTelemetry SDK? Use
+`initAutterLogging` instead of `initAutterServer`. In development, records are
+also written to `.autter/runtime/*.jsonl` (add `.autter/` to `.gitignore`).
+Everything else — `runtimeContext`, background work and queues, AI usage per
+request, testing helpers, edge runtimes:
+[Requests, coded errors and background work](REQUESTS-AND-ERRORS.md).
 
 ### Track LLM usage & cost
 
@@ -272,7 +313,12 @@ Three files and you have server tracing, browser tracking, the relay, and
 the error boundary — see the
 [`@autter/runtime-next` README](../packages/runtime-next) for the exact
 snippets (`instrumentation.ts`, `app/api/autter-runtime/route.ts`, and a
-client component).
+client component). Wrap route handlers in `withRuntimeRequest` for request
+summaries; `middleware.ts` uses `@autter/runtime-next/edge`.
+
+Cloudflare Workers, Vercel Edge, Deno or Bun without Next.js:
+`npm install @autter/runtime-edge` and wrap the fetch handler in `withAutter`
+(see [the package README](../packages/runtime-edge)).
 
 ## 6. Other languages
 
@@ -315,6 +361,12 @@ FROM autter_runtime.runtime_metrics_1m
 WHERE bucket_at > now() - INTERVAL 1 HOUR
 GROUP BY service, route;
 
+-- Request summaries (runtime-node 1.5.0 + autterRequests)
+SELECT occurred_at, operation, route, status_code, outcome, request_id, error_code
+FROM autter_runtime.runtime_logs
+WHERE kind = 'request'
+ORDER BY occurred_at DESC LIMIT 10;
+
 -- LLM calls (after emitLlmSelftestTrace() or a real traced model call)
 SELECT service, provider, model, input_tokens, output_tokens,
        cost_usd, cost_source, status, started_at
@@ -332,6 +384,9 @@ clickhouse-client --password dev`.
 - [ ] Client keys have `allowedOrigins` set to your exact app origins.
 - [ ] `release` is wired to your git SHA in **both** frontend and backend —
       it's what powers regression detection ("broke in release X").
+- [ ] Request summaries are always kept: `ignore` health checks and metrics
+      scrapes in `autterRequests`, and size `LOG_TTL_DAYS` at the ingester.
+- [ ] Error codes are stable and low-cardinality — never ids or user data.
 - [ ] Keep trace sampling at ~1% (`traceSampleRate`) — errors are always
       captured regardless, and the full trace of an erroring request is
       retained (`retainTracesOnError`, on by default), so cheap sampling

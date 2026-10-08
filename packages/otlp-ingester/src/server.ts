@@ -9,9 +9,14 @@ import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
 import {
 	deriveFields,
-	fingerprintOccurrence,
+	occurrenceFingerprint,
 	occurrenceIdFor,
 } from "./fingerprint.js";
+import {
+	logPromotionCandidates,
+	promotionLookups,
+	promotionRollups,
+} from "./log-promotion.js";
 import {
 	browserPayloadSchema,
 	normalizeBrowserPayload,
@@ -28,6 +33,20 @@ import { decodeProfile } from "./profiles.js";
 import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
 import { validateSourceMap } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
+import { configureRedaction, scrubOccurrence } from "./redact.js";
+import {
+	buildCompatReport,
+	evaluateCompat,
+	INGESTER_VERSION_HEADER,
+} from "./compat.js";
+import { MIGRATIONS } from "./migrations.js";
+import {
+	BROWSER_SDK_NAME,
+	ingesterVersion,
+	SdkVersionTracker,
+	sdkSightingsFromOtlp,
+	type OtlpResourceRequest,
+} from "./sdk-versions.js";
 import type {
 	IngestContext,
 	RuntimeOccurrence,
@@ -39,9 +58,17 @@ export interface IngesterApp {
 	store: ClickHouseStore;
 	/** Present when AUTTER_SINK_URL is configured. */
 	sink: SinkForwarder | null;
+	/** Record this ingester's version + schema level in ClickHouse (for the
+	 * Autter dashboard). Called after the boot schema warm-up; throttled. */
+	reportIngesterInfo: () => Promise<void>;
 }
 
+/** Re-report the ingester version at most this often (keeps the row inside
+ * its TTL for long-running ingesters). */
+const INGESTER_INFO_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 export function createIngesterApp(config: IngesterConfig): IngesterApp {
+	configureRedaction(config);
 	const store = new ClickHouseStore(config);
 	// Fingerprinted occurrences feed the consumer's issue grouping, metric
 	// points feed the request/error-rate rollups, LLM calls feed spend
@@ -50,9 +77,52 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	const keys = new KeyResolver(config);
 	const serverRateLimiter = new RateLimiter(config.rateLimitPerMinute);
 	const clientRateLimiter = new RateLimiter(config.clientRateLimitPerMinute);
+	// ClickHouse dedupe lookups made by /v1/logs promotion, per tenant. Far
+	// tighter than the request limit: each lookup is a query, not an insert.
+	const promotionLookupLimiter = new RateLimiter(config.promotionLookupsPerMinute ?? 30);
+	const version = ingesterVersion();
+	const sdkVersions = new SdkVersionTracker((ctx, rows) => store.insertSdkVersions(ctx, rows));
+	const allMigrationIds = MIGRATIONS.map((migration) => migration.id);
+	const compatReport = () => {
+		const schema = store.schemaStatus();
+		return buildCompatReport({
+			version,
+			schemaStatus: schema.status,
+			applied: schema.applied,
+			allMigrations: allMigrationIds,
+		});
+	};
+	let lastInfoReport = 0;
+	async function reportIngesterInfo(): Promise<void> {
+		if (!store.configured) return;
+		if (Date.now() - lastInfoReport < INGESTER_INFO_INTERVAL_MS) return;
+		lastInfoReport = Date.now();
+		try {
+			// Only reached from boot and authenticated ingest, which run the
+			// (memoized) schema bootstrap anyway.
+			await store.ensureSchema();
+			const report = compatReport();
+			await store.insertIngesterInfo({ version, schemaLevel: report.schema.level, report });
+		} catch (err) {
+			// Retry in a minute, not on every request.
+			lastInfoReport = Date.now() - INGESTER_INFO_INTERVAL_MS + 60_000;
+			console.warn("ingester info report failed:", (err as Error)?.message ?? err);
+		}
+	}
+	/** Fire-and-forget after a successful ingest: never delays or fails it. */
+	function recordSdks(ctx: IngestContext, request: unknown): void {
+		void sdkVersions.observe(ctx, sdkSightingsFromOtlp(request as OtlpResourceRequest));
+		void reportIngesterInfo();
+	}
 
 	const app = express();
 	app.disable("x-powered-by");
+	// Every response names the ingester version, so SDKs (and the browser
+	// relay) learn it for free from responses they already receive.
+	app.use((_req, res, next) => {
+		res.setHeader(INGESTER_VERSION_HEADER, version);
+		next();
+	});
 	app.use(express.raw({ limit: "1mb", type: ["application/x-pprof"] }));
 	app.use("/v1/sourcemaps", express.json({ limit: "5mb" }));
 	app.use(
@@ -90,6 +160,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			"access-control-allow-headers",
 			"content-type, authorization, x-autter-key",
 		);
+		res.setHeader("access-control-expose-headers", INGESTER_VERSION_HEADER);
 		res.setHeader("access-control-max-age", "86400");
 		if (req.method === "OPTIONS") {
 			res.status(204).end();
@@ -112,6 +183,39 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		} catch {
 			res.status(503).json({ ok: false, clickhouse: "down", ...sinkStats });
 		}
+	});
+
+	/**
+	 * Version compatibility (public, like /healthz; no tenant data): this
+	 * ingester's version, its ClickHouse schema level, and every feature in
+	 * the compat manifest with whether it is available here. Optional
+	 * `?features=a,b&sdk=<name>@<version>` adds the evaluated `issues`.
+	 * Never triggers schema DDL.
+	 */
+	app.get("/v1/compat", (req, res) => {
+		const report = compatReport();
+		const features =
+			typeof req.query.features === "string"
+				? req.query.features.split(",").map((f) => f.trim()).filter(Boolean).slice(0, 50)
+				: [];
+		const sdkParam = typeof req.query.sdk === "string" ? req.query.sdk.slice(0, 120) : "";
+		const at = sdkParam.lastIndexOf("@");
+		const sdk = at > 0 ? { name: sdkParam.slice(0, at), version: sdkParam.slice(at + 1) } : null;
+		const body =
+			features.length || sdk
+				? {
+						...report,
+						issues: evaluateCompat({
+							features: features.length
+								? features
+								: report.features.filter((f) => sdk && f.sdks[sdk.name]).map((f) => f.id),
+							ingester: { version, schema: { status: report.schema.status, applied: report.schema.applied } },
+							sdk,
+						}),
+					}
+				: report;
+		res.setHeader("cache-control", "no-store");
+		res.status(200).json(body);
 	});
 
 	/** Auth + scope + rate limit; returns null (response sent) on failure. */
@@ -175,15 +279,56 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		ctx: IngestContext,
 		inputs: RuntimeOccurrenceInput[],
 	): RuntimeOccurrence[] {
-		return inputs.map((input, index) => {
-			const fingerprint = fingerprintOccurrence(input);
+		return inputs.map((raw, index) => {
+			// Second line of defence, before fingerprinting, storage, and the
+			// sink (which feeds LLM fix generation): scrub secrets from the
+			// free-text fields old SDKs and third-party OTLP senders pass
+			// through verbatim. Attributes were already sanitised by the
+			// normalisers (sanitizeRuntimeContext).
+			const input = scrubOccurrence(raw);
+			const { fingerprint, scheme } = occurrenceFingerprint(input);
 			return {
 				...input,
 				occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
 				fingerprint,
+				fingerprintScheme: scheme,
 				...deriveFields(input),
 			};
 		});
+	}
+
+	/** Fingerprint log-promotion candidates and drop the ones whose trace
+	 * already produced an occurrence (in this batch, or within ±60 s). Ids
+	 * are assigned BEFORE the lookup so they stay stable across retries
+	 * whatever the lookup returns. */
+	async function promoteLogs(
+		ctx: IngestContext,
+		logs: ReturnType<typeof normalizeLogs>,
+	): Promise<RuntimeOccurrence[]> {
+		const candidates = logPromotionCandidates(logs);
+		if (candidates.length === 0) return [];
+		const fingerprinted = fingerprintAll(ctx, candidates);
+		const seen = new Set<string>();
+		const ownIds = fingerprinted.map((o) => o.occurrenceId);
+		for (const lookup of promotionLookups(candidates)) {
+			if (!promotionLookupLimiter.allow(`${ctx.orgId}:${ctx.repositoryId}`)) break;
+			try {
+				const found = await store.recentOccurrenceTraceIds(
+					ctx,
+					lookup.traceIds,
+					lookup.from,
+					lookup.to,
+					ownIds,
+				);
+				for (const traceId of found) seen.add(traceId);
+			} catch (err) {
+				console.warn(
+					"log promotion dedupe lookup failed — promoting without it:",
+					err instanceof Error ? err.message : err,
+				);
+			}
+		}
+		return fingerprinted.filter((o) => !o.traceId || !seen.has(o.traceId));
 	}
 
 	function storageError(res: Response, err: unknown): void {
@@ -289,6 +434,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		sink?.enqueue(ctx, fingerprinted, metricPoints, llmCalls);
+		recordSdks(ctx, request);
 		otlpSuccess(req, res);
 	});
 
@@ -296,12 +442,28 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
 		let logs;
-		try { logs = normalizeLogs(req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest); }
+		let logsRequest: OtlpLogsRequest;
+		try {
+			logsRequest = req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest;
+			logs = normalizeLogs(logsRequest);
+		}
 		catch { res.status(400).json({ error: "invalid OTLP logs payload" }); return; }
-		try { await store.insertLogs(ctx, logs); }
+		// Logs are diagnostic evidence; exceptions and failed outcomes normally
+		// reach grouping through the trace path. The exception: logger-only /
+		// edge SDKs mark span-less error records `autter.capture.mode = "log"`,
+		// and those are promoted to occurrences here — see log-promotion.ts.
+		const promoted = await promoteLogs(ctx, logs);
+		const metricPoints = promotionRollups(promoted);
+		try {
+			await Promise.all([
+				store.insertLogs(ctx, logs),
+				store.insertOccurrences(ctx, promoted),
+				store.insertMetricPoints(ctx, metricPoints),
+			]);
+		}
 		catch (err) { storageError(res, err); return; }
-		// Logs are diagnostic evidence. Exceptions and failed outcomes use the trace sink,
-		// so one operation does not create duplicate issues through two export paths.
+		sink?.enqueue(ctx, promoted, metricPoints);
+		recordSdks(ctx, logsRequest);
 		otlpSuccess(req, res);
 	});
 
@@ -330,6 +492,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		sink?.enqueue(ctx, [], metricPoints);
+		recordSdks(ctx, request);
 		otlpSuccess(req, res);
 	});
 
@@ -366,6 +529,16 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		sink?.enqueue(ctx, fingerprinted, metricPoints);
+		if (parsed.data.sdk) {
+			void sdkVersions.observe(ctx, [{
+				service: parsed.data.service,
+				environment: parsed.data.environment,
+				sdkName: BROWSER_SDK_NAME,
+				sdkVersion: parsed.data.sdk,
+				sdkLanguage: "webjs",
+			}]);
+		}
+		void reportIngesterInfo();
 		res.status(202).json({ accepted: fingerprinted.length });
 	});
 
@@ -391,5 +564,5 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		},
 	);
 
-	return { app, store, sink };
+	return { app, store, sink, reportIngesterInfo };
 }

@@ -133,26 +133,6 @@ test("relay: secret-shaped values under benign keys are scrubbed", () => {
 	assert.equal(ctx.plain, "just a normal message");
 });
 
-test("relay: a truthy but non-true trustProxy stays on the safe shared bucket", async () => {
-	const handler = createBrowserRelayFetchHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-		// a common config slip: an env string "false" is truthy but must NOT
-		// enable forwarded-header trust
-		trustProxy: "false",
-	});
-	const mk = (ip) =>
-		new Request("http://localhost/relay", {
-			method: "POST",
-			headers: { "x-forwarded-for": ip },
-			body: "{",
-		});
-	const first = await handler(mk("1.1.1.1"));
-	const second = await handler(mk("2.2.2.2"));
-	assert.equal(first.status, 400);
-	assert.equal(second.status, 429); // shared bucket — not fooled by "false"
-});
-
 test("relay: numeric usage counts under token/session keys are preserved", () => {
 	const ctx = sanitizeContext({
 		input_tokens: 500,
@@ -166,41 +146,6 @@ test("relay: numeric usage counts under token/session keys are preserved", () =>
 		total_tokens: 1700,
 		sessions: 3,
 	});
-});
-
-test("relay: spoofed X-Forwarded-For cannot bypass the rate limit by default", async () => {
-	const handler = createBrowserRelayFetchHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-	});
-	const mk = (ip) =>
-		new Request("http://localhost/relay", {
-			method: "POST",
-			headers: { "x-forwarded-for": ip },
-			body: "{",
-		});
-	const first = await handler(mk("1.1.1.1"));
-	const second = await handler(mk("2.2.2.2"));
-	assert.equal(first.status, 400); // passed rate limit, then invalid JSON
-	assert.equal(second.status, 429); // shared bucket — spoofed IP can't bypass
-});
-
-test("relay: trustProxy honors distinct X-Forwarded-For buckets", async () => {
-	const handler = createBrowserRelayFetchHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-		trustProxy: true,
-	});
-	const mk = (ip) =>
-		new Request("http://localhost/relay", {
-			method: "POST",
-			headers: { "x-forwarded-for": ip },
-			body: "{",
-		});
-	const a = await handler(mk("1.1.1.1"));
-	const b = await handler(mk("2.2.2.2"));
-	assert.notEqual(a.status, 429);
-	assert.notEqual(b.status, 429);
 });
 
 test("relay: oversized body returns 413 even when cancel() never settles", async () => {

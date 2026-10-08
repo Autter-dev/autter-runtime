@@ -5,13 +5,15 @@
  * - zero runtime dependencies, < 5 KB gzipped (CI-enforced)
  * - no OTel SDK, no console patching, no DOM recording, no offline storage
  * - privacy by construction: pathname-only routes, no cookies / form values /
- *   request bodies; query strings stripped everywhere; custom context is
- *   scrubbed for obvious PII (emails, sensitive keys) before send
+ *   request bodies; query strings stripped everywhere; messages, stacks and
+ *   (nested) custom context are scrubbed for secrets and PII before send
  *
  * Payload contract: `/v1/browser` version 1 of the Autter otlp-ingester,
  * normally reached through the customer's same-origin relay
  * (`createBrowserRelayHandler` in @autter/runtime-node).
  */
+
+import { version as SDK_VERSION } from "../package.json";
 
 export interface AutterBrowserOptions {
 	/**
@@ -32,7 +34,7 @@ export interface AutterBrowserOptions {
 	release?: string;
 	/** Send a session_start ping on init (default true). */
 	sessionTracking?: boolean;
-	/** Last-chance hook: mutate or drop (return null) an event before send. */
+	/** Last-chance hook: mutate or drop (return null) an event before send. Throwing drops the event. */
 	beforeSend?: (event: BrowserEvent) => BrowserEvent | null;
 	/** Observe failed fetch and XHR requests and 5xx responses (default true). */
 	captureNetworkFailures?: boolean;
@@ -40,6 +42,14 @@ export interface AutterBrowserOptions {
 	captureTimings?: boolean;
 	/** Attach the last safe click or form action to failures (default true). */
 	captureActions?: boolean;
+	/**
+	 * Secret/PII scrubbing of messages, stacks, and context (on by default).
+	 * Add your own patterns with `{ keys, values }` — `keys` masks whole
+	 * context values whose key matches, `values` (use the `g` flag) masks
+	 * matching substrings anywhere. `false` disables (not recommended; the
+	 * relay and ingester still scrub).
+	 */
+	redact?: false | { keys?: RegExp; values?: RegExp[] };
 }
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
@@ -117,28 +127,171 @@ function stripQuery(value: string | undefined): string | undefined {
 	return value ? value.split("?")[0] : undefined;
 }
 
-// Mini redaction — the browser twin of redactAttributes() in
-// @autter/runtime-node. Custom context is free-form, so values under
-// sensitive-looking keys and email-shaped strings are masked before
-// anything leaves the page. Deliberately tiny: this bundle is size-capped.
+// Mini redaction — the browser twin of redactText()/redactAttributes() in
+// @autter/runtime-node (parity checked by test-vectors/redaction.json).
+// Deliberately compact: this bundle is size-capped.
 const SENSITIVE_KEY_RE =
-	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
-const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|private[-_.]?key|(^|[._-])session$|^(j|php)?sess(ion)?id$|^sid$|(^|[^a-z])ssn($|[^a-z])|cvv|(^|[^a-z])card([-_. ]?(number|num|no))?$/i;
+const EMAIL_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
+// Vendor-prefixed keys, JWTs, Bearer/Basic credentials. Server-only shapes
+// (PEM blocks, npm/GitLab/SendGrid tokens) are left to the relay/ingester.
+const SECRET_RE =
+	/\b(sk-[\w-]{20,}|[sr]k_(live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[\w-]{30,}|(AKIA|ASIA)[0-9A-Z]{16}|bearer\s+[\w.~+/=-]{10,}|basic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2})/gi;
+// JWTs may only start after a non-token character (lookbehind would break
+// older Safari): a \b start at every "eyJ" after "-" is quadratic.
+const JWT_RE = /(^|[^\w-])eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g;
+const HEADER_RE =
+	/((^|[^\w-])(proxy-)?(authorization|(set-)?cookie)["']?\s*[:=]\s*["']?)[^"'\r\n]+/gim;
+const ASSIGN_RE =
+	/(password|passwd|pwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|signature|session[_-]?id|sessionid|ssn)(["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&,;)}\]\[<>]+)/gi;
+const URL_CRED_RE =
+	/\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/:@"'<>]*:[^\s/"'<>]*|[^\s/:@"'<>]{16,})@/gi;
+const CARD_RE = /\b(4\d{3}|5[1-5]\d{2}|2[2-7]\d{2}|3[47]\d{2}|6(011|5\d{2}))([ -]?\d){9,15}\b/g;
 const MASK = "[redacted]";
+
+function luhn(value: string): boolean {
+	const digits = value.replace(/\D/g, "");
+	let sum = 0;
+	for (let i = 0; i < digits.length; i++) {
+		let d = +digits[digits.length - 1 - i]!;
+		if (i % 2) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+		sum += d;
+	}
+	return sum % 10 === 0;
+}
+
+function redactOptions(): { keys?: RegExp; values?: RegExp[] } | false | undefined {
+	return opts ? opts.redact : undefined;
+}
+
+/** Scrub secrets/PII embedded in one string (message, stack, URL, value). */
+export function scrubText(value: string): string {
+	const custom = redactOptions();
+	if (custom === false) return value;
+	// Capped: context values are otherwise unbounded (a 1 MB value took
+	// ~0.6 s on the main thread). Stacks are cut to 32 000 after this.
+	let out = String(value).slice(0, 32768)
+		.replace(SECRET_RE, MASK)
+		.replace(JWT_RE, "$1" + MASK)
+		.replace(HEADER_RE, "$1" + MASK)
+		.replace(ASSIGN_RE, (_m, key: string, sep: string, val: string) =>
+			key + sep + (/^["']/.test(val) ? val[0] + MASK + val[0] : MASK))
+		.replace(URL_CRED_RE, "$1" + MASK + "@")
+		.replace(CARD_RE, (m) => (luhn(m) ? MASK : m))
+		.replace(EMAIL_RE, MASK);
+	// Always global (a plain /x/ would mask only the first hit), never sticky.
+	for (const re of (custom && custom.values) || [])
+		out = out.replace(new RegExp(re.source, re.flags.replace(/[gy]/g, "") + "g"), MASK);
+	return out;
+}
+
+function scrubValue(value: unknown, depth: number): unknown {
+	if (typeof value === "string") return scrubText(value);
+	if (!value || typeof value !== "object") return value;
+	if (depth > 5) return MASK;
+	if (Array.isArray(value)) return value.slice(0, 50).map((item) => scrubValue(item, depth + 1));
+	return redactContext(value as Record<string, unknown>, depth + 1);
+}
 
 export function redactContext(
 	context: Record<string, unknown>,
+	depth = 0,
 ): Record<string, unknown> {
+	const custom = redactOptions();
+	if (custom === false) return context;
 	const out: Record<string, unknown> = {};
 	for (const key in context) {
-		const value = context[key];
-		out[key] = SENSITIVE_KEY_RE.test(key)
+		out[key] = SENSITIVE_KEY_RE.test(key) || (custom && custom.keys && key.search(custom.keys) > -1)
 			? MASK
-			: typeof value === "string"
-				? value.replace(EMAIL_RE, MASK)
-				: value;
+			: scrubValue(context[key], depth);
 	}
 	return out;
+}
+
+// Coded errors: the same CODE_PATTERN as runtime-core and the ingester. A
+// value that doesn't match (e.g. "ECONNRESET") is simply not sent, and the
+// error groups by message as before.
+const CODE_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$/;
+const REQUEST_ID_RE = /^[\w.-]{8,128}$/;
+
+/**
+ * Declared error fields duck-typed off ANY thrown value — RuntimeError,
+ * `autterErrorFromResponse` results, or an app's own error class with a
+ * `code` property — as `autter.error.*` / `autter.request.id` context keys.
+ */
+function errorContext(error: unknown): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	if (!error || typeof error !== "object") return out;
+	// Metadata is optional: a throwing getter or Proxy must never stop the
+	// original error from being reported, so read every field defensively.
+	const e: Record<string, unknown> = {};
+	for (const key of ["code", "why", "fix", "link", "expected", "requestId"]) {
+		try {
+			e[key] = (error as Record<string, unknown>)[key];
+		} catch {
+			/* ignore unreadable metadata */
+		}
+	}
+	if (typeof e.code === "string" && e.code.length <= 80 && CODE_RE.test(e.code)) {
+		out["autter.error.code"] = e.code;
+	}
+	if (typeof e.why === "string") out["autter.error.why"] = e.why.slice(0, 1000);
+	if (typeof e.fix === "string") out["autter.error.fix"] = e.fix.slice(0, 1000);
+	if (typeof e.link === "string" && e.link.length <= 500 && /^https?:\/\//.test(e.link)) {
+		out["autter.error.link"] = e.link;
+	}
+	if (e.expected === true) out["autter.error.expected"] = true;
+	if (typeof e.requestId === "string" && REQUEST_ID_RE.test(e.requestId)) {
+		out["autter.request.id"] = e.requestId;
+	}
+	return out;
+}
+
+function addContext(event: BrowserEvent, extra: Record<string, unknown>): void {
+	if (Object.keys(extra).length > 0) event.context = { ...event.context, ...extra };
+}
+
+/** `x-request-id` of a failed response → `autter.request.id`, linking the
+ * browser failure to the server's request summary. Cross-origin APIs must
+ * list the header in Access-Control-Expose-Headers for the page to see it. */
+function addRequestId(event: BrowserEvent, id: string | null | undefined): void {
+	if (id && REQUEST_ID_RE.test(id)) addContext(event, { "autter.request.id": id });
+}
+
+/**
+ * Turn a failed `fetch` Response into an Error carrying the server's
+ * declared fields. Reads `{ error: { message, code, why, fix, link,
+ * requestId } }` (the `autterErrorResponse` / `toClientError` body) from a
+ * clone, so the caller can still read the original body; anything else
+ * falls back to the status text. Pass the result to `captureException` (or
+ * throw it) and the error groups by its code.
+ */
+export async function autterErrorFromResponse(response: Response): Promise<Error> {
+	let body: Record<string, unknown> = {};
+	try {
+		const parsed = (await response.clone().json())?.error;
+		body = typeof parsed === "string" ? { message: parsed } : parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		/* Not JSON, or the body was already read. */
+	}
+	const error = new Error(
+		typeof body.message === "string" && body.message
+			? body.message
+			: response.statusText || `Request failed with status ${response.status}`,
+	) as Error & Record<string, unknown>;
+	error.name = "HttpResponseError";
+	error.status = response.status;
+	for (const key of ["code", "why", "fix", "link", "requestId"]) {
+		if (typeof body[key] === "string") error[key] = body[key];
+	}
+	if (!error.requestId) {
+		try {
+			error.requestId = response.headers.get("x-request-id") || undefined;
+		} catch {
+			/* No headers. */
+		}
+	}
+	return error;
 }
 
 function route(): string {
@@ -264,7 +417,7 @@ function attachClient(event: BrowserEvent): void {
 		extra.cspPolicyHash = seenCspPolicyHash;
 	}
 	if (Object.keys(extra).length > 0) {
-		event.context = { ...(event.context || {}), ...extra };
+		event.context = { ...event.context, ...extra };
 	}
 }
 
@@ -309,11 +462,28 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	}
 	attachClient(event);
 	// Scrub before beforeSend so the last-chance hook sees the final form.
-	if (event.context) event.context = redactContext(event.context);
+	// Fields arrive cut with 512 chars of slack; scrub, then cut, so a secret
+	// straddling the limit is masked whole instead of half-exported.
+	event.message = scrubText(event.message).slice(0, 4000);
+	if (event.stack) event.stack = scrubText(event.stack).slice(0, 32000);
+	if (event.name) event.name = scrubText(event.name).slice(0, 200);
+	if (event.context) {
+		try {
+			event.context = redactContext(event.context);
+		} catch {
+			// Throwing getter / revoked Proxy: drop the context, never throw.
+			delete event.context;
+		}
+	}
 	if (opts.beforeSend) {
-		const mapped = opts.beforeSend(event);
-		if (!mapped) return;
-		event = mapped;
+		try {
+			const mapped = opts.beforeSend(event);
+			if (!mapped) return;
+			event = mapped;
+		} catch {
+			// A telemetry hook must not change application request outcomes.
+			return;
+		}
 	}
 	queue.push(event);
 	if (queue.length >= MAX_QUEUE) {
@@ -337,7 +507,7 @@ function baseEvent(
 	return {
 		type,
 		timestamp: new Date().toISOString(),
-		message: String(message).slice(0, 4000),
+		message: String(message).slice(0, 4512),
 		route: route(),
 		...(userId || globalContext
 			? { context: { ...(globalContext || {}), ...(userId ? { userId } : {}) } }
@@ -361,6 +531,9 @@ export function flush(): void {
 		service: opts.service,
 		environment: opts.environment || "production",
 		...(opts.release ? { release: opts.release } : {}),
+		// SDK version: the ingester records it so version mismatches are
+		// visible (and checked server-side by the relay). Ignored by older ingesters.
+		sdk: SDK_VERSION,
 		events,
 	});
 	// Direct mode: key as query param (sendBeacon can't set headers) and
@@ -405,9 +578,10 @@ export function captureException(
 	event.severity = "error";
 	if (isError) {
 		event.errorType = error.name;
-		if (error.stack) event.stack = String(error.stack).slice(0, 32000);
+		if (error.stack) event.stack = String(error.stack).slice(0, 32512);
 	}
-	if (context) event.context = { ...(event.context || {}), ...context };
+	// Explicit context wins over the duck-typed declared fields.
+	addContext(event, { ...errorContext(error), ...context });
 	enqueue(event, true);
 }
 
@@ -430,8 +604,8 @@ export function captureMessage(
 
 /** Report an application outcome that failed without throwing. Use a stable name. */
 export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
-	const event = baseEvent("outcome", String(message).replace(EMAIL_RE, MASK));
-	event.name = String(name).replace(EMAIL_RE, MASK).slice(0, 200);
+	const event = baseEvent("outcome", message);
+	event.name = String(name).slice(0, 712);
 	event.errorType = "OutcomeFailure";
 	event.severity = "error";
 	if (context) event.context = { ...(event.context || {}), ...context };
@@ -444,7 +618,7 @@ export function trackEvent(
 	props?: Record<string, string | number | boolean>,
 ): void {
 	const event = baseEvent("track_event", "");
-	event.name = String(name).slice(0, 200);
+	event.name = String(name).slice(0, 712);
 	if (props) event.context = { ...(event.context || {}), ...props };
 	enqueue(event);
 }
@@ -496,6 +670,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 					event.name = path;
 					event.errorType = "HttpRequestError";
 					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					try { addRequestId(event, response.headers.get("x-request-id")); } catch { /* No headers. */ }
 					enqueue(event, true);
 				}
 				return response;
@@ -525,19 +700,24 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				const started = performance.now();
 				const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
 				let recorded = false;
-				const record = (message: string, errorType: string) => {
+				const record = (message: string, errorType: string, requestId?: string | null) => {
 					if (recorded) return;
 					recorded = true;
 					const event = baseEvent("request_failure", message);
 					event.name = path;
 					event.errorType = errorType;
 					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					addRequestId(event, requestId);
 					enqueue(event, true);
 				};
 				const onError = () => record("Request failed", "NetworkError");
 				const onTimeout = () => record("Request timed out", "NetworkError");
 				this.addEventListener("loadend", () => {
-					if (this.status >= 500) record(`Request returned ${this.status}`, "HttpRequestError");
+					if (this.status >= 500) {
+						let requestId: string | null = null;
+						try { requestId = this.getResponseHeader("x-request-id"); } catch { /* Not exposed. */ }
+						record(`Request returned ${this.status}`, "HttpRequestError", requestId);
+					}
 					this.removeEventListener("error", onError);
 					this.removeEventListener("timeout", onTimeout);
 				}, { once: true });
@@ -575,8 +755,9 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			if (label) e.filename = label;
 		} else {
 			e.errorType = event.error instanceof Error ? event.error.name : "Error";
+			addContext(e, errorContext(event.error));
 			if (event.error instanceof Error && event.error.stack) {
-				e.stack = String(event.error.stack).slice(0, 32000);
+				e.stack = String(event.error.stack).slice(0, 32512);
 			}
 			e.filename = stripQuery(event.filename);
 			if (event.lineno) e.line = event.lineno;
@@ -626,9 +807,10 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				"unhandled_rejection",
 				isError ? reason.message : String(reason),
 			);
+			addContext(e, errorContext(reason));
 			if (isError) {
 				e.errorType = reason.name;
-				if (reason.stack) e.stack = String(reason.stack).slice(0, 32000);
+				if (reason.stack) e.stack = String(reason.stack).slice(0, 32512);
 			} else {
 				// A rejection whose reason isn't an Error carries no stack and no
 				// meaningful type. In practice most are injected third-party

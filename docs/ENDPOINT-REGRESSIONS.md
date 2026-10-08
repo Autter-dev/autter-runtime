@@ -26,7 +26,7 @@ The SDK adds a process instance ID and explicit request histogram bounds through
 
 Send explicit-bucket histograms with delta temporality:
 
-Use ingester 1.3.1 or later. Version 1.3.0 does not correctly accept numeric delta temporality. OTLP delta is `1` (or `AGGREGATION_TEMPORALITY_DELTA`); cumulative is `2` and is not accepted for detection.
+Use ingester 1.3.1 or later (`npx @autter/runtime-node doctor` checks it; see [Version compatibility](COMPATIBILITY.md)). Version 1.3.0 does not correctly accept numeric delta temporality. OTLP delta is `1` (or `AGGREGATION_TEMPORALITY_DELTA`); cumulative is `2` and is not accepted for detection.
 
 - `http.server.request.duration` uses seconds.
 - `http.server.duration` uses milliseconds.

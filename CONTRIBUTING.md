@@ -51,15 +51,19 @@ npm run build            # builds all packages in dependency order
 Run the full stack locally:
 
 ```bash
-docker compose up -d     # local ClickHouse (:8123, password "dev")
-npm run dev              # ingester on :4318 with static key "dev-key"
+# A throwaway local ingest key (no key is committed to the repo).
+export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
+export AUTTER_INGEST_KEYS='[{"key":"'"$AUTTER_RUNTIME_KEY"'","orgId":"local","repositoryId":"local"}]'
+docker compose up -d clickhouse   # local ClickHouse (:8123, password "dev")
+CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_PASSWORD=dev \
+  npm run dev                     # ingester on :4318, accepting $AUTTER_RUNTIME_KEY
 ```
 
 Send yourself a test error and read it back:
 
 ```bash
 curl -X POST http://localhost:4318/v1/browser \
-  -H "Authorization: Bearer dev-key" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $AUTTER_RUNTIME_KEY" -H "Content-Type: application/json" \
   -d '{"version":1,"service":"dev","environment":"local","events":[{"type":"exception","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'","message":"hello autter","errorType":"Error"}]}'
 
 docker compose exec clickhouse clickhouse-client --password dev \

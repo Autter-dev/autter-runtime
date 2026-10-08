@@ -1,5 +1,8 @@
 import { z } from "zod";
+import { liftErrorFields } from "./error-fields.js";
+import { sanitizeRuntimeContext } from "./context.js";
 import { normalizeRoute } from "./fingerprint.js";
+import { scrubText } from "./redact.js";
 import {
 	asSeverity,
 	type RuntimeMetricPoint,
@@ -41,6 +44,14 @@ const browserEventSchema = z.object({
 	column: z.number().int().nonnegative().optional(),
 	/** Path only; query strings are stripped defensively anyway. */
 	route: z.string().max(1000).optional(),
+	/**
+	 * Free-form, scrubbed context. runtime-browser ≥1.4.0 also sends the
+	 * declared-error keys `autter.error.code|why|fix|link|expected` (from
+	 * coded errors / `autterErrorFromResponse`) and `autter.request.id` (the
+	 * `x-request-id` of a failed fetch/XHR). They are validated one by one
+	 * in normalizeBrowserPayload — a malformed value is dropped on its own
+	 * instead of rejecting the whole beacon.
+	 */
 	context: z.record(z.unknown()).optional(),
 });
 
@@ -50,6 +61,8 @@ export const browserPayloadSchema = z.object({
 	service: z.string().min(1).max(200),
 	environment: z.string().min(1).max(100),
 	release: z.string().max(200).optional(),
+	/** @autter/runtime-browser version (1.4+); recorded for compatibility checks. */
+	sdk: z.string().regex(/^\d{1,6}\.\d{1,6}\.\d{1,6}[0-9A-Za-z.+-]{0,20}$/).optional().catch(undefined),
 	events: z.array(browserEventSchema).max(50),
 });
 
@@ -65,26 +78,19 @@ const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 };
 
 // Content-level gate for the free-form `context` bag. The schema whitelist
-// above is structural; this masks obvious PII/secrets inside whatever a
-// (possibly outdated) SDK still sends: values under sensitive-looking keys
-// and email-shaped strings — mirroring redactAttributes() in
-// @autter/runtime-node and redactContext() in @autter/runtime-browser.
-const SENSITIVE_KEY_RE =
-	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
-const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// above is structural; this masks secrets/PII inside whatever a (possibly
+// outdated) SDK still sends — sensitive keys and secret-shaped values at any
+// depth, via the same sanitiser as OTLP attributes. Message, stack, and route
+// are scrubbed centrally before fingerprinting (server.ts fingerprintAll).
+const EMAIL_VALUE_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
 const REDACTED = "[redacted]";
 
 function scrubContext(context: Record<string, unknown>): Record<string, unknown> {
-	const out: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(context)) {
-		if (value === undefined || value === null) continue;
-		out[key] = SENSITIVE_KEY_RE.test(key)
-			? REDACTED
-			: typeof value === "string"
-				? value.replace(EMAIL_VALUE_RE, REDACTED)
-				: value;
-	}
-	return out;
+	return sanitizeRuntimeContext(
+		Object.fromEntries(
+			Object.entries(context).filter(([, value]) => value !== undefined && value !== null),
+		),
+	);
 }
 
 /** Default severity per event type when the SDK doesn't say. */
@@ -113,6 +119,7 @@ export function normalizeBrowserPayload(
 		occurredAt: Date,
 		counts: { requestCount?: number; errorCount?: number; sessionCount?: number },
 	): void {
+		route = scrubText(route);
 		const bucketAt = new Date(
 			Math.floor(occurredAt.getTime() / 60_000) * 60_000,
 		);
@@ -156,7 +163,7 @@ export function normalizeBrowserPayload(
 			const name = event.name === "browser.longtask" ? "browser.longtask"
 				: `browser.resource:${normalizeRoute((event.name ?? "").replace(/^browser\.resource:/, "").split("?")[0]!.replace(EMAIL_VALUE_RE, REDACTED))}`;
 			bumpRollup(name, occurredAt, { requestCount: 1 });
-			const point = rollups.get(`${name} ${Math.floor(occurredAt.getTime() / 60_000) * 60_000}`);
+			const point = rollups.get(`${scrubText(name)} ${Math.floor(occurredAt.getTime() / 60_000) * 60_000}`);
 			if (point) point.durationSumMs += event.durationMs ?? 0;
 			continue;
 		}
@@ -198,6 +205,7 @@ export function normalizeBrowserPayload(
 				...(event.context ? { context: scrubContext(event.context) } : {}),
 			},
 			occurredAt,
+			...liftErrorFields(event.context),
 		});
 	}
 

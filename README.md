@@ -13,10 +13,11 @@ and writes them to ClickHouse in a compact, per-repo data model.
 flowchart TD
     A["@autter/runtime-browser (tiny tracker)"] --> B["Same-origin relay (@autter/runtime-node)"]
     B --> D["otlp-ingester /v1/browser (JSON)"]
-    C["Server OpenTelemetry"] --> E["otlp-ingester /v1/traces + /v1/metrics (OTLP)"]
+    C["Server OpenTelemetry + request summaries"] --> E["otlp-ingester /v1/traces + /v1/metrics + /v1/logs (OTLP)"]
+    I["@autter/runtime-edge (Workers, Vercel Edge, Deno, Bun)"] --> E
     D --> F["Normaliser + fingerprinter"]
     E --> F
-    F --> G["ClickHouse (occurrences, spans, usage rollups)"]
+    F --> G["ClickHouse (occurrences, spans, logs, usage rollups)"]
     F --> H["Optional sink webhook → issue grouping"]
 ```
 
@@ -30,7 +31,16 @@ Connect Sentry, PostHog, Grafana/Loki, Datadog or webhooks in the Autter platfor
 npm install @autter/runtime-browser   # frontend (React, Vue, any SPA, static sites)
 npm install @autter/runtime-node      # backend (Express, Fastify, Koa, Nest, plain Node)
 npm install @autter/runtime-next      # Next.js (both halves in one package)
+npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, Bun (zero deps)
 ```
+
+| Package | Version | Use it for |
+| --- | --- | --- |
+| `@autter/runtime-browser` | 1.4.0 | Browser errors + usage, coded-error duck typing, request-id capture |
+| `@autter/runtime-node` | 1.5.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
+| `@autter/runtime-next` | 1.5.0 | Next.js: server + client + `/edge` for `middleware.ts` |
+| `@autter/runtime-edge` | 1.0.0 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
+| `@autter/otlp-ingester` | 1.5.0 | Self-hosted ingest — upgrade it **before** the SDKs |
 
 Prefer to have an AI agent set it up for you? Install the companion agent
 skills — they inventory your repo and wire up Autter Runtime for whatever
@@ -78,6 +88,26 @@ initAutterServer({
 });
 ```
 
+**Requests and coded errors** (1.5.0) — one summary per request, always
+kept, with a request id echoed to the client; one issue per error code:
+
+```js
+const { autterRequests, autterErrorResponse, defineRuntimeErrors, runtimeContext } =
+  require("@autter/runtime-node");
+
+const billing = defineRuntimeErrors("billing", {
+  declined: { status: 402, message: "Payment declined", expected: true, fix: "Try another card" },
+});
+app.use(autterRequests({ ignore: ["/healthz"] }));
+app.post("/checkout", (req, res, next) => {
+  runtimeContext.set({ cart: { items: 3 } });
+  next(billing.declined());            // → 402 { error: { message, code, fix, requestId } }
+});
+app.use(autterErrorResponse());
+```
+
+See [Requests, coded errors and background work](docs/REQUESTS-AND-ERRORS.md).
+
 **LLM calls** — initialised with the server tracker, recorded at 100%
 (model, tokens, latency, USD cost). One line per client:
 
@@ -100,14 +130,19 @@ Full walkthrough (keys, relay setup, Next.js, verification):
 
 | Package | Status | Description |
 | --- | --- | --- |
-| [`@autter/runtime-browser`](packages/runtime-browser) | **v1.0** | Zero-dependency browser error + usage tracker (~1 KB brotlied) |
-| [`@autter/runtime-node`](packages/runtime-node) | **v1.0** | Same-origin relay handler + curated OTel server tracker |
-| [`@autter/runtime-next`](packages/runtime-next) | **v1.0** | One-command Next.js integration (relay route + error boundary) |
-| [`@autter/otlp-ingester`](packages/otlp-ingester) | **v1.0** | Self-hostable ingest service: OTLP/HTTP (protobuf + JSON) traces + metrics, browser payloads → ClickHouse |
+| [`@autter/runtime-browser`](packages/runtime-browser) | **v1.4** | Zero-dependency browser error + usage tracker (<5 KB gzipped) |
+| [`@autter/runtime-node`](packages/runtime-node) | **v1.5** | Curated OTel server tracker, request summaries, coded errors, operation logging, same-origin relay |
+| [`@autter/runtime-next`](packages/runtime-next) | **v1.5** | One-command Next.js integration (server, client, relay route, error boundary, edge middleware) |
+| [`@autter/runtime-edge`](packages/runtime-edge) | **v1.0** | Zero-dependency edge SDK: request summaries and coded errors for Workers, Vercel Edge, Deno, Bun |
+| [`@autter/otlp-ingester`](packages/otlp-ingester) | **v1.5** | Self-hostable ingest service: OTLP/HTTP (protobuf + JSON) traces, metrics, logs, browser payloads → ClickHouse |
+
+`packages/runtime-core` is private: shared code bundled into runtime-node and
+runtime-edge at build time, never published.
 
 Runnable demo: [`examples/express-app`](examples/express-app) — browser
-tracker → relay → ingester and OTel server tracker, against a compose-run
-ClickHouse.
+tracker → relay → ingester, OTel server tracker, request summaries and coded
+errors, against a compose-run ClickHouse. Edge:
+[`examples/edge-worker`](examples/edge-worker) (Cloudflare Worker).
 
 ## Supported stacks
 
@@ -119,6 +154,7 @@ For endpoint latency detection and slow-request retention, see [endpoint regress
 | React/SPA with a backend | `@autter/runtime-browser` → relay | none in browser; server key in relay |
 | Next.js | `@autter/runtime-next` | server key |
 | Node (Express, Fastify, Koa, Nest) | `@autter/runtime-node` | server key |
+| Cloudflare Workers, Vercel Edge, Deno, Bun | `@autter/runtime-edge` | server key (secret binding) |
 | Go, Rust, Python, Java, .NET, … | any OTel SDK → OTLP/HTTP (protobuf **or** JSON) | server key |
 
 Per-stack setup snippets: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
@@ -130,7 +166,7 @@ Two credential types keep the frontend and backend cleanly separated:
 | | Server key (`autter_rt_…`) | Client key (`autter_rtc_…`) |
 | --- | --- | --- |
 | Secrecy | **secret** — backend env vars only | **publishable** — safe in frontend bundles |
-| Can send | OTLP traces/metrics + browser events | browser events only |
+| Can send | OTLP traces/metrics/logs + browser events | browser events only |
 | Protection | rate limits | origin allow-list + tighter rate limits, write-only |
 
 When your app has a backend, prefer the **relay**: the browser posts to your
@@ -144,7 +180,9 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 - [Using Autter Runtime **without npm**](docs/WITHOUT-NPM.md) — any OTel SDK, an OTel Collector, or plain HTTP from any language
 - [Architecture & data model](docs/ARCHITECTURE.md)
 - [Operation logging and diagnostic context](docs/OPERATION-LOGGING.md)
+- [Requests, coded errors and background work](docs/REQUESTS-AND-ERRORS.md)
 - [Continuous detection, profiles, and outcomes](docs/CONTINUOUS-DETECTION.md)
+- [Version compatibility](docs/COMPATIBILITY.md): the built-in SDK/ingester/schema check and `npx @autter/runtime-node doctor`
 - [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
 
 ## Contributing
@@ -155,6 +193,11 @@ language integrations, features. We'd be more than glad to have you: see
 good first areas to pick up.
 
 ## Hosting the ingester
+
+Upgrade the ingester before the SDKs. New features need its routes and
+ClickHouse migrations. The SDK warns once at runtime when they don't match,
+and `npx @autter/runtime-node doctor --endpoint <ingester URL>` prints a full
+report. See [Version compatibility](docs/COMPATIBILITY.md).
 
 **Autter cloud** hosts it at `otlp.autter.dev` (the SDKs' default
 endpoint). Deployment runbook + scripts for the AWS/ECS setup:
@@ -178,7 +221,10 @@ docker run -p 4318:4318 \
 Or for local development with a bundled ClickHouse:
 
 ```bash
-docker compose up          # local ClickHouse + ingester on :4318, key "dev-key"
+# Generate a local key and save its mapping in the git-ignored .env file.
+export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
+(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
+docker compose up          # local ClickHouse + ingester on :4318
 ```
 
 Point your OpenTelemetry exporter at it:
@@ -186,7 +232,7 @@ Point your OpenTelemetry exporter at it:
 ```ts
 new OTLPTraceExporter({
   url: "http://localhost:4318/v1/traces",
-  headers: { authorization: "Bearer dev-key" },
+  headers: { authorization: `Bearer ${process.env.AUTTER_RUNTIME_KEY}` },
 });
 ```
 
@@ -196,7 +242,9 @@ new OTLPTraceExporter({
   occurrences are always kept (14-day TTL); traces containing an error are
   retained in full (the Node SDK tail-retains them), so every issue keeps the
   trace that explains it; healthy traces are expected to be sampled upstream
-  (0.5–1%); usage is stored as 1-minute rollups (90 days).
+  (0.5–1%); usage is stored as 1-minute rollups (90 days). Request and
+  operation summaries are one bounded record per unit of work and are always
+  kept (`LOG_TTL_DAYS`, default 14).
 - **Per-repo analysis.** Every row is keyed by `org_id` + `repository_id`.
 - **Privacy by construction.** No cookies, no DOM, no request/response bodies,
   no emails, no full URLs with query strings.

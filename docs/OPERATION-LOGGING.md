@@ -3,13 +3,32 @@
 Operation logging starts in `@autter/runtime-node` and `@autter/runtime-next`
 version **1.4.0**. Update the ingester to **1.4.0** before upgrading SDKs: it creates
 `runtime_logs` through migration `0011-runtime-logs` and accepts `/v1/logs`.
+You don't need to check this by hand. The SDK warns once at runtime when your
+ingester is too old, and `npx @autter/runtime-node doctor` reports every
+mismatch. See [Version compatibility](COMPATIBILITY.md).
+
+**1.5.0** (ingester 1.5.0 first) adds request summaries, `runtimeContext`, inline
+messages, `kind` on every summary, coded errors, `fork`/carriers, the AI rollup,
+`waitUntil`, sinks and logger-only mode — all additive; a golden test proves a
+1.4.0 operation still exports the same OTLP JSON apart from the two new summary
+keys. Request-level features are documented in
+[REQUESTS-AND-ERRORS.md](REQUESTS-AND-ERRORS.md).
+
+**1.5.0** (ingester 1.5.0 first) adds request summaries, `runtimeContext`, inline
+messages, `kind` on every summary, coded errors, `fork`/carriers, the AI rollup,
+`waitUntil`, sinks and logger-only mode — all additive; a golden test proves a
+1.4.0 operation still exports the same OTLP JSON apart from the two new summary
+keys. Request-level features are documented in
+[REQUESTS-AND-ERRORS.md](REQUESTS-AND-ERRORS.md).
 
 ## Node and Next.js
 
 Initialize `initAutterServer` once, before the application starts. For Next.js,
 use `registerAutter` in `instrumentation.ts` and import the APIs below from
 `@autter/runtime-next/server`. Use the Node runtime; these APIs use Node's async
-context and do not run in the browser or an edge worker.
+context and do not run in the browser or an edge worker (edge runtimes use
+`@autter/runtime-edge`, which passes the context explicitly). Apps that run their
+own OpenTelemetry SDK can use `initAutterLogging` instead of `initAutterServer`.
 
 ```ts
 import {
@@ -39,8 +58,12 @@ await withRuntimeOperation("checkout", async (operation) => {
 await runtime.shutdown();
 ```
 
-`withRuntimeOperation(name, fn, attributes?)` runs the callback in an always-recorded
-process span and emits one completed operation summary. It returns the callback's
+`withRuntimeOperation(name, fn, attributes?, options?)` runs the callback in an always-recorded
+process span and emits one completed operation summary (`autter.operation.kind =
+"operation"`; request middleware emits `"request"` summaries). `options.from`
+continues work from a `runtimeContext.carrier()` (parent link, request id, and an
+OTel span link to the producer trace); `options.waitUntil` receives the log flush
+promise once the summary is emitted. It returns the callback's
 result and rethrows its original error. An unhandled callback error records an
 exception in the trace; the log summary is related evidence, not a second issue.
 
@@ -62,13 +85,26 @@ the existing `autter.outcome` trace event, including the reporting call site.
 `pending` means the operation has not confirmed its downstream result.
 
 `createRuntimeLogger(attributes?)` creates a logger with `debug`, `info`, `warn`,
-and `error` methods. `runtimeLogger` is the default instance. `error` records
+and `error` methods. `runtimeLogger` is the default instance; `runtimeContext`
+exposes the same methods plus `set`, `outcome`, `id`, `requestId`, `fork` and
+`carrier` for the current operation from anywhere in its call tree.
+
+**Inline messages (1.5.0).** Inside an operation, `debug` and `info` messages are
+folded into its summary as `autter.operation.logs` — `{ t, level, message,
+attrs? }`, `t` in milliseconds since the operation started — instead of being
+exported as separate records. `warn` and `error` are folded **and** exported.
+`autter.operation.level` is the highest level seen (including a failed outcome).
+Disable with `logging.inline: false` to get 1.4.0's one-record-per-message
+behaviour. Outside an operation every message is its own record, as before. `error` records
 diagnostic context; use `captureException` for exception grouping or declare a
 failed operation outcome for business-failure grouping. Logs inherit the
 active operation ID, name, parent operation ID, and application attributes, plus
 the active OTel trace/span IDs. Concurrent operations keep separate contexts.
-Async context does not cross a queue or process: propagate an opaque workflow
-identifier in the job payload and pass it as a custom attribute in the consumer.
+Async context does not cross a queue or process by itself: put
+`runtimeContext.carrier()` in the job payload and pass it as
+`withRuntimeOperation(name, fn, {}, { from: payload.autter })` in the consumer.
+`runtimeContext.fork(name, fn)` links a child to its parent even when the child
+outlives it; `runInBackground(name, fn)` does the same without awaiting.
 
 ## Collection and privacy
 
@@ -79,9 +115,16 @@ identifier in the job payload and pass it as a custom attribute in the consumer.
   cannot send server logs.
 - Redaction applies before console output and export. Never intentionally send
   secrets or personal data; pattern-based redaction cannot identify every secret.
-- `logging.minLevel` filters ordinary messages; completed operation summaries
-  are retained independently. `logging.console` defaults to true and can be
-  disabled without disabling export.
+- `logging.minLevel` filters ordinary messages (folded or not); completed
+  operation summaries are retained independently. `logging.console` defaults to
+  true and can be disabled without disabling export. Console output is JSON
+  lines (as in 1.4.0) when `NODE_ENV=production` and a compact tree elsewhere;
+  `logging.sinks` replaces the default sinks, and `logging.file` controls the
+  local `.autter/runtime/*.jsonl` files (on by default only in development).
+- Summaries are never sampled. Inline messages are capped at 50 per operation
+  (`autter.operation.logs_truncated` marks the rest), 300 characters each and
+  about 6 KB per operation, and are placed last in the context budget so they
+  never crowd out operation context.
 - Logs batch in memory (up to 1,000 records or 4 MiB, whichever comes first).
   Requests contain up to 50 records or 512 KiB. Context has depth, field, step
   and string limits; truncated context is marked. Each flush has a 10-second
@@ -90,7 +133,7 @@ identifier in the job payload and pass it as a custom attribute in the consumer.
   reported. `flushRuntimeLogs()` rejects if delivery fails, and
   `runtimeLogStats()` reports buffered and dropped counts. This is best-effort
   telemetry, not durable delivery or an audit log.
-- Records expire after 14 days. Successful operation counts represent captured
+- Records expire after 14 days by default (`LOG_TTL_DAYS` on ingester 1.5.0+). Successful operation counts represent captured
   summaries, not a guarantee that every application operation was observed.
 
 ## Investigation and fixes

@@ -80,6 +80,8 @@ test("e2e: captured exception attributes are redacted on the wire", async () => 
 	const { code, err } = await runChild(fixtures("e2e-redaction.mjs"), {
 		COLLECTOR_PORT: String(collectorPort),
 		AUTTER_DEBUG: "1",
+		// Resource attributes come from the environment and detectors.
+		OTEL_RESOURCE_ATTRIBUTES: "deploy.token=resattrsecret42",
 	});
 	assert.equal(code, 143);
 
@@ -90,11 +92,38 @@ test("e2e: captured exception attributes are redacted on the wire", async () => 
 	assert.ok(!wire.includes("jane.doe@example.com"), "raw email leaked");
 	assert.ok(!wire.includes("supersecrettoken123456"), "raw bearer token leaked");
 	assert.ok(!wire.includes("eyJhbGciOiJIUzI1NiJ9"), "raw JWT leaked");
+	assert.ok(!wire.includes("rawcookievalue"), "nested cookie leaked");
+
+	// Secrets inside exception messages, stacks, and status messages.
+	for (const secret of [
+		"hunter2pg",
+		"4111 1111 1111 1111",
+		"4eC39HqLyjWDarjtT1zdp7dc",
+		"CUST-123456", // customer-supplied additionalValuePatterns
+		"redispass99", // thrown inside withProcessSpan
+		"should-not-leak", // LlmCallHandle.setAttributes
+		"abcdefghijklmnopqrstuvwxyz0123", // provider error echoing an sk-proj key
+		// Third-party span: only the export-time scrub sees these.
+		"foreigntoken123",
+		"foreignbearer12345",
+		"foreignpw1",
+		"eventnamesecret1234", // event name
+		"linkbearersecret123", // link attributes
+		"resattrsecret42", // resource attributes
+	]) {
+		const hit = receivedBodies.find((body) => body.includes(secret));
+		assert.ok(!hit, `secret leaked on the wire: ${secret} in ${hit?.slice(0, 300)}`);
+	}
 
 	// Mask present; non-sensitive context intact.
 	assert.ok(wire.includes("[redacted]"), "expected mask marker");
 	assert.ok(wire.includes("o-1"), "non-sensitive attribute was dropped");
 	assert.ok(wire.includes("boom: order failed"), "exception message missing");
+	assert.ok(wire.includes("connect ECONNREFUSED postgres://[redacted]@db.internal:5432/app"),
+		"scrubbed message should keep its non-secret context");
+	assert.ok(wire.includes("page=2"), "non-secret query params should survive");
+	// Usage counters on third-party LLM spans must survive for cost tracking.
+	assert.match(wire, /"ai\.usage\.promptTokens","value":\{"intValue":42/);
 
 	// Debug mode reported exports.
 	assert.match(err, /exported \d+ span/);

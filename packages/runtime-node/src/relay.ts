@@ -1,4 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Attributes } from "@opentelemetry/api";
+import { makeRedactor, type RedactOptions, type Redactor } from "./redact.js";
+import {
+	ensureCompatConfigured,
+	noteCompatFeature,
+	noteRelayRejection,
+	observeIngesterResponse,
+} from "./compat.js";
+import { featuresForBrowserEvents } from "../../otlp-ingester/src/compat.js";
 
 /**
  * Same-origin browser relay. The browser tracker posts to a route on the
@@ -21,19 +30,25 @@ export interface RelayOptions {
 	 * `false` to disable (e.g. when a WAF already rate-limits).
 	 */
 	perIpRateLimit?: number | false;
-	/**
-	 * Trust the client-supplied `X-Forwarded-For` header when keying the per-IP
-	 * rate limit. Off by default: the header is spoofable, so an attacker could
-	 * rotate it to bypass the window and drive unbounded parsing/forwarding
-	 * under the server's ingest key. Enable ONLY behind a proxy/CDN you control
-	 * that overwrites the header. When off, the fetch handler keys a single
-	 * shared bucket, and the Node handler keys the real socket peer address.
-	 * Only a strict boolean `true` enables it — a truthy string such as the
-	 * common `process.env.TRUST_PROXY === "false"` slip stays on the safe path.
-	 */
-	trustProxy?: boolean;
 	/** Called when the async forward fails (default: console.warn). */
 	onError?: (err: unknown) => void;
+	/**
+	 * Scrub secrets/PII from browser events (message, stack, name, nested
+	 * context) before they leave your server — the same patterns as
+	 * `initAutterServer({ redactAttributes })`. Catches old browser SDK
+	 * versions and anything the browser's lean redactor misses. Pass a
+	 * RedactOptions object to add your own patterns; `false` disables.
+	 * Default true.
+	 */
+	redact?: boolean | RedactOptions;
+	/**
+	 * Warn once (server-side) when browser features in the forwarded events
+	 * — CSP violations, network/timing capture — need a newer ingester than
+	 * the one answering. Reads the ingester's version header from the forward
+	 * response; never blocks the 202. Also disabled by AUTTER_COMPAT_CHECK=0.
+	 * Default true.
+	 */
+	compatCheck?: boolean;
 }
 
 class IpWindow {
@@ -89,25 +104,6 @@ const CONTEXT_MAX_STRING = 4000;
 const CONTEXT_MAX_ARRAY = 100;
 const CONTEXT_MAX_KEYS = 100;
 
-// Redaction — the relay attaches the server's private ingest key and forwards
-// browser-supplied context into privileged telemetry, so context must never
-// carry secrets. We redact on two axes, at every nesting level: by KEY NAME
-// (authorization, cookie, token, password, *_secret, *_key, session, jwt, …)
-// and by secret-shaped VALUE (Bearer/Basic auth strings, JWTs) even under a
-// benign/custom key. Numeric/boolean values under a matched key are kept —
-// they can never be a credential, and this preserves usage counts such as
-// `input_tokens`.
-const REDACTED = "[redacted]";
-const SECRET_KEY_RE =
-	/(password|passwd|pwd|passphrase|passcode|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|authorization|cookie|session[_-]?id|sessionid|session|credentials?|bearer|jwt|otp|x-api-key|signature)/i;
-const SECRET_VALUE_RE = /^\s*(bearer|basic)\s+\S+/i;
-const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+/;
-
-/** Redact a string that looks like a credential (auth header value / JWT). */
-function scrubSecretValue(s: string): string {
-	return SECRET_VALUE_RE.test(s) || JWT_RE.test(s) ? REDACTED : s;
-}
-
 /** UTF-8 byte length of a string (portable across edge runtimes). */
 export function byteLength(text: string): number {
 	return new TextEncoder().encode(text).length;
@@ -125,7 +121,7 @@ export function boundContext(value: unknown): unknown {
 	const walk = (v: unknown, depth: number): unknown => {
 		if (v === null) return null;
 		const t = typeof v;
-		if (t === "string") return scrubSecretValue((v as string).slice(0, CONTEXT_MAX_STRING));
+		if (t === "string") return (v as string).slice(0, CONTEXT_MAX_STRING);
 		if (t === "number" || t === "boolean") return v;
 		if (t !== "object") return undefined;
 		if (depth >= CONTEXT_MAX_DEPTH || nodes >= CONTEXT_MAX_NODES) return undefined;
@@ -174,21 +170,6 @@ export function boundContext(value: unknown): unknown {
 			const key = keys[i];
 			if (key === undefined) continue;
 			nodes++;
-			// Redact secret-bearing keys at any depth. Numeric/boolean values
-			// can't be credentials and are preserved (e.g. usage counts); any
-			// other value (string, nested object/array) is dropped entirely.
-			if (SECRET_KEY_RE.test(key)) {
-				let raw: unknown;
-				try {
-					raw = (obj as Record<string, unknown>)[key];
-				} catch {
-					out[key] = REDACTED;
-					continue;
-				}
-				const rt = typeof raw;
-				out[key] = rt === "number" || rt === "boolean" ? raw : REDACTED;
-				continue;
-			}
 			let child: unknown;
 			try {
 				child = walk((obj as Record<string, unknown>)[key], depth + 1);
@@ -255,10 +236,22 @@ async function readBodyBounded(
 	return { tooLarge: false, text: new TextDecoder().decode(buf) };
 }
 
+// Bound first (cycle- and Proxy-safe), then scrub with the shared redactor.
+// Arrays are not valid context and are dropped, as before.
+function relayContext(raw: object, redactor: Redactor): { context?: Attributes } {
+	const bounded = boundContext(raw);
+	return Array.isArray(bounded) ? {} : { context: redactor(bounded as Attributes) };
+}
+
 // Whitelist sanitiser — anything not listed here is dropped, so a
 // compromised or buggy client can't smuggle cookies/DOM/bodies through the
 // relay. Returns null when the payload is structurally invalid.
-export function sanitizeBrowserPayload(raw: unknown): object | null {
+const defaultRelayRedactor = makeRedactor(true);
+
+export function sanitizeBrowserPayload(
+	raw: unknown,
+	redactor: Redactor = defaultRelayRedactor,
+): object | null {
 	if (typeof raw !== "object" || raw === null) return null;
 	const p = raw as Record<string, unknown>;
 	if (p.version !== 1) return null;
@@ -279,12 +272,16 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 				? { severity: e.severity }
 				: {}),
 			message:
-				typeof e.message === "string" ? e.message.slice(0, 4000) : "",
-			...(typeof e.name === "string" ? { name: e.name.slice(0, 200) } : {}),
+				typeof e.message === "string"
+					? redactor.text(e.message.slice(0, 4512)).slice(0, 4000)
+					: "",
+			...(typeof e.name === "string"
+				? { name: redactor.text(e.name.slice(0, 712)).slice(0, 200) }
+				: {}),
 			...(typeof e.durationMs === "number" && Number.isFinite(e.durationMs)
 				? { durationMs: Math.max(0, Math.min(120000, e.durationMs)) } : {}),
 			...(typeof e.stack === "string"
-				? { stack: e.stack.slice(0, 32000) }
+				? { stack: redactor.text(e.stack.slice(0, 32512)).slice(0, 32000) }
 				: {}),
 			...(typeof e.errorType === "string"
 				? { errorType: e.errorType.slice(0, 200) }
@@ -298,7 +295,7 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 				? { route: e.route.split("?")[0]!.slice(0, 1000) }
 				: {}),
 			...(typeof e.context === "object" && e.context !== null
-				? { context: boundContext(e.context) }
+				? relayContext(e.context, redactor)
 				: {}),
 		});
 	}
@@ -313,12 +310,19 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 		...(typeof p.release === "string"
 			? { release: p.release.slice(0, 200) }
 			: {}),
+		// @autter/runtime-browser version, for the ingester's compat records.
+		...(typeof p.sdk === "string" && /^\d{1,6}\.\d{1,6}\.\d{1,6}[0-9A-Za-z.+-]{0,20}$/.test(p.sdk)
+			? { sdk: p.sdk }
+			: {}),
 		events,
 	};
 }
 
 function forward(payload: object, opts: RelayOptions): void {
-	const url = `${(opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "")}/v1/browser`;
+	const endpoint = (opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "");
+	const url = `${endpoint}/v1/browser`;
+	const compat = opts.compatCheck !== false;
+	if (compat) ensureCompatConfigured(endpoint);
 	void fetch(url, {
 		method: "POST",
 		headers: {
@@ -327,6 +331,14 @@ function forward(payload: object, opts: RelayOptions): void {
 		},
 		body: JSON.stringify(payload),
 		signal: AbortSignal.timeout(10_000),
+	}).then((response) => {
+		if (!compat) return;
+		const types = new Set(
+			((payload as { events?: Array<{ type?: string }> }).events ?? []).map((e) => String(e.type)),
+		);
+		observeIngesterResponse({ status: response.status, headers: response.headers });
+		for (const feature of featuresForBrowserEvents(types)) noteCompatFeature(feature);
+		noteRelayRejection(types, response.status, response.headers);
 	}).catch((err) => {
 		(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(
 			err,
@@ -343,6 +355,10 @@ export function createBrowserRelayFetchHandler(
 	opts: RelayOptions,
 ): (request: Request) => Promise<Response> {
 	const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+	const redactor =
+		opts.redact === undefined || opts.redact === true
+			? defaultRelayRedactor
+			: makeRedactor(opts.redact);
 	const limiter =
 		opts.perIpRateLimit === false
 			? null
@@ -352,15 +368,8 @@ export function createBrowserRelayFetchHandler(
 			return new Response(null, { status: 405 });
 		}
 		if (limiter) {
-			// Only honor X-Forwarded-For behind an explicitly trusted proxy —
-			// otherwise a caller could spoof a fresh IP per request to bypass
-			// the window. With no trusted peer source in a fetch runtime, fall
-			// back to one shared bucket (a conservative global limit).
 			const ip =
-				opts.trustProxy === true
-					? firstForwardedFor(request.headers.get("x-forwarded-for")) ||
-						"unknown"
-					: "shared";
+				firstForwardedFor(request.headers.get("x-forwarded-for")) || "unknown";
 			if (!limiter.allow(ip)) {
 				return new Response(JSON.stringify({ error: "rate limit exceeded" }), {
 					status: 429,
@@ -388,7 +397,7 @@ export function createBrowserRelayFetchHandler(
 				status: 400,
 			});
 		}
-		const payload = sanitizeBrowserPayload(raw);
+		const payload = sanitizeBrowserPayload(raw, redactor);
 		if (!payload) {
 			return new Response(JSON.stringify({ error: "invalid payload" }), {
 				status: 400,
@@ -414,6 +423,10 @@ export function createBrowserRelayHandler(
 	res: ServerResponse,
 ) => void {
 	const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+	const redactor =
+		opts.redact === undefined || opts.redact === true
+			? defaultRelayRedactor
+			: makeRedactor(opts.redact);
 	const limiter =
 		opts.perIpRateLimit === false
 			? null
@@ -430,7 +443,7 @@ export function createBrowserRelayHandler(
 	}
 
 	function handleParsed(raw: unknown, res: ServerResponse): void {
-		const payload = sanitizeBrowserPayload(raw);
+		const payload = sanitizeBrowserPayload(raw, redactor);
 		if (!payload) {
 			respond(res, 400, { error: "invalid payload" });
 			return;
@@ -445,12 +458,8 @@ export function createBrowserRelayHandler(
 			return;
 		}
 		if (limiter) {
-			// Prefer the real socket peer; only trust X-Forwarded-For when the
-			// caller has explicitly opted into a trusted-proxy deployment.
 			const ip =
-				(opts.trustProxy === true
-					? firstForwardedFor(req.headers["x-forwarded-for"])
-					: "") ||
+				firstForwardedFor(req.headers["x-forwarded-for"]) ||
 				req.socket?.remoteAddress ||
 				"unknown";
 			if (!limiter.allow(ip)) {

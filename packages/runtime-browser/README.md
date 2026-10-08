@@ -17,8 +17,10 @@ can use release keyed source maps uploaded by CI; see
 `docs/CONTINUOUS-DETECTION.md` in the repository.
 
 Tiny, dependency-free browser error + usage tracker for Autter Runtime.
-**~1 KB brotlied** (5 KB CI budget), zero runtime dependencies, no OTel SDK,
-no console patching, no DOM recording, no offline storage.
+**~4 KB brotlied** (5 KB CI budget), zero runtime dependencies, no OTel SDK,
+no console patching, no DOM recording, no offline storage. ESM only (the
+package has no CommonJS build; bundlers and `require(esm)`-capable Node
+resolve the `default` export condition).
 
 ## Install
 
@@ -71,18 +73,58 @@ initAutterBrowser({
 });
 ```
 
+## Coded errors and request ids (1.4.0)
+
+`captureException` — and the automatic error and rejection listeners — read
+declared fields off **any** thrown value, so existing error classes with a
+`code` property benefit without changes:
+
+| Error property | Sent as | Rule |
+| --- | --- | --- |
+| `code` | `autter.error.code` | Must match `^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$`, ≤80 chars (`billing.declined`); otherwise not sent (`ECONNRESET` is not a code) |
+| `why` / `fix` | `autter.error.why` / `.fix` | Declared cause / remedy, first 1000 chars |
+| `link` | `autter.error.link` | `http(s)://` only, ≤500 chars |
+| `expected` | `autter.error.expected` | `true` marks an expected business failure (recorded, never pages) |
+| `requestId` | `autter.request.id` | `^[\w.-]{8,128}$` |
+
+A valid code groups the error by **code** (one code = one issue across the
+browser, the server SDKs and external sources) instead of by message.
+
+`autterErrorFromResponse(response)` turns a failed `fetch` Response into such
+an error. It reads the `{ "error": { message, code, why, fix, link, requestId } }`
+body produced by `autterErrorResponse()` / `toClientError()` in
+`@autter/runtime-node` (from a clone — you can still read the body), and falls
+back to the status text and the `x-request-id` header:
+
+```ts
+const res = await fetch("/api/checkout", { method: "POST", body });
+if (!res.ok) {
+  const error = await autterErrorFromResponse(res); // name "HttpResponseError", .status, .code, …
+  captureException(error);
+  throw error;
+}
+```
+
+Failed requests observed automatically (fetch/XHR 5xx) carry the response's
+`x-request-id` header as `autter.request.id`, so the browser failure links to
+the server's request summary without browser tracing. Cross-origin APIs must
+expose the header (`Access-Control-Expose-Headers: x-request-id`) for the
+page to read it.
+
 ## API
 
 | Function | Notes |
 | --- | --- |
 | `initAutterBrowser(options)` | Installs error, rejection, CSP, and recent-action listeners; sends a session ping |
-| `captureException(error, context?)` | Handled errors; fast-flushed |
+| `captureException(error, context?)` | Handled errors; fast-flushed; duck-types `code/why/fix/link/expected/requestId` |
+| `autterErrorFromResponse(response)` | `Promise<Error>` from a failed Response's JSON error body (or status text) |
 | `captureMessage(message, severity?, context?)` | Warnings/info without an exception (`"warning"` default); grouped and aggregated like errors |
 | `trackEvent(name, props?)` | Usage counter; aggregated server-side per minute |
 | `setUser(id)` | **Opaque id only** — never an email |
 | `setContext(ctx)` | Attached to subsequent events |
 | `flush()` | Force-send the queue (also runs on page hide/unload) |
-| `redactContext(ctx)` | Mask obvious PII in a context bag (applied to every event automatically) |
+| `redactContext(ctx)` | Mask secrets/PII in a context bag, nested (applied to every event automatically) |
+| `scrubText(text)` | Mask secrets/PII inside a string (applied to every message, stack and name automatically) |
 
 ## Batching & delivery
 
@@ -99,11 +141,25 @@ localStorage, DOM text, form values, request headers/bodies, console history,
 IP addresses, and CSP policy text. Routes are `location.pathname` only.
 Browser and OS are a family plus major version. Filenames and script URLs are
 query-stripped. For CSP blocks, the directive, blocked resource origin, script
-path, and a short policy hash are retained.
+path, and a short policy hash are retained. Of response headers, only
+`x-request-id` is read, and only on failed (5xx) requests.
 
-Custom `context` is free-form, so it is scrubbed before send: values under
-sensitive-looking keys (`email`, `password`, `token`, `secret`, `auth`,
-`cookie`, `api_key`, `card_number`, …) are replaced with `[redacted]`, and
-email-shaped substrings are masked inside ordinary string values. This
-mirrors the server SDK's `redactAttributes`; the relay and ingester apply
-the same rules as defense-in-depth.
+Messages, stack traces and custom `context` (at any depth) are scrubbed
+before send: values under sensitive-looking keys (`email`, `password`,
+`token`, `secret`, `auth`, `cookie`, `session`, `api_key`, `card_number`, …)
+are replaced with `[redacted]`, and secrets inside strings — JWTs,
+`Bearer`/`Basic` credentials, `Cookie:`/`Authorization:` text, connection
+strings with credentials, common API keys, `?token=`/`password=`
+assignments, emails, card numbers — are masked in place. This mirrors the
+server SDK's `redactText`/`redactAttributes`; the relay and ingester apply
+the full server-side rule set again as defense-in-depth.
+
+Add your own patterns (or opt out, not recommended):
+
+```ts
+initAutterBrowser({
+  ...,
+  redact: { keys: /^internal_ref$/, values: [/ORD-\d{5}/g] },
+  // redact: false,
+});
+```

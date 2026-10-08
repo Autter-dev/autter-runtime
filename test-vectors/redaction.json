@@ -1,0 +1,198 @@
+{
+	"$comment": "Shared secret/PII scrubbing vectors. Every redactor (runtime-node redactText, runtime-browser scrubText, the relay, the otlp-ingester scrubText, and adapters/python redact_text) must map `input` to `expect`. Strings given as arrays are joined with no separator: realistic-looking vendor tokens are split into fragments so secret scanners (GitHub push protection) don't flag the fixture. `skip` lists implementations that deliberately don't cover a case.",
+	"text": [
+		{
+			"name": "JWT inside an error message",
+			"input": "invalid session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c for user",
+			"expect": "invalid session [redacted] for user"
+		},
+		{
+			"name": "Authorization: Bearer header line",
+			"input": "request failed: Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234567890",
+			"expect": "request failed: Authorization: [redacted]"
+		},
+		{
+			"name": "bare bearer token",
+			"input": "sent Bearer abcdefghijklmnopqrstuvwxyz1234567890 upstream",
+			"expect": "sent [redacted] upstream"
+		},
+		{
+			"name": "Basic auth credentials",
+			"input": "auth header Basic dXNlcjpwYXNzd29yZDEyMw== rejected",
+			"expect": "auth header [redacted] rejected"
+		},
+		{
+			"name": "'basic' as an ordinary word survives",
+			"input": "requires basic authentication",
+			"expect": "requires basic authentication"
+		},
+		{
+			"name": "Cookie header keeps no cookie values",
+			"input": "Cookie: sid=abc123; theme=dark",
+			"expect": "Cookie: [redacted]"
+		},
+		{
+			"name": "Set-Cookie header",
+			"input": "Set-Cookie: session=s3cr3tvalue; Path=/; HttpOnly",
+			"expect": "Set-Cookie: [redacted]"
+		},
+		{
+			"name": "headers serialised as JSON",
+			"input": "{\"authorization\":\"Bearer abcdefghijklmnopqrstuvwxyz\",\"cookie\":\"sid=abc; x=y\",\"host\":\"api.internal\"}",
+			"expect": "{\"authorization\":\"[redacted]\",\"cookie\":\"[redacted]\",\"host\":\"api.internal\"}"
+		},
+		{
+			"name": "postgres connection string in ECONNREFUSED message",
+			"input": "connect ECONNREFUSED postgres://admin:hunter2@db.internal:5432/app",
+			"expect": "connect ECONNREFUSED postgres://[redacted]@db.internal:5432/app"
+		},
+		{
+			"name": "mongodb+srv connection string",
+			"input": "MongoServerError at mongodb+srv://svc:Pa55word@cluster0.abcde.mongodb.net/prod",
+			"expect": "MongoServerError at mongodb+srv://[redacted]@cluster0.abcde.mongodb.net/prod"
+		},
+		{
+			"name": "redis URL with empty username",
+			"input": "redis://:hunter2@cache.internal:6379/0 unreachable",
+			"expect": "redis://[redacted]@cache.internal:6379/0 unreachable"
+		},
+		{
+			"name": "mysql URL whose password contains @",
+			"input": "mysql://root:p@ss@db:3306/shop",
+			"expect": "mysql://[redacted]@db:3306/shop"
+		},
+		{
+			"name": "AWS access key id",
+			"input": "using AKIAIOSFODNN7EXAMPLE for s3",
+			"expect": "using [redacted] for s3"
+		},
+		{
+			"name": "OpenAI project key (sk-proj-)",
+			"input": ["key ", "sk-proj-", "abcdefghijklmnopqrstuvwxyz0123456789", " rejected"],
+			"expect": "key [redacted] rejected"
+		},
+		{
+			"name": "Anthropic key (sk-ant-)",
+			"input": ["x-api-key ", "sk-ant-api03-", "abcdefghijklmnopqrstuvwxyz0123"],
+			"expect": "x-api-key [redacted]"
+		},
+		{
+			"name": "Stripe live secret key",
+			"input": ["stripe ", "sk_", "live_", "4eC39HqLyjWDarjtT1zdp7dc", " failed"],
+			"expect": "stripe [redacted] failed"
+		},
+		{
+			"name": "GitHub classic and fine-grained tokens",
+			"skip": ["browser"],
+			"input": ["ghp_", "abcdefghijklmnopqrstuvwxyz1234567890", " and ", "github_pat_", "11ABCDEFG0abcdefghijklmnopqrstuvwxyz"],
+			"expect": "[redacted] and [redacted]"
+		},
+		{
+			"name": "Slack bot token",
+			"input": ["xox", "b-123456789012-abcdefghijklmnopqrstuv", " end"],
+			"expect": "[redacted] end"
+		},
+		{
+			"name": "Google API key (AIza)",
+			"input": ["maps ", "AIza", "SyA1234567890abcdefghijklmnopqrstu", " quota"],
+			"expect": "maps [redacted] quota"
+		},
+		{
+			"name": "PEM private key block",
+			"skip": ["browser"],
+			"input": "cfg -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAabc\n-----END RSA PRIVATE KEY----- loaded",
+			"expect": "cfg [redacted] loaded"
+		},
+		{
+			"name": "token and password in a URL query string",
+			"input": "GET https://api.example.test/cb?token=abc123def&page=2&password=hunter2",
+			"expect": "GET https://api.example.test/cb?token=[redacted]&page=2&password=[redacted]"
+		},
+		{
+			"name": "api_key and access_token query params",
+			"input": "/v1/data?api_key=k-12345&access_token=tok_98765&x=1",
+			"expect": "/v1/data?api_key=[redacted]&access_token=[redacted]&x=1"
+		},
+		{
+			"name": "password assignment in free text and JSON",
+			"input": "login failed password=hunter2 body={\"password\":\"hunter 2\",\"user\":\"bob\"}",
+			"expect": "login failed password=[redacted] body={\"password\":\"[redacted]\",\"user\":\"bob\"}"
+		},
+		{
+			"name": "client_secret and DB_PASSWORD env style",
+			"input": "client_secret: abcd1234 DB_PASSWORD=s3cret!",
+			"expect": "client_secret: [redacted] DB_PASSWORD=[redacted]"
+		},
+		{
+			"name": "JSON parse error message is left alone",
+			"input": "Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON",
+			"expect": "Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON"
+		},
+		{
+			"name": "email address",
+			"input": "no account for jane.doe+ops@example.co.uk",
+			"expect": "no account for [redacted]"
+		},
+		{
+			"name": "credit card numbers (Luhn-valid), spaced and plain",
+			"input": "charge 4111 1111 1111 1111 declined; amex 378282246310005",
+			"expect": "charge [redacted] declined; amex [redacted]"
+		},
+		{
+			"name": "non-Luhn digit runs and timestamps survive",
+			"input": "order 4111111111111112 at 1767225600000",
+			"expect": "order 4111111111111112 at 1767225600000"
+		},
+		{
+			"name": "node stack trace with a secret in the message line",
+			"input": "Error: connect ECONNREFUSED postgres://app:topsecret@10.0.0.5:5432/main\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1611:16)\n    at Pool.connect (/app/node_modules/pg-pool/index.js:45:11)",
+			"expect": "Error: connect ECONNREFUSED postgres://[redacted]@10.0.0.5:5432/main\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1611:16)\n    at Pool.connect (/app/node_modules/pg-pool/index.js:45:11)"
+		},
+		{
+			"name": "stack frames with versioned package paths survive",
+			"input": "    at x (/app/node_modules/.pnpm/next@14.2.3_react@18.2.0/node_modules/next/dist/server.js:10:5)",
+			"expect": "    at x (/app/node_modules/.pnpm/next@14.2.3_react@18.2.0/node_modules/next/dist/server.js:10:5)"
+		},
+		{
+			"name": "scrubbing is idempotent",
+			"input": "password=[redacted]\nCookie: [redacted]\npostgres://[redacted]@db/x \"token\":\"[redacted]\"",
+			"expect": "password=[redacted]\nCookie: [redacted]\npostgres://[redacted]@db/x \"token\":\"[redacted]\""
+		}
+	],
+	"keys": {
+		"$comment": "Keys whose values are masked wholesale (case-insensitive, at any depth), and keys that must survive.",
+		"sensitive": [
+			"password",
+			"PASSWORD",
+			"db_password",
+			"secret",
+			"client_secret",
+			"token",
+			"access_token",
+			"refresh_token",
+			"csrfToken",
+			"authorization",
+			"Authorization",
+			"http.request.header.authorization",
+			"cookie",
+			"set-cookie",
+			"api_key",
+			"apikey",
+			"x-api-key",
+			"session",
+			"sessionid",
+			"ssn",
+			"user_ssn"
+		],
+		"safe": [
+			"author_id",
+			"discard_count",
+			"discard",
+			"scorecard",
+			"card_brand",
+			"session_id",
+			"route",
+			"message"
+		]
+	}
+}

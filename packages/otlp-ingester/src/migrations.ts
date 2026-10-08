@@ -36,8 +36,28 @@
 import { latencyTableDDL } from "./latency.js";
 import { profileTableDDL } from "./profiles.js";
 import { sourceMapTableDDL } from "./source-maps.js";
-import { logTableDDL } from "./logs.js";
+import {
+	LOG_REQUEST_COLUMNS,
+	LOG_REQUEST_ID_INDEX,
+	logTableDDL,
+	requestRollupTableDDL,
+	requestRollupViewDDL,
+} from "./logs.js";
 import { memoryTableDDL, platformEventTableDDL } from "./memory.js";
+import { ingesterInfoTableDDL, sdkVersionTableDDL } from "./sdk-versions.js";
+
+/** Migration 0013 columns — shared with the baseline DDL in clickhouse.ts. */
+export const OCCURRENCE_CODE_COLUMNS: string[] = [
+	"error_code String DEFAULT ''",
+	"error_why String DEFAULT ''",
+	"error_fix String DEFAULT ''",
+	"error_link String DEFAULT ''",
+	"expected UInt8 DEFAULT 0",
+	"request_id String DEFAULT ''",
+	"fingerprint_scheme LowCardinality(String) DEFAULT 'message-v1'",
+];
+export const OCCURRENCE_REQUEST_ID_INDEX =
+	"INDEX idx_occ_request_id request_id TYPE bloom_filter GRANULARITY 4";
 
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
@@ -137,6 +157,42 @@ export const MIGRATIONS: Migration[] = [
 		`ALTER TABLE {db}.runtime_memory_samples ADD COLUMN IF NOT EXISTS temporality LowCardinality(String) DEFAULT 'gauge'`,
 	] },
 	{ id: "0011-runtime-logs", statements: [logTableDDL("{db}")] },
+	// Request wide events: request summaries share runtime_logs with
+	// operations and plain logs; the lifted columns make "requests on this
+	// route", "everything for request X" and "coded failures" plain column
+	// filters. The skip index only covers parts written after it exists
+	// (no MATERIALIZE INDEX mutation) — older rows predate request ids.
+	{
+		id: "0012-runtime-logs-requests",
+		statements: [
+			...LOG_REQUEST_COLUMNS.map(
+				(column) =>
+					`ALTER TABLE {db}.runtime_logs ADD COLUMN IF NOT EXISTS ${column.ddl}`,
+			),
+			`ALTER TABLE {db}.runtime_logs ADD ${LOG_REQUEST_ID_INDEX.replace("INDEX ", "INDEX IF NOT EXISTS ")}`,
+		],
+	},
+	// Declared error metadata and code-based grouping (fingerprint_scheme
+	// "code-v1" vs the historical "message-v1").
+	{
+		id: "0013-occurrence-codes",
+		statements: [
+			...OCCURRENCE_CODE_COLUMNS.map(
+				(column) =>
+					`ALTER TABLE {db}.runtime_error_occurrences ADD COLUMN IF NOT EXISTS ${column}`,
+			),
+			`ALTER TABLE {db}.runtime_error_occurrences ADD ${OCCURRENCE_REQUEST_ID_INDEX.replace("INDEX ", "INDEX IF NOT EXISTS ")}`,
+		],
+	},
+	// Per-minute route rollup of request summaries. Table first, then the
+	// view (which needs both the table and the 0012 columns).
+	{
+		id: "0014-runtime-request-1m",
+		statements: [requestRollupTableDDL("{db}"), requestRollupViewDDL("{db}")],
+	},
+	// Version compatibility: SDK name/version seen per service, and this
+	// ingester's own version + schema level for the Autter dashboard.
+	{ id: "0015-runtime-compat", statements: [sdkVersionTableDDL("{db}"), ingesterInfoTableDDL("{db}")] },
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

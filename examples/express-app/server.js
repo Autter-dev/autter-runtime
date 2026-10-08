@@ -1,7 +1,10 @@
 /**
  * Example: Express app instrumented with Autter Runtime.
  *
- *   AUTTER_RUNTIME_KEY=dev-key AUTTER_ENDPOINT=http://localhost:4318 node server.js
+ *   AUTTER_RUNTIME_KEY=<your local key> AUTTER_ENDPOINT=http://localhost:4318 node server.js
+ *
+ * (The local `docker compose up` ingester has no built-in key; see
+ * docs/GETTING-STARTED.md for generating one.)
  *
  * - Server tracing/errors via @autter/runtime-node (OTel → /v1/traces)
  * - One request summary per HTTP request via autterRequests (→ /v1/logs),

@@ -34,7 +34,7 @@ export interface AutterBrowserOptions {
 	release?: string;
 	/** Send a session_start ping on init (default true). */
 	sessionTracking?: boolean;
-	/** Last-chance hook: mutate or drop (return null) an event before send. */
+	/** Last-chance hook: mutate or drop (return null) an event before send. Throwing drops the event. */
 	beforeSend?: (event: BrowserEvent) => BrowserEvent | null;
 	/** Observe failed fetch and XHR requests and 5xx responses (default true). */
 	captureNetworkFailures?: boolean;
@@ -476,9 +476,14 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 		}
 	}
 	if (opts.beforeSend) {
-		const mapped = opts.beforeSend(event);
-		if (!mapped) return;
-		event = mapped;
+		try {
+			const mapped = opts.beforeSend(event);
+			if (!mapped) return;
+			event = mapped;
+		} catch {
+			// A telemetry hook must not change application request outcomes.
+			return;
+		}
 	}
 	queue.push(event);
 	if (queue.length >= MAX_QUEUE) {

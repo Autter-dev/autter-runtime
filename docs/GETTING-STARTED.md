@@ -70,8 +70,16 @@ writes ClickHouse. For a local try-out:
 ```bash
 git clone https://github.com/Autter-dev/autter-runtime
 cd autter-runtime
-docker compose up   # ClickHouse + ingester on :4318, key "dev-key"
+export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
+(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
+docker compose up   # ClickHouse + ingester on :4318
 ```
+
+The generated key is kept in your shell and the Compose mapping is stored in
+the git-ignored `.env` file. Use the same key in your local SDK configuration;
+never commit `.env` or paste the key into tracked files. If you skip key setup,
+the ingester starts without an authentication source and rejects ingest
+requests with HTTP 401.
 
 > **That's all the clone is for.** It runs the ingester — you never add
 > code to this checkout. Every step from here on (installing packages,

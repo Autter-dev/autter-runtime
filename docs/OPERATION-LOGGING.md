@@ -14,6 +14,13 @@ messages, `kind` on every summary, coded errors, `fork`/carriers, the AI rollup,
 keys. Request-level features are documented in
 [REQUESTS-AND-ERRORS.md](REQUESTS-AND-ERRORS.md).
 
+**1.5.0** (ingester 1.5.0 first) adds request summaries, `runtimeContext`, inline
+messages, `kind` on every summary, coded errors, `fork`/carriers, the AI rollup,
+`waitUntil`, sinks and logger-only mode — all additive; a golden test proves a
+1.4.0 operation still exports the same OTLP JSON apart from the two new summary
+keys. Request-level features are documented in
+[REQUESTS-AND-ERRORS.md](REQUESTS-AND-ERRORS.md).
+
 ## Node and Next.js
 
 Initialize `initAutterServer` once, before the application starts. For Next.js,

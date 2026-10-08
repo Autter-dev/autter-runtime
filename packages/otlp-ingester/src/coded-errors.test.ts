@@ -674,3 +674,11 @@ test("context sanitising is linear on adversarial strings (no ReDoS)", () => {
 	const out = sanitizeRuntimeContext({ note: "mail jane@example.com see https://x.io/p?token=1" });
 	assert.equal(out.note, "mail [redacted] see https://x.io/p");
 });
+
+test("an invalid code on the exception event does not hide a valid one on the span", () => {
+	const event = new Map([["autter.error.code", "ECONNRESET"], ["autter.request.id", "x"]]);
+	const span = new Map([["autter.error.code", "billing.declined"], ["autter.request.id", "req-12345678"]]);
+	const fields = liftErrorFields(event, span);
+	assert.equal(fields.errorCode, "billing.declined");
+	assert.equal(fields.requestId, "req-12345678");
+});

@@ -29,7 +29,7 @@
 		"directory": "packages/runtime-node"
 	},
 	"scripts": {
-		"build": "tsup",
+		"build": "node ../../scripts/ensure-built.mjs runtime-core && tsup",
 		"test": "npm run build -w @autter/runtime-core && npm run build && npm run build -w @autter/otlp-ingester && node --test test/*.test.mjs"
 	},
 	"dependencies": {

@@ -24,7 +24,7 @@ services:
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_PASSWORD: dev
-      AUTTER_INGEST_KEYS: '[{"key":"dev-key","orgId":"org1","repositoryId":"repo1"}]'
+      AUTTER_INGEST_KEYS: ${AUTTER_INGEST_KEYS:-}
     depends_on:
       clickhouse:
         condition: service_healthy

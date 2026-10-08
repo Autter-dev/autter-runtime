@@ -24,15 +24,17 @@ Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `ru
 
 - Console output is a pretty tree outside production; production keeps JSON lines (`runtime-node`).
 - Debug/info logged inside an operation are folded into its summary instead of separate records; `logging.inline: false` restores 1.4.0 behaviour (`runtime-node`).
-- `cache_read_tokens` / `cache_creation_tokens` counts are no longer masked as tokens by redaction (`runtime-node`, `otlp-ingester`).
+- `cache_read_tokens`, `cache_creation_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `cached_tokens` and `reasoning_tokens` counts are no longer masked as tokens by redaction (`runtime-node`, `otlp-ingester`).
 
 ### Fixes
 
 - Value redaction is linear on adversarial strings. The email, URL-credential, JWT, Slack and Autter-key patterns could take seconds to minutes on long runs such as `"a".repeat(65536)`; they now only start a match at the beginning of a run, query-string stripping is procedural, and strings are capped before scrubbing (`runtime-core`, `runtime-node`, `runtime-edge`, `otlp-ingester`, `runtime-browser`). The patterns predate 1.5.0; 1.5.0 routes more input through them.
+- `@autter/runtime-edge` keeps the request summary when its queue is full (a summary evicts the oldest plain record), caps warn/error records at 50 per request, and no longer throws from `rt.error` / `rt.captureException` when attributes have throwing getters or are Proxies.
 - `@autter/runtime-edge` queues records with the destination (key, endpoint, service, environment) they were created for, and no longer queues records when no key is configured, so a later request can't export them under its own key.
 - `/v1/logs` promotion dedupe lookups are bounded: windows of at most 10 minutes, at most 4 per request, newest records first, only for timestamps within the last 24 hours, and a per-tenant budget (`PROMOTION_LOOKUPS_PER_MINUTE`, default 30) (`otlp-ingester`).
 - A throwing getter or Proxy on an error's metadata no longer stops `captureException` from reporting the error (`runtime-browser`).
 - The sink keeps a numeric `statusCode` of `0` (`otlp-ingester`).
+- An invalid `autter.error.code` or request id on an exception event no longer hides a valid one on its span (`otlp-ingester`).
 - `proxy-addr` 2.0.8 in the lockfile (CVE-2026-90711; reached through Express in the ingester and examples).
 - Package test scripts build the workspace packages they import first, so each suite runs on a clean checkout.
 - `runtime-browser` no longer declares a `./dist/index.cjs` entry that the ESM-only build never produced.

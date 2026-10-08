@@ -28,6 +28,7 @@ import {
 	compileIgnore,
 	createInlineLogState,
 	createRuntimeEvent,
+	isSummary,
 	errorAttributes,
 	makeRedactor,
 	maxLevel,
@@ -149,6 +150,29 @@ interface QueuedRecord {
 	record: OtlpLogRecord;
 	bytes: number;
 	destination: Destination;
+	/** Request summaries are evicted last (see enqueue below). */
+	summary: boolean;
+}
+
+/** warn/error records kept per request; the summary is always added. */
+const MAX_RECORDS_PER_REQUEST = 50;
+
+/** Own-property copy that never throws (Proxies, throwing getters). */
+function safeAttributes(attrs: RuntimeLogContext | undefined): RuntimeLogContext {
+	const out: RuntimeLogContext = {};
+	if (!attrs || typeof attrs !== "object") return out;
+	try {
+		for (const key of Object.keys(attrs)) {
+			try {
+				out[key] = attrs[key] as RuntimeLogContext[string];
+			} catch {
+				/* skip a throwing field */
+			}
+		}
+	} catch {
+		/* unreadable object */
+	}
+	return out;
 }
 
 interface Exporter {
@@ -338,15 +362,24 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 			if (!destination) continue;
 			const encoded = toOtlpLogRecord(record);
 			const bytes = encoder.encode(JSON.stringify(encoded)).length;
-			if (
+			const summary = isSummary(record);
+			const full = () =>
 				exporter.queue.length >= (opts.maxQueue ?? 200) ||
-				exporter.bytes + bytes > 1024 * 1024 ||
-				bytes > 256 * 1024
-			) {
+				exporter.bytes + bytes > 1024 * 1024;
+			// Summaries are always kept: under pressure a summary evicts the
+			// oldest plain record instead of being dropped itself.
+			while (summary && bytes <= 256 * 1024 && full()) {
+				const victim = exporter.queue.findIndex((queued) => !queued.summary);
+				if (victim < 0) break;
+				exporter.bytes -= exporter.queue[victim]!.bytes;
+				exporter.queue.splice(victim, 1);
+				exporter.dropped++;
+			}
+			if (full() || bytes > 256 * 1024) {
 				exporter.dropped++;
 				continue;
 			}
-			exporter.queue.push({ record: encoded, bytes, destination });
+			exporter.queue.push({ record: encoded, bytes, destination, summary });
 			exporter.bytes += bytes;
 		}
 		const flush = deliver().catch(() => {});
@@ -408,6 +441,9 @@ function buildRuntime(
 		attrs: RuntimeLogContext,
 		extra: Record<string, unknown> = {},
 	) => {
+		// The summary (operation event) is always recorded; plain warn/error
+		// records are capped so one noisy request can't fill the queue.
+		if (extra["autter.event.type"] !== "operation" && emitted.length >= MAX_RECORDS_PER_REQUEST) return;
 		const user = mergeContext(attributes, attrs, redact);
 		const exceptions = Object.fromEntries(
 			Object.entries(user).filter(([key]) => key.startsWith("exception.")),
@@ -458,7 +494,7 @@ function buildRuntime(
 				"error",
 				err instanceof Error ? err.message : String(err),
 				{
-					...attrs,
+					...safeAttributes(attrs),
 					...(err instanceof Error
 						? { "exception.type": err.name, "exception.stacktrace": err.stack ?? "" }
 						: {}),
@@ -481,7 +517,7 @@ function buildRuntime(
 				"error",
 				message,
 				{
-					...attrs,
+					...safeAttributes(attrs),
 					"exception.type": isError ? err.name : "Error",
 					"exception.message": message,
 					"exception.stacktrace": (isError && err.stack) || new Error(message).stack || "",

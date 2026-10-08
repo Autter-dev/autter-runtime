@@ -180,3 +180,37 @@ test("queued records keep their own destination and are not queued without a key
 		],
 	);
 });
+
+test("the request summary survives a noisy request and a full queue", async () => {
+	const h = harness();
+	const worker = withAutter(
+		{ apiKey: "k", service: "edge-api", fetch: h.fakeFetch, endpoint: "https://ingest.test", maxQueue: 20 },
+		async (_request, _env, _ctx, rt) => {
+			for (let i = 0; i < 250; i++) rt.warn(`retry ${i}`);
+			return new Response("ok");
+		},
+	);
+	await worker.fetch(new Request("https://edge.test/noisy"), {}, h.ctx);
+	await Promise.all(h.pending);
+	const records = h.records();
+	assert.ok(records.length <= 20);
+	assert.equal(records.filter((r) => r.attrs["autter.event.type"] === "operation").length, 1);
+});
+
+test("hostile attributes never make rt.error or rt.captureException throw", async () => {
+	const h = harness();
+	const hostile = {};
+	Object.defineProperty(hostile, "boom", { enumerable: true, get() { throw new Error("getter"); } });
+	const worker = withAutter(
+		{ apiKey: "k", service: "edge-api", fetch: h.fakeFetch, endpoint: "https://ingest.test" },
+		async (_request, _env, _ctx, rt) => {
+			rt.error(new Error("first"), hostile);
+			rt.captureException(new Error("second"), hostile);
+			return new Response("ok");
+		},
+	);
+	const response = await worker.fetch(new Request("https://edge.test/hostile"), {}, h.ctx);
+	assert.equal(response.status, 200);
+	await Promise.all(h.pending);
+	assert.ok(h.records().some((r) => r.message === "second"));
+});

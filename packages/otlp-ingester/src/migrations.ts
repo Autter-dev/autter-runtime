@@ -38,6 +38,7 @@ import { profileTableDDL } from "./profiles.js";
 import { sourceMapTableDDL } from "./source-maps.js";
 import { logTableDDL } from "./logs.js";
 import { memoryTableDDL, platformEventTableDDL } from "./memory.js";
+import { ingesterInfoTableDDL, sdkVersionTableDDL } from "./sdk-versions.js";
 
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
@@ -137,6 +138,9 @@ export const MIGRATIONS: Migration[] = [
 		`ALTER TABLE {db}.runtime_memory_samples ADD COLUMN IF NOT EXISTS temporality LowCardinality(String) DEFAULT 'gauge'`,
 	] },
 	{ id: "0011-runtime-logs", statements: [logTableDDL("{db}")] },
+	// Version compatibility: SDK name/version seen per service, and this
+	// ingester's own version + schema level for the Autter dashboard.
+	{ id: "0012-runtime-compat", statements: [sdkVersionTableDDL("{db}"), ingesterInfoTableDDL("{db}")] },
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

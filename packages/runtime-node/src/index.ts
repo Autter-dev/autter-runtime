@@ -52,3 +52,14 @@ export {
 	type RuntimeOperation,
 	type RuntimeLoggingOptions,
 } from "./logger.js";
+export {
+	fetchIngesterCompat,
+	evaluateCompat,
+	COMPAT_MANIFEST,
+	INGESTER_VERSION_HEADER,
+	SDK_IDENTITY,
+	type CompatIssue,
+	type IngesterCompatInfo,
+	type SdkIdentity,
+} from "./compat.js";
+export { runDoctor, type DoctorOptions, type DoctorReport } from "./doctor.js";

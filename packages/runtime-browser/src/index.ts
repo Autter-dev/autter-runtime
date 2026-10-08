@@ -13,6 +13,8 @@
  * (`createBrowserRelayHandler` in @autter/runtime-node).
  */
 
+import { version as SDK_VERSION } from "../package.json";
+
 export interface AutterBrowserOptions {
 	/**
 	 * Where to send events:
@@ -421,6 +423,9 @@ export function flush(): void {
 		service: opts.service,
 		environment: opts.environment || "production",
 		...(opts.release ? { release: opts.release } : {}),
+		// SDK version: the ingester records it so version mismatches are
+		// visible (and checked server-side by the relay). Ignored by older ingesters.
+		sdk: SDK_VERSION,
 		events,
 	});
 	// Direct mode: key as query param (sendBeacon can't set headers) and

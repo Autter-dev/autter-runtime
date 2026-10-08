@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { flush, initAutterBrowser } from "../dist/index.js";
 
 test("errors carry browser, OS, route trail, and page scripts without a raw user agent", async () => {
@@ -88,7 +89,9 @@ test("errors carry browser, OS, route trail, and page scripts without a raw user
 	assert.ok(!body.includes("Macintosh"));
 	assert.ok(!body.includes("supersecretnonce"));
 	assert.ok(!body.includes("AppleWebKit"));
-	const { events } = JSON.parse(body);
+	const { events, sdk } = JSON.parse(body);
+	// The SDK version rides along for the ingester's compatibility records.
+	assert.equal(sdk, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
 	const scriptError = events.find((event) => event.message === "Script error.");
 	assert.equal(scriptError.context["autter.browser"], "Chrome 131");
 	assert.equal(scriptError.context["autter.os"], "macOS");

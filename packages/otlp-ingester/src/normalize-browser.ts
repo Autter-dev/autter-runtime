@@ -52,6 +52,8 @@ export const browserPayloadSchema = z.object({
 	service: z.string().min(1).max(200),
 	environment: z.string().min(1).max(100),
 	release: z.string().max(200).optional(),
+	/** @autter/runtime-browser version (1.4+); recorded for compatibility checks. */
+	sdk: z.string().regex(/^\d{1,6}\.\d{1,6}\.\d{1,6}[0-9A-Za-z.+-]{0,20}$/).optional().catch(undefined),
 	events: z.array(browserEventSchema).max(50),
 });
 

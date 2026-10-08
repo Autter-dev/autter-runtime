@@ -124,6 +124,35 @@ import { ExpressInstrumentation } from "@opentelemetry/instrumentation-express";
 initAutterServer({ ..., instrumentations: [new ExpressInstrumentation()] });
 ```
 
+### Version compatibility: checked for you
+
+Some features need a minimum ingester version: operation logging needs
+1.4.0, memory metrics 1.3.3, endpoint latency 1.3.1. After
+`initAutterServer`, the SDK checks the ingester once in the background
+(`GET /v1/compat`, unref'd, 3 s timeout). For each feature in use that the
+ingester can't store, it prints one warning:
+
+```text
+[autter-runtime] Operation logging needs ingester >= 1.4.0; yours is 1.3.4. Upgrade the ingester: docker pull ghcr.io/autter-dev/otlp-ingester:latest and restart it (ClickHouse migrations run at boot). See …/docs/COMPATIBILITY.md
+```
+
+The check never throws, never delays startup or exit, and is silent when
+versions match or are unknown. `debug: true` logs the result. Turn it off
+with `compatCheck: false` or `AUTTER_COMPAT_CHECK=0`. The browser relay does
+the same for browser features such as CSP violation capture. The SDK reports
+itself through the OTLP resource attributes `telemetry.distro.name` and
+`telemetry.distro.version`, so the Autter dashboard shows the SDK version
+each service runs.
+
+For a full report (for example in CI or after a deploy):
+
+```bash
+npx @autter/runtime-node doctor --endpoint https://ingest.example.com [--key "$AUTTER_RUNTIME_KEY"] [--json]
+```
+
+Exit codes: 0 compatible, 1 mismatch or rejected key, 2 ingester unreachable.
+See [docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md).
+
 ### Lifecycle: never lose telemetry to a forgotten shutdown()
 
 Telemetry is batched (errors every ~2 s, healthy traces every ~5 s, metrics

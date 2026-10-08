@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { trace, type Attributes } from "@opentelemetry/api";
 import { redactAttributes } from "./redact.js";
+import { noteCompatFeature, observeIngesterResponse } from "./compat.js";
 
 export type RuntimeLogContextValue =
 	| string
@@ -47,6 +48,8 @@ interface LoggerConfig {
 	service: string;
 	environment: string;
 	release?: string;
+	/** SDK identity for the `telemetry.distro.*` resource attributes. */
+	distro?: { name: string; version: string };
 	options?: RuntimeLoggingOptions;
 	redact(attributes: Attributes): Attributes;
 	run<T>(
@@ -270,6 +273,9 @@ function emit(
 	}
 	queue.push({ record, bytes });
 	queueBytes += bytes;
+	// Operation logging needs ingester >= 1.4.0 (/v1/logs + runtime_logs);
+	// the one-time compat check warns if the ingester is older.
+	noteCompatFeature("operation_logging");
 	scheduleFlush();
 }
 
@@ -314,6 +320,12 @@ export async function flushRuntimeLogs(): Promise<void> {
 								...(activeConfig.release
 									? { "service.version": activeConfig.release }
 									: {}),
+								...(activeConfig.distro
+									? {
+											"telemetry.distro.name": activeConfig.distro.name,
+											"telemetry.distro.version": activeConfig.distro.version,
+										}
+									: {}),
 							}).map(([key, item]) => ({ key, value: value(item) })),
 						},
 						scopeLogs: [
@@ -341,6 +353,7 @@ export async function flushRuntimeLogs(): Promise<void> {
 							Math.max(1, Math.min(3000, deadline - Date.now())),
 						),
 					});
+					observeIngesterResponse({ status: response.status, headers: response.headers, route: "/v1/logs" });
 					if (!response.ok)
 						throw new Error(`Runtime log export failed (${response.status})`);
 					failure = undefined;

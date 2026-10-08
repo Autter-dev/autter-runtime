@@ -145,6 +145,7 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 - [Architecture & data model](docs/ARCHITECTURE.md)
 - [Operation logging and diagnostic context](docs/OPERATION-LOGGING.md)
 - [Continuous detection, profiles, and outcomes](docs/CONTINUOUS-DETECTION.md)
+- [Version compatibility](docs/COMPATIBILITY.md): the built-in SDK/ingester/schema check and `npx @autter/runtime-node doctor`
 - [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
 
 ## Contributing
@@ -155,6 +156,12 @@ language integrations, features. We'd be more than glad to have you: see
 good first areas to pick up.
 
 ## Hosting the ingester
+
+Upgrade the ingester before the SDKs. New features need its routes and
+ClickHouse migrations. The SDK warns once at runtime when they don't match,
+and `npx @autter/runtime-node doctor --endpoint <ingester URL>` prints a full
+report. See [Version compatibility](docs/COMPATIBILITY.md).
+
 
 **Autter cloud** hosts it at `otlp.autter.dev` (the SDKs' default
 endpoint). Deployment runbook + scripts for the AWS/ECS setup:

@@ -14,7 +14,10 @@ Existing OTLP exporters benefit from server-side detection without an SDK
 upgrade when the ingester is 1.3.2 or later. Install
 `@autter/runtime-node`, `@autter/runtime-browser`, or `@autter/runtime-next`
 version 1.3.2 or later to use the new outcome helpers
-and browser network and timing capture in an application.
+and browser network and timing capture in an application. Ingesters older
+than 1.3.2 reject browser batches containing the new event types, so upgrade
+the ingester first. [Version compatibility](COMPATIBILITY.md) explains the
+built-in check and `doctor` command.
 
 ## Report a failed outcome without throwing
 

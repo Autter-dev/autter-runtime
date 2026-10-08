@@ -60,6 +60,7 @@ import {
 import { RedactingSpanExporter } from "./redact-exporter.js";
 import { startMemoryMetrics } from "./memory.js";
 import { configureRuntimeLogger, flushRuntimeLogs, shutdownRuntimeLogger, type RuntimeLoggingOptions } from "./logger.js";
+import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -155,6 +156,19 @@ export interface AutterServerOptions {
 	llmTracing?: boolean;
 	/** Extra instrumentations (e.g. `new ExpressInstrumentation()`). */
 	instrumentations?: unknown[];
+	/**
+	 * Check once, in the background, that the ingester supports the features
+	 * in use (operation logging, memory metrics, …) and print one warning per
+	 * mismatch naming both versions and the fix. Never throws or delays
+	 * startup. Also disabled by AUTTER_COMPAT_CHECK=0. Default true.
+	 * Run `npx @autter/runtime-node doctor` for a full report.
+	 */
+	compatCheck?: boolean;
+	/**
+	 * @internal Wrapper packages (`@autter/runtime-next`) report their own
+	 * name/version as the OTLP `telemetry.distro.*` resource attributes.
+	 */
+	distro?: { name: string; version: string };
 }
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
@@ -770,12 +784,18 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
 	debugLog(`initialising service=${options.service} endpoint=${endpoint}`);
 	activeRedactor = makeRedactor(options.redactAttributes ?? true);
+	const distro = options.distro ?? SDK_IDENTITY;
+	configureCompatCheck({ endpoint, enabled: options.compatCheck !== false, sdk: distro });
 
 	const resource = new Resource({
 		[ATTR_SERVICE_NAME]: options.service,
 		"service.instance.id": (options.instanceId || process.env.AUTTER_RUNTIME_INSTANCE_ID || randomUUID()).slice(0, 128),
 		...(options.release ? { [ATTR_SERVICE_VERSION]: options.release } : {}),
 		"deployment.environment": environment,
+		// OTel semconv for SDK distributions: the ingester records which
+		// Autter SDK version each service runs (version compatibility checks).
+		"telemetry.distro.name": distro.name,
+		"telemetry.distro.version": distro.version,
 		// Tells the ingester request metrics arrive on the metrics pipe, so
 		// it must not also fold our server spans into usage rollups (that
 		// would double-count every sampled request).
@@ -845,6 +865,9 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	});
 	sdk.start();
 	const stopMemoryMetrics = options.memoryMetrics === false ? null : startMemoryMetrics();
+	noteCompatFeature("endpoint_latency");
+	if (stopMemoryMetrics) noteCompatFeature("memory_metrics");
+	if (options.llmTracing !== false) noteCompatFeature("llm_calls");
 
 	// Errors, LLM calls, and process spans must never be lost to head
 	// sampling, so they go through a dedicated always-on provider with its
@@ -978,7 +1001,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 		if (!reuseActive) span.end();
 	}
-	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment,
+	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment, distro,
 		release: options.release, options: options.logging, redact: activeRedactor,
 		run: (name, fn, attributes) => runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
 		reportOutcome,

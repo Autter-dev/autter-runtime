@@ -14,6 +14,9 @@
 			"require": "./dist/index.cjs"
 		}
 	},
+	"bin": {
+		"autter-runtime": "./dist/cli.js"
+	},
 	"files": [
 		"dist"
 	],
@@ -23,7 +26,7 @@
 		"directory": "packages/runtime-node"
 	},
 	"scripts": {
-		"build": "tsup src/index.ts --format esm,cjs --dts --target node20 --clean",
+		"build": "tsup src/index.ts src/cli.ts --format esm,cjs --dts --target node20 --clean",
 		"test": "npm run build && npm run build -w @autter/otlp-ingester && node --test test/*.test.mjs"
 	},
 	"dependencies": {

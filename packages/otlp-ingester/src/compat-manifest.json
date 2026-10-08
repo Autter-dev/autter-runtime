@@ -1,0 +1,79 @@
+{
+	"manifestVersion": 1,
+	"docs": "https://github.com/Autter-dev/autter-runtime/blob/main/docs/COMPATIBILITY.md",
+	"upgrade": {
+		"ingester": "docker pull ghcr.io/autter-dev/otlp-ingester:latest and restart it (ClickHouse migrations run at boot)",
+		"sdk": "npm install {package}@latest"
+	},
+	"features": [
+		{
+			"id": "llm_calls",
+			"title": "LLM call tracking",
+			"ingester": "1.1.0",
+			"migrations": ["0004-llm-calls"],
+			"sdks": { "@autter/runtime-node": "1.1.0", "@autter/runtime-next": "1.1.0" }
+		},
+		{
+			"id": "endpoint_latency",
+			"title": "Endpoint latency regression detection",
+			"ingester": "1.3.1",
+			"migrations": ["0005-latency-histograms"],
+			"sdks": { "@autter/runtime-node": "1.3.0", "@autter/runtime-next": "1.3.0" }
+		},
+		{
+			"id": "browser_network_events",
+			"title": "Browser network, timing and outcome capture",
+			"ingester": "1.3.2",
+			"migrations": [],
+			"sdks": { "@autter/runtime-browser": "1.3.2", "@autter/runtime-next": "1.3.2" },
+			"browserEvents": ["request_failure", "timing", "outcome"]
+		},
+		{
+			"id": "profiles",
+			"title": "Profile ingestion",
+			"ingester": "1.3.2",
+			"migrations": ["0006-profile-samples"],
+			"route": "/v1/profiles",
+			"sdks": {}
+		},
+		{
+			"id": "source_maps",
+			"title": "Source map upload",
+			"ingester": "1.3.2",
+			"migrations": ["0007-source-maps"],
+			"route": "/v1/sourcemaps",
+			"sdks": {}
+		},
+		{
+			"id": "memory_metrics",
+			"title": "Memory pressure detection",
+			"ingester": "1.3.3",
+			"migrations": ["0008-memory-signals", "0010-memory-temporality"],
+			"sdks": { "@autter/runtime-node": "1.3.3", "@autter/runtime-next": "1.3.3" }
+		},
+		{
+			"id": "platform_events",
+			"title": "Platform OOM/restart events",
+			"ingester": "1.3.3",
+			"migrations": ["0008-memory-signals"],
+			"route": "/v1/platform-events",
+			"sdks": {}
+		},
+		{
+			"id": "csp_violations",
+			"title": "Browser CSP violation capture",
+			"ingester": "1.3.4",
+			"migrations": [],
+			"sdks": { "@autter/runtime-browser": "1.3.3", "@autter/runtime-next": "1.3.4" },
+			"browserEvents": ["csp_violation"]
+		},
+		{
+			"id": "operation_logging",
+			"title": "Operation logging",
+			"ingester": "1.4.0",
+			"migrations": ["0011-runtime-logs"],
+			"route": "/v1/logs",
+			"sdks": { "@autter/runtime-node": "1.4.0", "@autter/runtime-next": "1.4.0" }
+		}
+	]
+}

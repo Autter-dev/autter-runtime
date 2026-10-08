@@ -12,6 +12,15 @@
 - Python adapter: new stdlib-only `adapters/python/redact.py` (`redact_text`, `redact_attributes`, `configure`); the caught-exception sampler scrubs tracebacks with it.
 - Shared parity vectors in `test-vectors/redaction.json` run against every implementation.
 
+### Version compatibility check
+
+- One source of truth for feature requirements: `packages/otlp-ingester/src/compat-manifest.json`. It lists the minimum ingester, ClickHouse migrations, route and minimum SDK versions for each feature. See `docs/COMPATIBILITY.md`.
+- New `GET /v1/compat` (public): ingester version, schema state and level, and per-feature availability. Optional `?features=…&sdk=name@version` returns evaluated issues. Every response carries `x-autter-ingester-version`, exposed to CORS on `/v1/browser`. The ingester records the SDK name and version each service sends with (`runtime_sdk_versions`) and its own version (`runtime_ingester_info`), through migration `0012-runtime-compat` (`otlp-ingester`).
+- The SDK checks the ingester once, in the background, when a feature that needs a newer ingester is in use. It warns once per incompatible feature, naming both versions and the fix. Opt out with `compatCheck: false` or `AUTTER_COMPAT_CHECK=0`. The SDK reports itself as `telemetry.distro.name` and `telemetry.distro.version`, and the browser relay forwards the browser SDK version. Both check browser features against the ingester's version header (`runtime-node`, `runtime-next`).
+- New `npx @autter/runtime-node doctor`: a one-shot SDK, ingester and schema report. Exits non-zero on a mismatch (`runtime-node`).
+- The browser payload carries the SDK version (`sdk`). Older ingesters ignore it (`runtime-browser`).
+- Python adapter: new stdlib-only `adapters/python/compat.py`, with `warn_if_incompatible` and `python3 compat.py doctor`.
+
 ### Behavior notes
 
 - Error messages that contained secrets now fingerprint on their scrubbed form, so such issues may regroup once (they previously split per secret value).

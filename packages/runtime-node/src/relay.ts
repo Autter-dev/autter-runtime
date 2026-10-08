@@ -1,6 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Attributes } from "@opentelemetry/api";
 import { makeRedactor, type RedactOptions, type Redactor } from "./redact.js";
+import {
+	ensureCompatConfigured,
+	noteCompatFeature,
+	noteRelayRejection,
+	observeIngesterResponse,
+} from "./compat.js";
+import { featuresForBrowserEvents } from "../../otlp-ingester/src/compat.js";
 
 /**
  * Same-origin browser relay. The browser tracker posts to a route on the
@@ -34,6 +41,14 @@ export interface RelayOptions {
 	 * Default true.
 	 */
 	redact?: boolean | RedactOptions;
+	/**
+	 * Warn once (server-side) when browser features in the forwarded events
+	 * — CSP violations, network/timing capture — need a newer ingester than
+	 * the one answering. Reads the ingester's version header from the forward
+	 * response; never blocks the 202. Also disabled by AUTTER_COMPAT_CHECK=0.
+	 * Default true.
+	 */
+	compatCheck?: boolean;
 }
 
 class IpWindow {
@@ -146,12 +161,19 @@ export function sanitizeBrowserPayload(
 		...(typeof p.release === "string"
 			? { release: p.release.slice(0, 200) }
 			: {}),
+		// @autter/runtime-browser version, for the ingester's compat records.
+		...(typeof p.sdk === "string" && /^\d{1,6}\.\d{1,6}\.\d{1,6}[0-9A-Za-z.+-]{0,20}$/.test(p.sdk)
+			? { sdk: p.sdk }
+			: {}),
 		events,
 	};
 }
 
 function forward(payload: object, opts: RelayOptions): void {
-	const url = `${(opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "")}/v1/browser`;
+	const endpoint = (opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "");
+	const url = `${endpoint}/v1/browser`;
+	const compat = opts.compatCheck !== false;
+	if (compat) ensureCompatConfigured(endpoint);
 	void fetch(url, {
 		method: "POST",
 		headers: {
@@ -160,6 +182,14 @@ function forward(payload: object, opts: RelayOptions): void {
 		},
 		body: JSON.stringify(payload),
 		signal: AbortSignal.timeout(10_000),
+	}).then((response) => {
+		if (!compat) return;
+		const types = new Set(
+			((payload as { events?: Array<{ type?: string }> }).events ?? []).map((e) => String(e.type)),
+		);
+		observeIngesterResponse({ status: response.status, headers: response.headers });
+		for (const feature of featuresForBrowserEvents(types)) noteCompatFeature(feature);
+		noteRelayRejection(types, response.status, response.headers);
 	}).catch((err) => {
 		(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(
 			err,

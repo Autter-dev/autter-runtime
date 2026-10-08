@@ -15,6 +15,7 @@ profile and source-map uploads use the server key.
 | `POST /v1/profiles` | symbolized pprof (server key only) |
 | `POST /v1/sourcemaps` | release-keyed source map JSON (server key only) |
 | `POST /v1/platform-events` | ECS/Kubernetes OOM and restart JSON (server key only) |
+| `GET /v1/compat` | ingester version, schema level and supported features (public; see [Version compatibility](COMPATIBILITY.md)) |
 
 Any language with an OpenTelemetry SDK can send server telemetry — point
 its OTLP/HTTP exporter at the ingester and add the key as a header.

@@ -32,6 +32,7 @@ import {
 	type AutterServerOptions,
 	type RelayOptions,
 } from "@autter/runtime-node";
+import pkg from "../package.json" with { type: "json" };
 
 export {
 	createRuntimeLogger,
@@ -75,7 +76,12 @@ export type { AutterServer, AutterServerOptions, RelayOptions };
 
 /** Server OTel init for Next.js `instrumentation.ts`. */
 export function registerAutter(options: AutterServerOptions): AutterServer {
-	return initAutterServer(options);
+	// Report as @autter/runtime-next so version checks and the dashboard
+	// name the package the app actually installs.
+	return initAutterServer({
+		distro: { name: "@autter/runtime-next", version: (pkg as { version: string }).version },
+		...options,
+	});
 }
 
 /** App Router relay route: `export const { POST } = createAutterRelayRoute({...})`. */

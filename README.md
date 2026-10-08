@@ -178,7 +178,10 @@ docker run -p 4318:4318 \
 Or for local development with a bundled ClickHouse:
 
 ```bash
-docker compose up          # local ClickHouse + ingester on :4318, key "dev-key"
+# Generate a local key and save its mapping in the git-ignored .env file.
+export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
+(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
+docker compose up          # local ClickHouse + ingester on :4318
 ```
 
 Point your OpenTelemetry exporter at it:
@@ -186,7 +189,7 @@ Point your OpenTelemetry exporter at it:
 ```ts
 new OTLPTraceExporter({
   url: "http://localhost:4318/v1/traces",
-  headers: { authorization: "Bearer dev-key" },
+  headers: { authorization: `Bearer ${process.env.AUTTER_RUNTIME_KEY}` },
 });
 ```
 

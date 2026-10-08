@@ -56,6 +56,15 @@ test("operator-supplied patterns extend the built-ins", () => {
 	}
 });
 
+test("scrubbing stays bounded on hostile input", () => {
+	let started = Date.now();
+	scrubText("eyJ-".repeat(16384));
+	assert.ok(Date.now() - started < 500, `JWT pattern took ${Date.now() - started}ms`);
+	started = Date.now();
+	sanitizeRuntimeContext({ note: "a@".repeat(450_000) });
+	assert.ok(Date.now() - started < 500, `900 KB context value took ${Date.now() - started}ms`);
+});
+
 // ---------------------------------------------------------------------------
 // Over the wire: an unscrubbing OTLP sender → ingester → ClickHouse + sink.
 // Nothing secret may reach either.

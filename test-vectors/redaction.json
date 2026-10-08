@@ -187,6 +187,8 @@
 		"safe": [
 			"author_id",
 			"discard_count",
+			"discard",
+			"scorecard",
 			"card_brand",
 			"session_id",
 			"route",

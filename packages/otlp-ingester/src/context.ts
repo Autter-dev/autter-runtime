@@ -31,7 +31,10 @@ export function sanitizeRuntimeContext(
 			const text = /(?:url|path|route|target)$/i.test(key)
 				? value.split(/[?#]/)[0]!
 				: value;
-			return scrub(text).slice(0, /stack/i.test(key) ? 32000 : 2048);
+			// Cut before scrubbing so scrub work is bounded by the stored size;
+			// the slack keeps a secret straddling the cut whole for the scrubber.
+			const limit = /stack/i.test(key) ? 32000 : 2048;
+			return scrub(text.slice(0, limit + 512)).slice(0, limit);
 		}
 		if (typeof value === "number")
 			return Number.isFinite(value) ? value : undefined;

@@ -40,7 +40,8 @@ _PREFIXED_SECRET = re.compile(
     r"|npm_[A-Za-z0-9]{36}|autter_(?:rt|pat)_[A-Za-z0-9_-]{10,}"
     r"|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})"
 )
-_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
+# Lookbehind, not \b: a \b start at every "eyJ" after "-" is quadratic.
+_JWT = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
 _AUTH_SCHEME = re.compile(
     r"\b(?:bearer\s+[A-Za-z0-9._~+/=-]{10,}"
     r"|basic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2})",
@@ -79,7 +80,7 @@ _SENSITIVE_KEYS = [
         r"(^|[._-])session$|^(j|php)?sess(ion)?id$|^sid$|connect\.sid",
         r"phone|msisdn",
         r"(^|[^a-z])ssn($|[^a-z])|social[-_ ]?security",
-        r"cvv|cvc|card([-_. ]?(number|num|no))?$",
+        r"cvv|cvc|(^|[^a-z])card([-_. ]?(number|num|no))?$",
         r"credit[-_.]?card",
         r"connection[-_.]?string|(^|[._-])dsn$",
         r"recovery[-_.]?code|\botp\b|magic[-_.]?link",
@@ -175,7 +176,11 @@ def _redact_value(key: str, value: Any, depth: int) -> Any:
         return _redact_mapping(value, depth + 1)
     if isinstance(value, (list, tuple)):
         return [_redact_value("", item, depth + 1) for item in list(value)[:_MAX_ITEMS]]
-    return redact_text(str(value))
+    try:
+        text = str(value)
+    except Exception:  # a broken __str__ must not break the caller
+        return MASK
+    return redact_text(text)
 
 
 def _redact_mapping(mapping: Mapping[Any, Any], depth: int) -> dict[str, Any]:

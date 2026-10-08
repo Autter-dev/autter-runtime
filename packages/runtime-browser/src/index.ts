@@ -131,12 +131,15 @@ function stripQuery(value: string | undefined): string | undefined {
 // @autter/runtime-node (parity checked by test-vectors/redaction.json).
 // Deliberately compact: this bundle is size-capped.
 const SENSITIVE_KEY_RE =
-	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|private[-_.]?key|(^|[._-])session$|^(j|php)?sess(ion)?id$|^sid$|(^|[^a-z])ssn($|[^a-z])|cvv|card([-_. ]?(number|num|no))?$/i;
+	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|private[-_.]?key|(^|[._-])session$|^(j|php)?sess(ion)?id$|^sid$|(^|[^a-z])ssn($|[^a-z])|cvv|(^|[^a-z])card([-_. ]?(number|num|no))?$/i;
 const EMAIL_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
 // Vendor-prefixed keys, JWTs, Bearer/Basic credentials. Server-only shapes
 // (PEM blocks, npm/GitLab/SendGrid tokens) are left to the relay/ingester.
 const SECRET_RE =
-	/\b(sk-[\w-]{20,}|[sr]k_(live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[\w-]{30,}|(AKIA|ASIA)[0-9A-Z]{16}|eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}|bearer\s+[\w.~+/=-]{10,}|basic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2})/gi;
+	/\b(sk-[\w-]{20,}|[sr]k_(live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[\w-]{30,}|(AKIA|ASIA)[0-9A-Z]{16}|bearer\s+[\w.~+/=-]{10,}|basic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2})/gi;
+// JWTs may only start after a non-token character (lookbehind would break
+// older Safari): a \b start at every "eyJ" after "-" is quadratic.
+const JWT_RE = /(^|[^\w-])eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g;
 const HEADER_RE =
 	/((^|[^\w-])(proxy-)?(authorization|(set-)?cookie)["']?\s*[:=]\s*["']?)[^"'\r\n]+/gim;
 const ASSIGN_RE =
@@ -167,13 +170,16 @@ export function scrubText(value: string): string {
 	if (custom === false) return value;
 	let out = String(value)
 		.replace(SECRET_RE, MASK)
+		.replace(JWT_RE, "$1" + MASK)
 		.replace(HEADER_RE, "$1" + MASK)
 		.replace(ASSIGN_RE, (_m, key: string, sep: string, val: string) =>
 			key + sep + (/^["']/.test(val) ? val[0] + MASK + val[0] : MASK))
 		.replace(URL_CRED_RE, "$1" + MASK + "@")
 		.replace(CARD_RE, (m) => (luhn(m) ? MASK : m))
 		.replace(EMAIL_RE, MASK);
-	for (const re of (custom && custom.values) || []) out = out.replace(re, MASK);
+	// Always global (a plain /x/ would mask only the first hit), never sticky.
+	for (const re of (custom && custom.values) || [])
+		out = out.replace(new RegExp(re.source, re.flags.replace(/[gy]/g, "") + "g"), MASK);
 	return out;
 }
 
@@ -193,7 +199,7 @@ export function redactContext(
 	if (custom === false) return context;
 	const out: Record<string, unknown> = {};
 	for (const key in context) {
-		out[key] = SENSITIVE_KEY_RE.test(key) || (custom && custom.keys && custom.keys.test(key))
+		out[key] = SENSITIVE_KEY_RE.test(key) || (custom && custom.keys && key.search(custom.keys) > -1)
 			? MASK
 			: scrubValue(context[key], depth);
 	}
@@ -368,10 +374,19 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	}
 	attachClient(event);
 	// Scrub before beforeSend so the last-chance hook sees the final form.
-	event.message = scrubText(event.message);
-	if (event.stack) event.stack = scrubText(event.stack);
-	if (event.name) event.name = scrubText(event.name);
-	if (event.context) event.context = redactContext(event.context);
+	// Fields arrive cut with 512 chars of slack; scrub, then cut, so a secret
+	// straddling the limit is masked whole instead of half-exported.
+	event.message = scrubText(event.message).slice(0, 4000);
+	if (event.stack) event.stack = scrubText(event.stack).slice(0, 32000);
+	if (event.name) event.name = scrubText(event.name).slice(0, 200);
+	if (event.context) {
+		try {
+			event.context = redactContext(event.context);
+		} catch {
+			// Throwing getter / revoked Proxy: drop the context, never throw.
+			delete event.context;
+		}
+	}
 	if (opts.beforeSend) {
 		const mapped = opts.beforeSend(event);
 		if (!mapped) return;
@@ -399,7 +414,7 @@ function baseEvent(
 	return {
 		type,
 		timestamp: new Date().toISOString(),
-		message: String(message).slice(0, 4000),
+		message: String(message).slice(0, 4512),
 		route: route(),
 		...(userId || globalContext
 			? { context: { ...(globalContext || {}), ...(userId ? { userId } : {}) } }
@@ -470,7 +485,7 @@ export function captureException(
 	event.severity = "error";
 	if (isError) {
 		event.errorType = error.name;
-		if (error.stack) event.stack = String(error.stack).slice(0, 32000);
+		if (error.stack) event.stack = String(error.stack).slice(0, 32512);
 	}
 	if (context) event.context = { ...(event.context || {}), ...context };
 	enqueue(event, true);
@@ -496,7 +511,7 @@ export function captureMessage(
 /** Report an application outcome that failed without throwing. Use a stable name. */
 export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
 	const event = baseEvent("outcome", message);
-	event.name = String(name).slice(0, 200);
+	event.name = String(name).slice(0, 712);
 	event.errorType = "OutcomeFailure";
 	event.severity = "error";
 	if (context) event.context = { ...(event.context || {}), ...context };
@@ -509,7 +524,7 @@ export function trackEvent(
 	props?: Record<string, string | number | boolean>,
 ): void {
 	const event = baseEvent("track_event", "");
-	event.name = String(name).slice(0, 200);
+	event.name = String(name).slice(0, 712);
 	if (props) event.context = { ...(event.context || {}), ...props };
 	enqueue(event);
 }
@@ -641,7 +656,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 		} else {
 			e.errorType = event.error instanceof Error ? event.error.name : "Error";
 			if (event.error instanceof Error && event.error.stack) {
-				e.stack = String(event.error.stack).slice(0, 32000);
+				e.stack = String(event.error.stack).slice(0, 32512);
 			}
 			e.filename = stripQuery(event.filename);
 			if (event.lineno) e.line = event.lineno;
@@ -693,7 +708,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			);
 			if (isError) {
 				e.errorType = reason.name;
-				if (reason.stack) e.stack = String(reason.stack).slice(0, 32000);
+				if (reason.stack) e.stack = String(reason.stack).slice(0, 32512);
 			} else {
 				// A rejection whose reason isn't an Error carries no stack and no
 				// meaningful type. In practice most are injected third-party

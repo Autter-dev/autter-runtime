@@ -11,6 +11,10 @@
 - Ingester scrubs occurrence message/stack/route, span names, browser context (deep) and LLM-call attributes before storage and the sink webhook; extra patterns via `AUTTER_REDACT_VALUE_PATTERNS` / `AUTTER_REDACT_KEY_PATTERNS` (`otlp-ingester`).
 - Python adapter: new stdlib-only `adapters/python/redact.py` (`redact_text`, `redact_attributes`, `configure`); the caught-exception sampler scrubs tracebacks with it.
 - Shared parity vectors in `test-vectors/redaction.json` run against every implementation.
+- Export-time scrubbing also covers span link attributes, span event names and resource attributes on traces and metrics (`process.command_args` from NodeSDK's process detector, `OTEL_RESOURCE_ATTRIBUTES`). A batch with a span that could not be scrubbed is reported as a failed export instead of a silent partial success (`runtime-node`).
+- The JWT pattern no longer takes seconds on long `eyJ-eyJ-…` runs (5 s per 64 KB in Node, 3.4 s in the ingester, 6 s in the browser); the ingester caps each scrubbed string at 64 KB and cuts context values to their stored size before scrubbing (`runtime-node`, `runtime-browser`, `otlp-ingester`, Python).
+- Custom key/value patterns with `g` or `y` flags work on every key and every occurrence (a `/x/g` key pattern used to skip every other matching key); browser value patterns mask every match, not just the first (`runtime-node`, `runtime-browser`).
+- Messages, names and stacks are scrubbed before they are cut to size, so a secret straddling the limit is masked whole (browser, relay, Python sampler). A browser context with a throwing getter or revoked Proxy is dropped instead of throwing into the app. The `card` key rule no longer masks keys like `discard` or `scorecard`.
 
 ### Version compatibility check
 

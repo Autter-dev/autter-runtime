@@ -122,15 +122,15 @@ export function sanitizeBrowserPayload(
 				: {}),
 			message:
 				typeof e.message === "string"
-					? redactor.text(e.message.slice(0, 4000))
+					? redactor.text(e.message.slice(0, 4512)).slice(0, 4000)
 					: "",
 			...(typeof e.name === "string"
-				? { name: redactor.text(e.name.slice(0, 200)) }
+				? { name: redactor.text(e.name.slice(0, 712)).slice(0, 200) }
 				: {}),
 			...(typeof e.durationMs === "number" && Number.isFinite(e.durationMs)
 				? { durationMs: Math.max(0, Math.min(120000, e.durationMs)) } : {}),
 			...(typeof e.stack === "string"
-				? { stack: redactor.text(e.stack.slice(0, 32000)) }
+				? { stack: redactor.text(e.stack.slice(0, 32512)).slice(0, 32000) }
 				: {}),
 			...(typeof e.errorType === "string"
 				? { errorType: e.errorType.slice(0, 200) }

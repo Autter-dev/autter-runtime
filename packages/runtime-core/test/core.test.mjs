@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+	redactAttributes,
 	RuntimeError,
 	defineRuntimeErrors,
 	isRuntimeErrorLike,
@@ -259,4 +260,17 @@ test("value redaction is linear on adversarial strings (no ReDoS)", async () => 
 	assert.equal(out.db, "postgres://[redacted]@host/db");
 	assert.equal(out.slack, "token [redacted]");
 	assert.equal(boundContext({ url: "see https://a.com/x?token=1#f and http://b.com?y" }, redact).url, "see https://a.com/x and http://b.com");
+});
+
+test("token usage counts are not masked as secrets", () => {
+	const out = redactAttributes({
+		cache_creation_tokens: 3,
+		cache_read_input_tokens: 2,
+		reasoning_tokens: 9,
+		api_token: "abc",
+	});
+	assert.equal(out.cache_creation_tokens, 3);
+	assert.equal(out.cache_read_input_tokens, 2);
+	assert.equal(out.reasoning_tokens, 9);
+	assert.equal(out.api_token, "[redacted]");
 });

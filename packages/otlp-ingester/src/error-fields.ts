@@ -48,6 +48,20 @@ function lookup(sources: AttributeSource[], key: string): unknown {
 	return undefined;
 }
 
+/** First source whose value for `key` passes `valid` (an invalid value on
+ * the exception event must not hide a valid one on its span). */
+function lookupValid<T>(
+	sources: AttributeSource[],
+	key: string,
+	valid: (value: unknown) => T | undefined,
+): T | undefined {
+	for (const source of sources) {
+		const value = valid(lookup([source], key));
+		if (value !== undefined) return value;
+	}
+	return undefined;
+}
+
 /** Free text through the same scrubber as custom context, then capped. */
 function declaredText(value: unknown, max: number): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -91,7 +105,7 @@ export function liftErrorFields(
 	...sources: AttributeSource[]
 ): DeclaredErrorFields {
 	const out: DeclaredErrorFields = {};
-	const code = validErrorCode(lookup(sources, "autter.error.code"));
+	const code = lookupValid(sources, "autter.error.code", validErrorCode);
 	if (code) out.errorCode = code;
 	const why = declaredText(lookup(sources, "autter.error.why"), 1000);
 	if (why) out.why = why;
@@ -101,7 +115,7 @@ export function liftErrorFields(
 	if (link) out.link = link;
 	const expected = lookup(sources, "autter.error.expected");
 	if (expected === true || expected === "true") out.expected = true;
-	const requestId = validRequestId(lookup(sources, "autter.request.id"));
+	const requestId = lookupValid(sources, "autter.request.id", validRequestId);
 	if (requestId) out.requestId = requestId;
 	return out;
 }

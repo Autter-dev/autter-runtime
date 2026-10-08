@@ -92,6 +92,157 @@ const EVENT_TYPES = new Set([
 
 const SEVERITIES = new Set(["fatal", "error", "warning", "info"]);
 
+// Bound a browser-supplied `context` object so it honors the sanitiser's
+// guarantee that a client can't smuggle unbounded cookies/DOM/bodies through
+// the relay: like every other field, context is capped — bounded depth, a
+// total-node budget, per-string length, and array/key limits. Cycles and
+// throwing/revoked Proxy traps fail open (that value is dropped, sanitising
+// continues).
+const CONTEXT_MAX_DEPTH = 6;
+const CONTEXT_MAX_NODES = 256;
+const CONTEXT_MAX_STRING = 4000;
+const CONTEXT_MAX_ARRAY = 100;
+const CONTEXT_MAX_KEYS = 100;
+
+/** UTF-8 byte length of a string (portable across edge runtimes). */
+export function byteLength(text: string): number {
+	return new TextEncoder().encode(text).length;
+}
+
+/**
+ * Bounded, cycle-safe deep copy of an untrusted `context` value. Anything
+ * past a depth/node/length limit, a cycle, or a hostile/revoked Proxy (whose
+ * trap throws on classification, `length`, key enumeration, or element reads)
+ * is dropped. Never throws — returns a plain, bounded object.
+ */
+export function boundContext(value: unknown): unknown {
+	let nodes = 0;
+	const seen = new WeakSet<object>();
+	const walk = (v: unknown, depth: number): unknown => {
+		if (v === null) return null;
+		const t = typeof v;
+		if (t === "string") return (v as string).slice(0, CONTEXT_MAX_STRING);
+		if (t === "number" || t === "boolean") return v;
+		if (t !== "object") return undefined;
+		if (depth >= CONTEXT_MAX_DEPTH || nodes >= CONTEXT_MAX_NODES) return undefined;
+		const obj = v as object;
+		if (seen.has(obj)) return undefined;
+		seen.add(obj);
+		// Array.isArray can throw on a revoked Proxy — guard the classification.
+		let isArr = false;
+		try {
+			isArr = Array.isArray(v);
+		} catch {
+			return undefined;
+		}
+		if (isArr) {
+			const arr = v as unknown[];
+			const out: unknown[] = [];
+			// `length` can be a throwing/hostile trap — guard the read.
+			let len = 0;
+			try {
+				len = arr.length;
+			} catch {
+				return out;
+			}
+			for (let i = 0; i < len && i < CONTEXT_MAX_ARRAY; i++) {
+				if (nodes >= CONTEXT_MAX_NODES) break;
+				nodes++;
+				let el: unknown;
+				try {
+					el = walk(arr[i], depth + 1);
+				} catch {
+					el = undefined;
+				}
+				if (el !== undefined) out.push(el);
+			}
+			return out;
+		}
+		let keys: string[];
+		try {
+			keys = Object.keys(obj);
+		} catch {
+			return undefined;
+		}
+		const out: Record<string, unknown> = {};
+		for (let i = 0; i < keys.length && i < CONTEXT_MAX_KEYS; i++) {
+			if (nodes >= CONTEXT_MAX_NODES) break;
+			const key = keys[i];
+			if (key === undefined) continue;
+			nodes++;
+			let child: unknown;
+			try {
+				child = walk((obj as Record<string, unknown>)[key], depth + 1);
+			} catch {
+				child = undefined;
+			}
+			if (child !== undefined) out[key] = child;
+		}
+		return out;
+	};
+	let result: unknown;
+	try {
+		result = walk(value, 0);
+	} catch {
+		result = undefined;
+	}
+	return result && typeof result === "object" ? result : {};
+}
+
+/**
+ * Read a fetch `Request` body while enforcing `maxBody` as it is consumed,
+ * counting real UTF-8 bytes from the byte stream (so multibyte payloads are
+ * measured correctly). An oversized body is rejected as soon as the limit is
+ * crossed — the stream is cancelled instead of being fully buffered first.
+ */
+async function readBodyBounded(
+	request: Request,
+	maxBody: number,
+): Promise<{ tooLarge: true } | { tooLarge: false; text: string }> {
+	const body = request.body;
+	if (!body) {
+		// No readable stream to meter — fall back to a buffered read + byte check.
+		const text = await request.text();
+		return byteLength(text) > maxBody
+			? { tooLarge: true }
+			: { tooLarge: false, text };
+	}
+	const reader = body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (!value) continue;
+		total += value.byteLength;
+		if (total > maxBody) {
+			// Cancel is fire-and-forget: awaiting a cancel() that throws,
+			// rejects, or never settles would hang the response (or drop it to
+			// a 400). The oversize decision is already made — detach the cancel
+			// and return 413 immediately.
+			void Promise.resolve()
+				.then(() => reader.cancel())
+				.catch(() => {});
+			return { tooLarge: true };
+		}
+		chunks.push(value);
+	}
+	const buf = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		buf.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return { tooLarge: false, text: new TextDecoder().decode(buf) };
+}
+
+// Bound first (cycle- and Proxy-safe), then scrub with the shared redactor.
+// Arrays are not valid context and are dropped, as before.
+function relayContext(raw: object, redactor: Redactor): { context?: Attributes } {
+	const bounded = boundContext(raw);
+	return Array.isArray(bounded) ? {} : { context: redactor(bounded as Attributes) };
+}
+
 // Whitelist sanitiser — anything not listed here is dropped, so a
 // compromised or buggy client can't smuggle cookies/DOM/bodies through the
 // relay. Returns null when the payload is structurally invalid.
@@ -143,10 +294,8 @@ export function sanitizeBrowserPayload(
 			...(typeof e.route === "string"
 				? { route: e.route.split("?")[0]!.slice(0, 1000) }
 				: {}),
-			...(typeof e.context === "object" &&
-			e.context !== null &&
-			!Array.isArray(e.context)
-				? { context: redactor(e.context as Attributes) }
+			...(typeof e.context === "object" && e.context !== null
+				? relayContext(e.context, redactor)
 				: {}),
 		});
 	}
@@ -227,15 +376,22 @@ export function createBrowserRelayFetchHandler(
 				});
 			}
 		}
-		const text = await request.text();
-		if (text.length > maxBody) {
+		let bounded: { tooLarge: true } | { tooLarge: false; text: string };
+		try {
+			bounded = await readBodyBounded(request, maxBody);
+		} catch {
+			return new Response(JSON.stringify({ error: "invalid json" }), {
+				status: 400,
+			});
+		}
+		if (bounded.tooLarge) {
 			return new Response(JSON.stringify({ error: "payload too large" }), {
 				status: 413,
 			});
 		}
 		let raw: unknown;
 		try {
-			raw = JSON.parse(text);
+			raw = JSON.parse(bounded.text);
 		} catch {
 			return new Response(JSON.stringify({ error: "invalid json" }), {
 				status: 400,

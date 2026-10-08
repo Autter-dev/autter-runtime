@@ -68,9 +68,8 @@ writes ClickHouse. For a local try-out:
 ```bash
 git clone https://github.com/Autter-dev/autter-runtime
 cd autter-runtime
-umask 077
 export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
-printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env
+(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
 docker compose up   # ClickHouse + ingester on :4318
 ```
 

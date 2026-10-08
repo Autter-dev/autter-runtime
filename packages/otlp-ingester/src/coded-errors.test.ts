@@ -402,14 +402,15 @@ test("migrations are uniquely ordered and 0012–0014 are additive and idempoten
 	assert.equal(new Set(ids).size, ids.length);
 	const serials = ids.map((id) => Number(id.slice(0, 4)));
 	assert.deepEqual(serials, serials.map((_, i) => i + 1));
-	assert.deepEqual(ids.slice(-3), ["0012-runtime-logs-requests", "0013-occurrence-codes", "0014-runtime-request-1m"]);
-	for (const migration of MIGRATIONS.slice(-3)) {
+	const requestMigrations = MIGRATIONS.filter((m) => /^001[2-4]-/.test(m.id));
+	assert.deepEqual(requestMigrations.map((m) => m.id), ["0012-runtime-logs-requests", "0013-occurrence-codes", "0014-runtime-request-1m"]);
+	for (const migration of requestMigrations) {
 		for (const statement of migration.statements) {
 			assert.match(statement, /IF NOT EXISTS/, statement);
 			assert.doesNotMatch(statement, /DROP|MODIFY/, statement);
 		}
 	}
-	const [logs, occ, rollup] = MIGRATIONS.slice(-3).map((m) => m.statements.join("\n"));
+	const [logs, occ, rollup] = requestMigrations.map((m) => m.statements.join("\n"));
 	for (const column of ["kind LowCardinality(String) DEFAULT ''", "request_id String DEFAULT ''", "route String DEFAULT ''",
 		"status_code UInt16 DEFAULT 0", "error_code String DEFAULT ''", "ai_cost_usd Float64 DEFAULT 0", "ai_calls UInt32 DEFAULT 0",
 		"INDEX IF NOT EXISTS idx_logs_request_id request_id TYPE bloom_filter GRANULARITY 4"]) {

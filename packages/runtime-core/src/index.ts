@@ -7,8 +7,10 @@
 export type { Attributes, AttributeValue } from "./attributes.js";
 export {
 	redactAttributes,
+	redactText,
 	makeRedactor,
 	type RedactOptions,
+	type Redactor as AttributeRedactor,
 } from "./redact.js";
 export {
 	LEVEL_SEVERITY,

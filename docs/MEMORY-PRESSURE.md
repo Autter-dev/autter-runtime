@@ -7,7 +7,9 @@ automatically; other languages must enable their runtime/process
 instrumentation or emit the portable metrics below. An OTel exporter by itself
 does not measure process memory. Redeploy the application after changing its
 instrumentation. Self-hosted ingesters need version 1.3.3+ for memory sample
-storage and `/v1/platform-events`.
+storage and `/v1/platform-events`. The Node SDK warns once if the ingester is
+older, and `npx @autter/runtime-node doctor` checks it; see
+[Version compatibility](COMPATIBILITY.md).
 
 ## What must be running
 

@@ -1,5 +1,6 @@
 import { decodeOtlpAttributes, sanitizeRuntimeContext, type OtlpValue } from "./context.js";
 import { liftErrorFields, validRequestId } from "./error-fields.js";
+import { scrubText } from "./redact.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
 import {
@@ -11,7 +12,7 @@ import {
 	type RuntimeSpanRow,
 } from "./types.js";
 
-const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const EMAIL_VALUE_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
 
 /**
  * OTLP/HTTP JSON → runtime signal. Structural types cover only the fields
@@ -251,7 +252,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					traceId: span.traceId ?? "",
 					spanId: span.spanId ?? "",
 					parentSpanId: span.parentSpanId ?? null,
-					name: span.name ?? "unnamed",
+					name: scrubText(span.name ?? "unnamed").slice(0, 1000),
 					kind,
 					status: isError ? "error" : "ok",
 					route: route ? normalizeRoute(route) : null,

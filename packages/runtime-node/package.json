@@ -20,6 +20,9 @@
 		},
 		"./package.json": "./package.json"
 	},
+	"bin": {
+		"autter-runtime": "./dist/cli.js"
+	},
 	"files": [
 		"dist"
 	],

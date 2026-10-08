@@ -1,13 +1,33 @@
 import type { Attributes } from "./attributes.js";
 
 /**
- * Server-side attribute redaction. The browser relay whitelist-sanitises
- * everything a client posts (see relay.ts) — but custom attributes handed to
- * `captureException` / `captureMessage` left the process verbatim. This module
- * closes that gap: emails, tokens, API keys, and credentials embedded in
- * string values are masked, and attributes whose NAME looks sensitive are
- * masked wholesale, before anything is exported.
+ * Server-side secret/PII redaction. Applied to everything the Node SDK
+ * exports: custom attributes, exception messages and stack traces, span
+ * status messages, span/event attributes set by instrumentations (HTTP URLs
+ * with query strings, third-party instrumentations), and structured logs.
+ *
+ * Two mechanisms:
+ * - KEY patterns: an attribute whose NAME looks sensitive (password, token,
+ *   cookie, authorization, api_key, session, ssn, …) is masked wholesale,
+ *   at any nesting depth.
+ * - VALUE patterns: secrets embedded inside any string (JWTs, bearer/basic
+ *   credentials, Cookie/Authorization header text, `scheme://user:pass@`
+ *   connection strings, vendor API keys, PEM private keys, `password=` /
+ *   `?token=` assignments, emails, Luhn-valid card numbers) are replaced in
+ *   place so the rest of the string — the useful part of an error message
+ *   or stack frame — survives.
+ *
+ * The same pattern set is mirrored (and kept in parity by the shared
+ * test-vectors/redaction.json) in @autter/runtime-browser, the ingester, and
+ * adapters/python/redact.py.
  */
+
+type AttrValue =
+	| string
+	| number
+	| boolean
+	| Array<string | number | boolean>
+	| object;
 
 export interface RedactOptions {
 	/**
@@ -17,8 +37,10 @@ export interface RedactOptions {
 	 */
 	additionalKeyPatterns?: (RegExp | string)[];
 	/**
-	 * Extra patterns scrubbed inside string VALUES (same semantics as the
-	 * built-in email/token patterns). Extends the built-in list.
+	 * Extra patterns scrubbed inside string VALUES — attribute values,
+	 * exception messages, stack traces, span status messages, URLs, log
+	 * lines. Strings are compiled as case-insensitive regex sources. Every
+	 * pattern is applied globally. Extends the built-in list.
 	 */
 	additionalValuePatterns?: (RegExp | string)[];
 	/** Replacement token. Default "[redacted]". */
@@ -28,110 +50,157 @@ export interface RedactOptions {
 	 * sensitive keys. Default true.
 	 */
 	scrubEmailValues?: boolean;
+	/**
+	 * Scrub Luhn-valid payment card numbers from all string values.
+	 * Default true.
+	 */
+	scrubCardNumbers?: boolean;
 }
 
 // Tested against the lower-cased KEY. Deliberately anchored where a loose
 // substring would over-redact ("card" must not eat "discard",
-// "author" must not eat "author_id").
+// "author" must not eat "author_id", "session_id" is an attribution id).
 const SENSITIVE_KEY_PATTERNS: RegExp[] = [
 	/e-?mail/,
-	/pass(word|wd|phrase)|^pass$/,
+	/pass(word|wd|phrase)|^pass$|(^|[._-])pwd$/,
 	/token/,
 	/secret/,
 	/credential/,
 	/(api|access|secret|private|consumer|client|signing|encryption)-?[_.]?key/,
-	/^-?x?-?authorization$|^auth(-|_|$)|bearer/,
+	/authori[sz]ation|^auth(-|_|$)|bearer/,
 	/cookie/,
+	/(^|[._-])session$|^(j|php)?sess(ion)?id$|^sid$|connect\.sid/,
 	/phone|msisdn/,
-	/\bssn\b|social[-_ ]?security/,
-	/cvv|cvc|card([-_. ]?(number|num|no))?$/,
+	/(^|[^a-z])ssn($|[^a-z])|social[-_ ]?security/,
+	/cvv|cvc|(^|[^a-z])card([-_. ]?(number|num|no))?$/,
 	/credit[-_.]?card/,
-	/connection[-_.]?string/,
+	/connection[-_.]?string|(^|[._-])dsn$/,
 	/recovery[-_.]?code|\botp\b|magic[-_.]?link/,
 ];
 
-// Scrubbed INSIDE string values (matched substrings are replaced, the rest
-// of the value survives — useful context like a stack frame stays readable).
-//
-// Every pattern must stay linear on adversarial input: these run on
-// free-form log, error and context strings. A greedy run that can restart at
-// every offset of a long token (`[A-Z0-9._%+-]+@…` over "aaaa…", `xox…`
-// over "xoxb-xoxb-…") is O(n²), so patterns whose first class can repeat the
-// match start are anchored with a lookbehind that only lets a match begin at
-// the start of a run.
+// ---------------------------------------------------------------------------
+// VALUE patterns — scrubbed INSIDE strings. Order matters: whole-token
+// shapes first, then header/assignment context, then URLs, cards, emails.
+// Every pattern is idempotent on its own mask ("[redacted]" never matches).
+// ---------------------------------------------------------------------------
+
 const PRIVATE_KEY_BLOCK_RE =
 	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
-const EMAIL_VALUE_RE = /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
-const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9]{20,}\b/g;
-const GITHUB_TOKEN_RE = /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g;
-const AWS_KEY_RE = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
-const SLACK_TOKEN_RE = /(?<![A-Za-z0-9-])xox[baprs]-[A-Za-z0-9-]{10,}\b/g;
-const BEARER_RE = /\bbearer\s+[A-Za-z0-9._~+/=-]{10,}/gi;
-// postgres://user:password@host — credentials gone, host kept.
+/** Vendor credentials recognisable by prefix alone. */
+const PREFIXED_SECRET_RE =
+	/\b(?:sk-[A-Za-z0-9_-]{20,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|whsec_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,}|(?:AKIA|ASIA)[0-9A-Z]{16}|npm_[A-Za-z0-9]{36}|autter_(?:rt|pat)_[A-Za-z0-9_-]{10,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})/g;
+// Lookbehind, not \b: with \b a match may start at every "eyJ" after a
+// "-", and each start rescans the rest of the run ("eyJ-" x 16k took 5 s).
+const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+/** `Bearer <token>` and `Basic <base64>` (the latter must look encoded, so
+ * the phrase "basic authentication" survives). */
+const AUTH_SCHEME_RE =
+	/\b(?:bearer\s+[A-Za-z0-9._~+/=-]{10,}|basic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2})/gi;
+/** `Authorization: …`, `Cookie: …`, `Set-Cookie: …` (raw header text, JSON,
+ * util.inspect): the whole value goes, since cookies and auth schemes
+ * contain spaces and semicolons. */
+const HEADER_VALUE_RE =
+	/((?:^|[^\w-])(?:proxy-)?(?:authorization|(?:set-)?cookie)["']?\s*[:=]\s*["']?)[^"'\r\n]+/gim;
+/** `password=…`, `"token":"…"`, `?api_key=…&` — a secret-named key followed
+ * by `=` or `:`. Value ends at a delimiter so the surrounding query string
+ * or JSON stays readable. */
+const SECRET_ASSIGNMENT_RE =
+	/(password|passwd|pwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|signature|session[_-]?id|sessionid|ssn)(["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&,;)}\]\[<>]+)/gi;
+/** `scheme://user:pass@host` (user may be empty, pass may contain `@`) and
+ * long token-as-username URLs (`https://<token>@host`). Host is kept. */
 const URL_CREDENTIALS_RE =
-	/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi;
+	/\b([a-z][a-z0-9+.-]{0,31}:\/\/)(?:[^\s/:@"'<>]*:[^\s/"'<>]*|[^\s/:@"'<>]{16,})@/gi;
+const CARD_RE =
+	/\b(?:4\d{3}|5[1-5]\d{2}|2[2-7]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))(?:[ -]?\d){9,15}\b/g;
+const EMAIL_VALUE_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
+
+function luhnValid(candidate: string): boolean {
+	const digits = candidate.replace(/\D/g, "");
+	if (digits.length < 13 || digits.length > 19) return false;
+	let sum = 0;
+	for (let i = 0; i < digits.length; i++) {
+		let d = digits.charCodeAt(digits.length - 1 - i) - 48;
+		if (i % 2 === 1) {
+			d *= 2;
+			if (d > 9) d -= 9;
+		}
+		sum += d;
+	}
+	return sum % 10 === 0;
+}
 
 interface CompiledRedactor {
 	keyPatterns: RegExp[];
-	valuePatterns: RegExp[];
-	urlCredentials: RegExp;
-	privateKeyBlock: RegExp;
+	extraValuePatterns: RegExp[];
 	mask: string;
 	scrubEmailValues: boolean;
+	scrubCardNumbers: boolean;
 }
 
+/** Key patterns are used with .test(): drop g/y so lastIndex never carries
+ * over from one key to the next (with /x/g every other matching key leaked). */
 function toCaseInsensitive(pattern: RegExp | string): RegExp {
-	return typeof pattern === "string"
-		? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
-		: new RegExp(pattern.source, pattern.flags.includes("i") ? pattern.flags : `${pattern.flags}i`);
+	if (typeof pattern === "string")
+		return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+	const flags = pattern.flags.replace(/[gyi]/g, "");
+	return new RegExp(pattern.source, `${flags}i`);
+}
+
+/** Value patterns must be global, or String#replace masks only the first hit. */
+function toGlobal(pattern: RegExp | string): RegExp {
+	if (typeof pattern === "string") return new RegExp(pattern, "gi");
+	// Sticky would only match at lastIndex, i.e. never mid-string.
+	return new RegExp(pattern.source, `${pattern.flags.replace(/[gy]/g, "")}g`);
 }
 
 function compile(options?: RedactOptions): CompiledRedactor {
 	const keyPatterns = [...SENSITIVE_KEY_PATTERNS];
-	const valuePatterns: RegExp[] = [
-		JWT_RE,
-		OPENAI_KEY_RE,
-		GITHUB_TOKEN_RE,
-		AWS_KEY_RE,
-		SLACK_TOKEN_RE,
-		BEARER_RE,
-	];
-	if (options?.additionalKeyPatterns) {
-		for (const p of options.additionalKeyPatterns) {
-			keyPatterns.push(toCaseInsensitive(p));
-		}
+	const extraValuePatterns: RegExp[] = [];
+	for (const p of options?.additionalKeyPatterns ?? []) {
+		keyPatterns.push(toCaseInsensitive(p));
 	}
-	if (options?.additionalValuePatterns) {
-		for (const p of options.additionalValuePatterns) {
-			if (!valuePatterns.some((existing) => existing.source === (typeof p === "string" ? p : p.source))) {
-				valuePatterns.push(typeof p === "string" ? new RegExp(p, "gi") : p);
-			}
+	for (const p of options?.additionalValuePatterns ?? []) {
+		const re = toGlobal(p);
+		if (!extraValuePatterns.some((existing) => existing.source === re.source)) {
+			extraValuePatterns.push(re);
 		}
 	}
 	return {
 		keyPatterns,
-		valuePatterns,
-		urlCredentials: URL_CREDENTIALS_RE,
-		privateKeyBlock: PRIVATE_KEY_BLOCK_RE,
+		extraValuePatterns,
 		mask: options?.mask ?? "[redacted]",
 		scrubEmailValues: options?.scrubEmailValues !== false,
+		scrubCardNumbers: options?.scrubCardNumbers !== false,
 	};
 }
 
-/** Longest string scrubbed in full. Exporters drop records far smaller than
- * this, so the cap only bounds redaction work on pathological input. */
-const MAX_SCRUB_CHARS = 256 * 1024;
+/** Hard cap on how much of one string is scanned: stacks are capped well
+ * below this upstream; anything longer is truncated rather than exported
+ * unscanned. */
+const MAX_SCRUB_CHARS = 64 * 1024;
 
 function redactString(value: string, r: CompiledRedactor): string {
-	const input = value.length > MAX_SCRUB_CHARS ? value.slice(0, MAX_SCRUB_CHARS) : value;
-	let out = input.replace(r.privateKeyBlock, r.mask);
-	for (const re of r.valuePatterns) {
-		out = out.replace(re, r.mask);
+	const mask = r.mask;
+	let out = value.length > MAX_SCRUB_CHARS ? value.slice(0, MAX_SCRUB_CHARS) : value;
+	out = out
+		.replace(PRIVATE_KEY_BLOCK_RE, mask)
+		.replace(PREFIXED_SECRET_RE, mask)
+		.replace(JWT_RE, mask)
+		.replace(AUTH_SCHEME_RE, mask)
+		.replace(HEADER_VALUE_RE, (_m, head: string) => head + mask)
+		.replace(SECRET_ASSIGNMENT_RE, (_m, key: string, sep: string, val: string) =>
+			key + sep + (val[0] === '"' || val[0] === "'" ? val[0] + mask + val[0] : mask),
+		)
+		.replace(URL_CREDENTIALS_RE, (_m, scheme: string) => `${scheme}${mask}@`);
+	if (r.scrubCardNumbers) {
+		out = out.replace(CARD_RE, (m) => (luhnValid(m) ? mask : m));
 	}
-	out = out.replace(r.urlCredentials, `$1${r.mask}@`);
 	if (r.scrubEmailValues) {
-		out = out.replace(EMAIL_VALUE_RE, r.mask);
+		out = out.replace(EMAIL_VALUE_RE, mask);
+	}
+	for (const re of r.extraValuePatterns) {
+		re.lastIndex = 0;
+		out = out.replace(re, mask);
 	}
 	return out;
 }
@@ -405,15 +474,73 @@ function redactWith(
 }
 
 /**
+ * Scrub secrets/PII embedded in one string — an error message, a stack
+ * trace, a URL, a log line. Same value patterns as redactAttributes().
+ */
+export function redactText(text: string, options?: RedactOptions): string {
+	return typeof text === "string" ? redactString(text, compile(options)) : text;
+}
+
+/** A compiled redactor: callable for attribute bags, plus string and
+ * export-time helpers. */
+export interface Redactor {
+	(attributes?: Attributes | null): Attributes;
+	/** Scrub one string (messages, stacks, URLs). Identity when disabled. */
+	text(value: string): string;
+	/**
+	 * Export-time pass over attributes already on a span (set by any
+	 * instrumentation, not just Autter's capture calls). Strings are
+	 * value-scrubbed, string values under sensitive KEYS are masked, and
+	 * numbers/booleans pass untouched — usage counters such as
+	 * `ai.usage.promptTokens` must survive for cost tracking.
+	 */
+	exported(attributes: Attributes): Attributes;
+	readonly enabled: boolean;
+}
+
+/**
  * Compile a redactor once for a hot path — initAutterServer builds one from
  * its options and reuses it for every capture instead of recompiling.
+ * `false` returns a pass-through (redaction disabled by the host).
  */
-export function makeRedactor(
-	options?: boolean | RedactOptions,
-): (attributes?: Attributes | null) => Attributes {
+export function makeRedactor(options?: boolean | RedactOptions): Redactor {
 	if (options === false) {
-		return (attributes) => ({ ...attributes });
+		const passthrough = ((attributes?: Attributes | null) => ({
+			...(attributes ?? {}),
+		})) as Redactor;
+		passthrough.text = (value) => value;
+		passthrough.exported = (attributes) => attributes;
+		(passthrough as { enabled: boolean }).enabled = false;
+		return passthrough;
 	}
 	const r = compile(options === true ? undefined : options);
-	return (attributes) => redactWith(attributes, r);
+	const redactor = ((attributes?: Attributes | null) =>
+		redactWith(attributes, r)) as Redactor;
+	redactor.text = (value) =>
+		typeof value === "string" ? redactString(value, r) : value;
+	redactor.exported = (attributes) => {
+		const out: Attributes = {};
+		for (const key of Object.keys(attributes)) {
+			const value = attributes[key];
+			if (typeof value === "string") {
+				out[key] = r.keyPatterns.some((re) => re.test(key.toLowerCase()))
+					? r.mask
+					: redactString(value, r);
+			} else if (Array.isArray(value)) {
+				const sensitive = r.keyPatterns.some((re) => re.test(key.toLowerCase()));
+				out[key] = (value as unknown[]).map((item) =>
+					typeof item === "string"
+						? sensitive
+							? r.mask
+							: redactString(item, r)
+						: item,
+				) as typeof value;
+			} else {
+				out[key] = value;
+			}
+		}
+		return out;
+	};
+	(redactor as { enabled: boolean }).enabled = true;
+	return redactor;
 }

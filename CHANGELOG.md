@@ -20,6 +20,29 @@ Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `ru
 - Browser: `captureException` and the global handlers send `code/why/fix/link/expected/requestId`; new `autterErrorFromResponse(response)`; failed fetch/XHR 5xx responses carry `x-request-id` (`runtime-browser`).
 - Experimental zero-code `logging.requests` hook mode, off by default (`runtime-node`).
 
+### Security
+
+- Scrub secrets and PII from exception messages, stack traces and span status messages, not only custom attributes; re-scrub every span at export so third-party instrumentations, HTTP URLs (`?token=`) and `recordException` calls are covered; scrub `LlmCallHandle.setAttributes`, `instrumentLlmClient` attributes and provider errors, and module-level captures made before `initAutterServer` (`runtime-node`).
+- New value patterns everywhere: Basic auth, `Authorization:`/`Cookie:`/`Set-Cookie:` header text, connection strings with empty usernames or `@` in the password, `sk-proj-`/`sk-ant-`, Stripe, GitHub fine-grained, GitLab, npm, SendGrid and Google API keys, `password=`/`?token=`/`?api_key=` assignments, Luhn-valid card numbers. New sensitive keys: any `…authorization` header key, `session`/`sessionid`/`sid`, `pwd`, `dsn`, bounded `ssn`. Custom value patterns now apply globally (`runtime-node`, `runtime-browser`, `otlp-ingester`).
+- The browser relay scrubs message, stack, name and nested context (`redact` option) (`runtime-node`).
+- Browser SDK scrubs messages, stacks and nested context; new `redact: { keys, values } | false` option and `scrubText` export (`runtime-browser`).
+- Ingester scrubs occurrence message/stack/route, span names, browser context (deep) and LLM-call attributes before storage and the sink webhook; extra patterns via `AUTTER_REDACT_VALUE_PATTERNS` / `AUTTER_REDACT_KEY_PATTERNS` (`otlp-ingester`).
+- Python adapter: new stdlib-only `adapters/python/redact.py` (`redact_text`, `redact_attributes`, `configure`); the caught-exception sampler scrubs tracebacks with it.
+- Shared parity vectors in `test-vectors/redaction.json` run against every implementation.
+- Export-time scrubbing also covers span link attributes, span event names and resource attributes on traces and metrics (`process.command_args` from NodeSDK's process detector, `OTEL_RESOURCE_ATTRIBUTES`). A batch with a span that could not be scrubbed is reported as a failed export instead of a silent partial success (`runtime-node`).
+- The JWT pattern no longer takes seconds on long `eyJ-eyJ-…` runs (5 s per 64 KB in Node, 3.4 s in the ingester, 6 s in the browser); the ingester caps each scrubbed string at 64 KB and cuts context values to their stored size before scrubbing (`runtime-node`, `runtime-browser`, `otlp-ingester`, Python).
+- Custom key/value patterns with `g` or `y` flags work on every key and every occurrence (a `/x/g` key pattern used to skip every other matching key); browser value patterns mask every match, not just the first (`runtime-node`, `runtime-browser`).
+- Messages, names and stacks are scrubbed before they are cut to size, so a secret straddling the limit is masked whole (browser, relay, Python sampler). A browser context with a throwing getter or revoked Proxy is dropped instead of throwing into the app. The `card` key rule no longer masks keys like `discard` or `scorecard`.
+
+### Version compatibility check
+
+- One source of truth for feature requirements: `packages/otlp-ingester/src/compat-manifest.json`. It lists the minimum ingester, ClickHouse migrations, route and minimum SDK versions for each feature. See `docs/COMPATIBILITY.md`.
+- New `GET /v1/compat` (public): ingester version, schema state and level, and per-feature availability. Optional `?features=…&sdk=name@version` returns evaluated issues. Every response carries `x-autter-ingester-version`, exposed to CORS on `/v1/browser`. The ingester records the SDK name and version each service sends with (`runtime_sdk_versions`) and its own version (`runtime_ingester_info`), through migration `0015-runtime-compat` (`otlp-ingester`).
+- The SDK checks the ingester once, in the background, when a feature that needs a newer ingester is in use. It warns once per incompatible feature, naming both versions and the fix. Opt out with `compatCheck: false` or `AUTTER_COMPAT_CHECK=0`. The SDK reports itself as `telemetry.distro.name` and `telemetry.distro.version`, and the browser relay forwards the browser SDK version. Both check browser features against the ingester's version header (`runtime-node`, `runtime-next`).
+- New `npx @autter/runtime-node doctor`: a one-shot SDK, ingester and schema report. Exits non-zero on a mismatch (`runtime-node`).
+- The browser payload carries the SDK version (`sdk`). Older ingesters ignore it (`runtime-browser`).
+- Python adapter: new stdlib-only `adapters/python/compat.py`, with `warn_if_incompatible` and `python3 compat.py doctor`.
+
 ### Changes
 
 - Console output is a pretty tree outside production; production keeps JSON lines (`runtime-node`).
@@ -40,10 +63,15 @@ Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `ru
 - `runtime-browser` no longer declares a `./dist/index.cjs` entry that the ESM-only build never produced.
 - `runtime-next` builds no longer race on `dist/` cleanup and drop `client.d.ts` / `edge.d.ts`.
 
+### Behavior notes
+
+- Error messages that contained secrets now fingerprint on their scrubbed form, so such issues may regroup once (they previously split per secret value).
+
 ### Upgrade
 
-- Deploy otlp-ingester 1.5.0 first (migrations 0012–0014 run at boot), then SDKs. Older ingesters accept 1.5.0 SDK traffic but ignore the new fields.
+- Deploy otlp-ingester 1.5.0 first (migrations 0012–0015 run at boot), then SDKs. Older ingesters accept 1.5.0 SDK traffic but ignore the new fields.
 - The `runtime_request_1m` rollup counts every insert, so it is approximate when exporters retry a batch.
+- The compatibility tables (`runtime_sdk_versions`, `runtime_ingester_info`) are created by migration `0015-runtime-compat`, after 0012–0014.
 
 ## [1.3.1] - 2026-09-08
 

@@ -1,22 +1,17 @@
+import { isSensitiveKey, scrubText } from "./redact.js";
+
 /** Bounded, defensive privacy boundary for custom telemetry from any OTLP SDK. */
 export function sanitizeRuntimeContext(
 	input: unknown,
 ): Record<string, unknown> {
 	let budget = 512;
 	const seen = new WeakSet<object>();
+	// Shared secret/PII patterns (redact.ts), then drop URL query strings
+	// and fragments outright — whitelist-style privacy for free text.
 	const scrub = (value: string) =>
-		value
-			.replace(/(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted]")
-			.replace(
-				/\b(?:bearer\s+[A-Za-z0-9._~+\/=~-]{10,}|(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|(?<![A-Za-z0-9-])xox[baprs]-[A-Za-z0-9-]{10,}|(?<![A-Za-z0-9_-])autter_(?:rt|pat)_[A-Za-z0-9_-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/gi,
-				"[redacted]",
-			)
-			.replace(
-				/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-				"[redacted]",
-			)
-			.replace(/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[redacted]@")
-			// Query strings: procedural, see stripUrlQueries.
+		scrubText(value)
+			// Query strings: procedural (a `[^\s?#]+[?#]` regex is quadratic on
+			// long runs of URLs without a query).
 			.replace(/https?:\/\/[^\s]*/gi, (url) => {
 				const rest = url.slice(url.indexOf("://") + 3);
 				const cut = rest.search(/[?#]/);
@@ -32,13 +27,7 @@ export function sanitizeRuntimeContext(
 			typeof value === "number" &&
 			Number.isFinite(value) &&
 			value >= 0;
-		if (
-			!usage &&
-			/password|passwd|secret|token|credential|authorization|cookie|email|phone|ssn|card[._-]?number|connection[._-]?string|api[._-]?key|private[._-]?key|request[._-]?body|response[._-]?body|headers|url[._-]?query/i.test(
-				key,
-			)
-		)
-			return "[redacted]";
+		if (!usage && key && isSensitiveKey(key)) return "[redacted]";
 		if (typeof value === "string") {
 			// Serialized custom context crosses the same privacy boundary as nested values.
 			if (/^\s*[\[{]/.test(value)) {

@@ -44,6 +44,7 @@ import {
 	requestRollupViewDDL,
 } from "./logs.js";
 import { memoryTableDDL, platformEventTableDDL } from "./memory.js";
+import { ingesterInfoTableDDL, sdkVersionTableDDL } from "./sdk-versions.js";
 
 /** Migration 0013 columns — shared with the baseline DDL in clickhouse.ts. */
 export const OCCURRENCE_CODE_COLUMNS: string[] = [
@@ -189,6 +190,9 @@ export const MIGRATIONS: Migration[] = [
 		id: "0014-runtime-request-1m",
 		statements: [requestRollupTableDDL("{db}"), requestRollupViewDDL("{db}")],
 	},
+	// Version compatibility: SDK name/version seen per service, and this
+	// ingester's own version + schema level for the Autter dashboard.
+	{ id: "0015-runtime-compat", statements: [sdkVersionTableDDL("{db}"), ingesterInfoTableDDL("{db}")] },
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

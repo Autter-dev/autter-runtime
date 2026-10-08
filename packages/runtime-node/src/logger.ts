@@ -148,6 +148,8 @@ export interface LoggerConfig {
 	service: string;
 	environment: string;
 	release?: string;
+	/** SDK identity for the `telemetry.distro.*` resource attributes. */
+	distro?: { name: string; version: string };
 	options?: RuntimeLoggingOptions;
 	redact(attributes: Attributes): Attributes;
 	/** Wrap an operation in a span; absent in logger-only mode. */
@@ -312,6 +314,7 @@ export function configureRuntimeLogger(next: LoggerConfig): void {
 				service: next.service,
 				environment: next.environment,
 				...(next.release ? { release: next.release } : {}),
+				...(next.distro ? { distro: next.distro } : {}),
 			});
 		} catch {
 			/* ignore */

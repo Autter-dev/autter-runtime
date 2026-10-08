@@ -22,3 +22,4 @@ jobs:
       - run: npm run test -w @autter/runtime-browser
       - run: npm run test -w @autter/otlp-ingester
       - run: npm run size -w @autter/runtime-browser
+      - run: python3 -m unittest discover -s adapters/python -v

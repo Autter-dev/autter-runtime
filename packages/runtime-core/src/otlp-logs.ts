@@ -15,6 +15,8 @@ export interface OtlpResource {
 	service: string;
 	environment: string;
 	release?: string;
+	/** SDK identity, sent as the `telemetry.distro.*` resource attributes. */
+	distro?: { name: string; version: string };
 }
 
 const SEVERITY = { debug: 5, info: 9, warning: 13, error: 17 } as const;
@@ -66,6 +68,12 @@ export function buildOtlpLogsRequest(
 						"service.name": resource.service,
 						"deployment.environment.name": resource.environment,
 						...(resource.release ? { "service.version": resource.release } : {}),
+						...(resource.distro
+							? {
+									"telemetry.distro.name": resource.distro.name,
+									"telemetry.distro.version": resource.distro.version,
+								}
+							: {}),
 					}).map(([key, item]) => ({ key, value: otlpValue(item) })),
 				},
 				scopeLogs: [

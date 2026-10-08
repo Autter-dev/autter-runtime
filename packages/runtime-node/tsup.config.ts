@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-	entry: { index: "src/index.ts", testing: "src/testing.ts" },
+	entry: { index: "src/index.ts", testing: "src/testing.ts", cli: "src/cli.ts" },
 	format: ["esm", "cjs"],
 	dts: { resolve: ["@autter/runtime-core"] },
 	target: "node20",

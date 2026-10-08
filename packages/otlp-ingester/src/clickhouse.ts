@@ -14,6 +14,12 @@ import {
 	type RuntimeLogRecord,
 } from "./logs.js";
 import {
+	ingesterInfoTableDDL,
+	sdkVersionTableDDL,
+	type SdkVersionRow,
+} from "./sdk-versions.js";
+import type { SchemaStatus } from "./compat.js";
+import {
 	MIGRATIONS,
 	OCCURRENCE_CODE_COLUMNS,
 	OCCURRENCE_REQUEST_ID_INDEX,
@@ -49,6 +55,8 @@ function chDateTime(date: Date): string {
 export class ClickHouseStore {
 	private client: ClickHouseClient | null = null;
 	private ensurePromise: Promise<void> | null = null;
+	private schemaState: Exclude<SchemaStatus, "unconfigured"> = "pending";
+	private appliedIds: string[] = [];
 
 	constructor(private readonly config: IngesterConfig) {}
 
@@ -93,6 +101,8 @@ export class ClickHouseStore {
 			// existing runtime_logs lacks until migrations run, so the view is
 			// created by migration 0014 alone (migrations also run on fresh DBs).
 			requestRollupTableDDL(db),
+			sdkVersionTableDDL(db, metricsTtlDays),
+			ingesterInfoTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -236,8 +246,11 @@ export class ClickHouseStore {
 				console.log(`clickhouse migration applied: ${migration.id}`);
 			}
 			await this.applyLogTtl();
+			this.appliedIds = migrations.map((migration) => migration.id);
+			this.schemaState = "ready";
 		})().catch((err) => {
 			this.ensurePromise = null;
+			this.schemaState = "failed";
 			throw err;
 		});
 		return this.ensurePromise;
@@ -319,6 +332,51 @@ export class ClickHouseStore {
 		return new Set(
 			(await rows.json<{ trace_id: string }>()).map((row) => row.trace_id),
 		);
+	}
+
+	/** Schema state as of the last ensureSchema attempt — never triggers DDL
+	 * (it backs the unauthenticated /v1/compat endpoint). */
+	schemaStatus(): { status: SchemaStatus; applied: string[] } {
+		if (!this.configured) return { status: "unconfigured", applied: [] };
+		return { status: this.schemaState, applied: [...this.appliedIds] };
+	}
+
+	async insertSdkVersions(ctx: IngestContext, rows: SdkVersionRow[]): Promise<void> {
+		if (!rows.length || !this.configured) return;
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_sdk_versions"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: rows.map((row) => ({
+				org_id: ctx.orgId,
+				repository_id: ctx.repositoryId,
+				service: row.service,
+				environment: row.environment,
+				sdk_name: row.sdkName,
+				sdk_version: row.sdkVersion,
+				sdk_language: row.sdkLanguage,
+				ingester_version: row.ingesterVersion,
+				last_seen: row.seenAt.toISOString(),
+			})),
+		});
+	}
+
+	/** Record this ingester's version and schema level (global, not tenant data). */
+	async insertIngesterInfo(info: { version: string; schemaLevel: string; report: unknown }): Promise<void> {
+		if (!this.configured) return;
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_ingester_info"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: [{
+				ingester_version: info.version,
+				schema_level: info.schemaLevel,
+				report: JSON.stringify(info.report),
+				reported_at: new Date().toISOString(),
+			}],
+		});
 	}
 
 	async ping(): Promise<boolean> {

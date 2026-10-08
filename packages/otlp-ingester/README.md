@@ -14,6 +14,8 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 | `POST /v1/platform-events` | JSON, server key | ECS/Kubernetes OOM kills and restarts → memory incident correlation |
 | `POST /v1/profiles` | Symbolized pprof, server key | CPU/in-use heap profile samples |
 | `POST /v1/browser` | Browser payload `version: 1` | Errors/rejections → occurrences; session pings → rollups |
+| `POST /v1/logs` | OTLP logs, server key | Structured logs and operation summaries → `runtime_logs` |
+| `GET /v1/compat` | — | Version, schema level and supported features (public) |
 | `GET /healthz` | — | Liveness + ClickHouse reachability |
 
 Auth on every ingest route: `Authorization: Bearer <ingest key>`,
@@ -46,6 +48,17 @@ AUTTER_INGEST_KEYS='[
 The validator webhook may return the same extra fields:
 `{ orgId, repositoryId, scope?, allowedOrigins? }`.
 
+### Version compatibility
+
+`GET /v1/compat` (public, no tenant data) returns this ingester's version,
+its ClickHouse schema state, and which features from
+`src/compat-manifest.json` it supports. Add
+`?features=operation_logging&sdk=@autter/runtime-node@1.3.0` to get the evaluated
+incompatibilities. Every response carries `x-autter-ingester-version`. The
+ingester records the SDK name and version each service sends with
+(`runtime_sdk_versions`) and its own version (`runtime_ingester_info`), and
+the Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md).
+
 ## Configuration
 
 | Env | Default | Description |
@@ -69,6 +82,8 @@ The validator webhook may return the same extra fields:
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 | `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
 | `LOG_TTL_DAYS` | `14` | Retention for `runtime_logs` (request summaries are always kept, never sampled, so this is the main volume knob). Unlike the other TTLs it is also applied to **existing** tables: at boot the ingester compares it with the table's TTL and runs `ALTER TABLE … MODIFY TTL` only when they differ; a failure is logged and retried next boot |
+| `AUTTER_REDACT_VALUE_PATTERNS` | — | JSON array of extra regex sources masked in stored/forwarded text and attribute values (built-in secret/PII patterns always apply) |
+| `AUTTER_REDACT_KEY_PATTERNS` | — | JSON array of extra regex sources for attribute keys whose values are masked wholesale |
 
 ## Coded errors and request summaries (1.5.0)
 

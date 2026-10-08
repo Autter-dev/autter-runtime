@@ -1,3 +1,4 @@
+import { decodeOtlpAttributes, sanitizeRuntimeContext, type OtlpValue } from "./context.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
 import {
@@ -8,6 +9,8 @@ import {
 	type RuntimeSeverity,
 	type RuntimeSpanRow,
 } from "./types.js";
+
+const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 
 /**
  * OTLP/HTTP JSON → runtime signal. Structural types cover only the fields
@@ -21,12 +24,7 @@ import {
 
 interface OtlpKeyValue {
 	key?: string;
-	value?: {
-		stringValue?: string;
-		intValue?: string | number;
-		doubleValue?: number;
-		boolValue?: boolean;
-	};
+	value?: OtlpValue;
 }
 
 interface OtlpEvent {
@@ -61,7 +59,10 @@ export interface OtlpTraceRequest {
 
 interface OtlpDataPoint {
 	attributes?: OtlpKeyValue[];
+	startTimeUnixNano?: string | number;
 	timeUnixNano?: string | number;
+	explicitBounds?: number[];
+	bucketCounts?: Array<string | number>;
 	count?: string | number;
 	sum?: number;
 	asInt?: string | number;
@@ -75,11 +76,12 @@ export interface OtlpMetricsRequest {
 			metrics?: Array<{
 				name?: string;
 				unit?: string;
+				gauge?: { dataPoints?: OtlpDataPoint[] };
 				histogram?: {
 					dataPoints?: OtlpDataPoint[];
 					aggregationTemporality?: string | number;
 				};
-				sum?: { dataPoints?: OtlpDataPoint[] };
+				sum?: { dataPoints?: OtlpDataPoint[]; aggregationTemporality?: string | number };
 			}>;
 		}>;
 	}>;
@@ -214,6 +216,7 @@ const MAX_SPANS_PER_REQUEST = 5000;
 
 export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	const occurrences: RuntimeOccurrenceInput[] = [];
+	const occurrenceSpanIds: string[] = [];
 	const spans: RuntimeSpanRow[] = [];
 	const llmCalls: RuntimeLlmCall[] = [];
 	const rollups = new Map<string, RuntimeMetricPoint>();
@@ -232,9 +235,13 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				const startedAt = nanosToDate(span.startTimeUnixNano);
 				const durationMs = spanDurationMs(span);
 				const kind = spanKind(span.kind);
+				const hasFailureEvent = (span.events ?? []).some((event) =>
+					event.name === "exception" || (event.name === "autter.outcome"
+						&& attrMap(event.attributes).get("autter.outcome.status") === "error"));
 				const isError =
-					isErrorStatus(span.status?.code) ||
-					(statusCode !== null && statusCode >= 500);
+					statusCode !== null && statusCode >= 400 && statusCode < 500
+						? hasFailureEvent
+						: hasFailureEvent || isErrorStatus(span.status?.code) || (statusCode !== null && statusCode >= 500);
 
 				spans.push({
 					service: resource.service,
@@ -246,10 +253,13 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					name: span.name ?? "unnamed",
 					kind,
 					status: isError ? "error" : "ok",
-					route,
+					route: route ? normalizeRoute(route) : null,
 					statusCode,
 					durationMs,
-					attributes: null,
+					attributes: {
+						...decodeOtlpAttributes(span.attributes),
+						"http.request.method": (attrs.get("http.request.method") ?? attrs.get("http.method") ?? "").slice(0, 20),
+					},
 					startedAt,
 				});
 
@@ -261,6 +271,8 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				);
 				for (const event of exceptionEvents) {
 					const eventAttrs = attrMap(event.attributes);
+					const handled = eventAttrs.get("autter.handled") === "true";
+					occurrenceSpanIds.push(span.spanId ?? "");
 					occurrences.push({
 						source: "server",
 						severity: severityOf(eventAttrs, attrs),
@@ -279,26 +291,49 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						statusCode,
 						traceId: span.traceId ?? null,
 						sessionId: null,
-						attributes: null,
+						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
+							...(handled ? { "autter.handled": true, "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) }),
 						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 					});
 				}
-				if (exceptionEvents.length === 0 && isErrorStatus(span.status?.code)) {
+				const failedOutcomes = (span.events ?? []).filter((event) => {
+					if (event.name !== "autter.outcome") return false;
+					return attrMap(event.attributes).get("autter.outcome.status") === "error";
+				});
+				for (const event of failedOutcomes) {
+					const outcome = attrMap(event.attributes);
+					const name = (outcome.get("autter.outcome.name") ?? "operation").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 200);
+					occurrenceSpanIds.push(span.spanId ?? "");
+					occurrences.push({
+						source: "server", severity: "error", service: resource.service,
+						environment: resource.environment, release: resource.release,
+						errorType: "OutcomeFailure",
+						message: `${name}: ${(outcome.get("autter.outcome.message") ?? "failed").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 1000)}`,
+						stack: String(decodeOtlpAttributes(event.attributes)["autter.outcome.stack"] ?? "") || null, route, method: methodOf(attrs), statusCode,
+						traceId: span.traceId ?? null, sessionId: null,
+						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }),
+						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
+					});
+				}
+				if (exceptionEvents.length === 0 && failedOutcomes.length === 0 && isError) {
+					occurrenceSpanIds.push(span.spanId ?? "");
 					occurrences.push({
 						source: "server",
 						severity: severityOf(new Map(), attrs),
 						service: resource.service,
 						environment: resource.environment,
 						release: resource.release,
-						errorType: "SpanError",
-						message: span.status?.message || `${span.name ?? "span"} failed`,
+						errorType: statusCode !== null && statusCode >= 500 ? "HttpServerError" : "SpanError",
+						message: span.status?.message || (statusCode !== null && statusCode >= 500
+							? `${methodOf(attrs) ?? "HTTP"} ${route ?? span.name ?? "request"} returned ${statusCode}`
+							: `${span.name ?? "span"} failed`),
 						stack: null,
 						route,
 						method: methodOf(attrs),
 						statusCode,
 						traceId: span.traceId ?? null,
 						sessionId: null,
-						attributes: null,
+						attributes: decodeOtlpAttributes(span.attributes),
 						occurredAt: startedAt,
 					});
 				}
@@ -368,6 +403,8 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 		}
 	}
 
+	inheritHttpFromParent(occurrences, occurrenceSpanIds, spans);
+
 	return {
 		occurrences,
 		spans,
@@ -375,6 +412,67 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 		llmCalls,
 		spanCount,
 	};
+}
+
+/**
+ * Exception spans are often children named "Error" with no HTTP attributes.
+ * Copy method, route, status, and duration from the server span in the same
+ * trace so the issue can name the API that failed.
+ */
+function inheritHttpFromParent(
+	occurrences: RuntimeOccurrenceInput[],
+	occurrenceSpanIds: string[],
+	spans: RuntimeSpanRow[],
+): void {
+	const byId = new Map<string, RuntimeSpanRow>();
+	for (const span of spans) {
+		if (span.spanId) byId.set(span.spanId, span);
+	}
+	for (let i = 0; i < occurrences.length; i++) {
+		const occurrence = occurrences[i];
+		const spanId = occurrenceSpanIds[i];
+		if (!occurrence || !spanId) continue;
+		const http = httpServerAncestor(byId, spanId);
+		if (!http) continue;
+		if (!occurrence.route && http.route) occurrence.route = http.route;
+		const method = methodFromSpan(http);
+		if (!occurrence.method && method) occurrence.method = method;
+		if (
+			(occurrence.statusCode == null || occurrence.statusCode === 0) &&
+			http.statusCode != null &&
+			http.statusCode > 0
+		) {
+			occurrence.statusCode = http.statusCode;
+		}
+		if (http.durationMs > 0) {
+			const attributes = { ...(occurrence.attributes ?? {}) };
+			if (attributes["http.server.duration_ms"] == null) {
+				attributes["http.server.duration_ms"] = Math.round(http.durationMs);
+				occurrence.attributes = attributes;
+			}
+		}
+	}
+}
+
+function httpServerAncestor(
+	byId: Map<string, RuntimeSpanRow>,
+	spanId: string,
+): RuntimeSpanRow | null {
+	let current = byId.get(spanId) ?? null;
+	const seen = new Set<string>();
+	while (current && current.spanId && !seen.has(current.spanId)) {
+		seen.add(current.spanId);
+		if (current.kind === "server") return current;
+		const parentId = current.parentSpanId;
+		if (!parentId) return null;
+		current = byId.get(parentId) ?? null;
+	}
+	return null;
+}
+
+function methodFromSpan(span: RuntimeSpanRow): string | null {
+	const raw = span.attributes?.["http.request.method"];
+	return typeof raw === "string" && raw.trim() ? raw.trim().toUpperCase().slice(0, 16) : null;
 }
 
 function minuteBucket(date: Date): Date {

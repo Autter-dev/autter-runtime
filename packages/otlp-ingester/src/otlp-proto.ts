@@ -1,5 +1,6 @@
 import protobuf from "protobufjs";
 import type { OtlpMetricsRequest, OtlpTraceRequest } from "./normalize-otlp.js";
+import type { OtlpLogsRequest } from "./logs.js";
 
 /**
  * OTLP/HTTP protobuf decode (`content-type: application/x-protobuf`) —
@@ -24,10 +25,27 @@ message AnyValue {
     bool bool_value = 2;
     int64 int_value = 3;
     double double_value = 4;
+    ArrayValue array_value = 5;
+    KeyValueList kvlist_value = 6;
   }
 }
+message ArrayValue { repeated AnyValue values = 1; }
+message KeyValueList { repeated KeyValue values = 1; }
 message KeyValue { string key = 1; AnyValue value = 2; }
 message Resource { repeated KeyValue attributes = 1; }
+message ExportLogsServiceRequest { repeated ResourceLogs resource_logs = 1; }
+message ResourceLogs { Resource resource = 1; repeated ScopeLogs scope_logs = 2; }
+message ScopeLogs { repeated LogRecord log_records = 2; }
+message LogRecord {
+  fixed64 time_unix_nano = 1;
+  int32 severity_number = 2;
+  string severity_text = 3;
+  AnyValue body = 5;
+  repeated KeyValue attributes = 6;
+  bytes trace_id = 9;
+  bytes span_id = 10;
+  fixed64 observed_time_unix_nano = 11;
+}
 
 message ExportTraceServiceRequest { repeated ResourceSpans resource_spans = 1; }
 message ResourceSpans { Resource resource = 1; repeated ScopeSpans scope_spans = 2; }
@@ -57,10 +75,12 @@ message ScopeMetrics { repeated Metric metrics = 2; }
 message Metric {
   string name = 1;
   string unit = 3;
+  Gauge gauge = 5;
   Sum sum = 7;
   Histogram histogram = 9;
 }
-message Sum { repeated NumberDataPoint data_points = 1; }
+message Gauge { repeated NumberDataPoint data_points = 1; }
+message Sum { repeated NumberDataPoint data_points = 1; int32 aggregation_temporality = 2; }
 message NumberDataPoint {
   fixed64 time_unix_nano = 3;
   double as_double = 4;
@@ -69,9 +89,12 @@ message NumberDataPoint {
 }
 message Histogram { repeated HistogramDataPoint data_points = 1; int32 aggregation_temporality = 2; }
 message HistogramDataPoint {
+  fixed64 start_time_unix_nano = 2;
   fixed64 time_unix_nano = 3;
   fixed64 count = 4;
   optional double sum = 5;
+  repeated fixed64 bucket_counts = 6;
+  repeated double explicit_bounds = 7;
   repeated KeyValue attributes = 9;
 }
 `;
@@ -79,6 +102,7 @@ message HistogramDataPoint {
 const root = protobuf.parse(PROTO).root;
 const TraceRequest = root.lookupType("otlp.ExportTraceServiceRequest");
 const MetricsRequest = root.lookupType("otlp.ExportMetricsServiceRequest");
+const LogsRequest = root.lookupType("otlp.ExportLogsServiceRequest");
 
 const TO_OBJECT_OPTIONS: protobuf.IConversionOptions = {
 	longs: String, // 64-bit ints → strings (matches OTLP/JSON)
@@ -116,4 +140,8 @@ export function decodeMetricsRequest(body: Buffer): OtlpMetricsRequest {
 	return hexifyIds(
 		MetricsRequest.toObject(message, TO_OBJECT_OPTIONS),
 	) as OtlpMetricsRequest;
+}
+
+export function decodeLogsRequest(body: Buffer): OtlpLogsRequest {
+	return hexifyIds(LogsRequest.toObject(LogsRequest.decode(body), TO_OBJECT_OPTIONS)) as OtlpLogsRequest;
 }

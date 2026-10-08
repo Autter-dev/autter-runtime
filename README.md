@@ -20,6 +20,10 @@ flowchart TD
     F --> H["Optional sink webhook → issue grouping"]
 ```
 
+## Existing external logs
+
+Connect Sentry, PostHog, Grafana/Loki, Datadog or webhooks in the Autter platform's repository Runtime settings. Independent platform workers store provider records and run eligible RCA/draft fixes. This path does not require installing these SDKs or changing the OTLP ingester. See [External sources](docs/EXTERNAL-SOURCES.md) for setup and the distinction from SDK telemetry.
+
 ## Install
 
 ```bash
@@ -37,6 +41,13 @@ npx skills add Autter-dev/autter-skills --all
 ```
 
 See [Autter-dev/autter-skills](https://github.com/Autter-dev/autter-skills).
+
+Server memory pressure detection works through the same OTLP/HTTP metric
+endpoint for **any language**. The Node package exports process metrics for
+you; Python, Go, Rust, JVM, .NET, and other services use their OTel meter
+provider or a process collector to emit the [portable memory metrics](docs/MEMORY-PRESSURE.md).
+An OOM kill must be forwarded by ECS or Kubernetes because the killed process
+cannot report it afterward.
 
 **Frontend** — errors + usage, automatic from init:
 
@@ -100,6 +111,8 @@ ClickHouse.
 
 ## Supported stacks
 
+For endpoint latency detection and slow-request retention, see [endpoint regression telemetry](docs/ENDPOINT-REGRESSIONS.md).
+
 | Stack | How | Key type |
 | --- | --- | --- |
 | React / any SPA / static site | `@autter/runtime-browser` (direct) | client key (publishable) |
@@ -130,6 +143,8 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 - [Stack integrations](docs/INTEGRATIONS.md) — React, Node, Next.js, Go, Rust, generic OTel
 - [Using Autter Runtime **without npm**](docs/WITHOUT-NPM.md) — any OTel SDK, an OTel Collector, or plain HTTP from any language
 - [Architecture & data model](docs/ARCHITECTURE.md)
+- [Operation logging and diagnostic context](docs/OPERATION-LOGGING.md)
+- [Continuous detection, profiles, and outcomes](docs/CONTINUOUS-DETECTION.md)
 - [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
 
 ## Contributing
@@ -190,3 +205,7 @@ new OTLPTraceExporter({
 ## License
 
 MIT
+
+### Investigating your system
+
+Use Dashboard Ask or `autter ask`, `autter logs`, and `autter threads` to investigate captured Runtime signals and resume saved debugging sessions. See [system investigations](docs/ASK.md).

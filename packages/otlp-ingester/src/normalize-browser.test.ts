@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeBrowserPayload } from "./normalize-browser.ts";
+import { browserPayloadSchema, normalizeBrowserPayload } from "./normalize-browser.ts";
 
 function contextOf(payload: unknown): Record<string, unknown> {
 	const result = normalizeBrowserPayload(
@@ -80,4 +80,22 @@ test("track_event rollups still work with scrubbed contexts", () => {
 		],
 	});
 	assert.equal(result.metricPoints[0]?.route, "event:checkout_opened");
+});
+
+test("CSP violations become error occurrences with action context", () => {
+	const payload = browserPayloadSchema.parse({
+		version: 1,
+		service: "web",
+		environment: "prod",
+		events: [{
+			type: "csp_violation",
+			timestamp: "2026-01-01T00:00:00.000Z",
+			message: "Content Security Policy blocked script-src-elem",
+			context: { "autter.action": "click:send-email", cspDirective: "script-src-elem" },
+		}],
+	});
+	const result = normalizeBrowserPayload(payload);
+	assert.equal(result.occurrences[0]?.errorType, "CspViolation");
+	assert.equal(result.occurrences[0]?.severity, "error");
+	assert.equal((result.occurrences[0]?.attributes?.context as Record<string, unknown>)["autter.action"], "click:send-email");
 });

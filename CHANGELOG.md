@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.3.1] - 2026-09-08
+
+### Fixes
+
+- Accept OTLP delta temporality value `1` and reject cumulative value `2` in endpoint latency storage (`otlp-ingester`). This corrects the numeric metric format used by SDK exporters.
+- Add JSON and protobuf regression coverage for delta and cumulative histograms.
+
+### Upgrade
+
+- Self-hosted installations must deploy ingester 1.3.1 before endpoint regression detection is enabled. Node and Next.js SDK 1.3.0 remain compatible. Other package behavior is unchanged.
+- Allow fresh baseline data to collect after the correction. Histograms discarded by the previous ingester cannot be recovered.
+
+## [1.3.0] - 2026-09-08
+
+### Features
+
+- Preserve request-duration histogram buckets for endpoint latency detection. The ingester accepts delta histograms, removes duplicate points at query time, and stores the authenticated organization and repository IDs (`otlp-ingester`).
+- Add opt-in `retainTracesAboveMs` to retain local traces for slow server requests. Retention uses bounded buffers and leaves the existing error-retention setting unchanged (`runtime-node`).
+- Extend HTTP duration histogram bounds through two minutes and add a unique service instance ID (`runtime-node`).
+- Keep normalized routes and HTTP methods on stored spans for exact endpoint trace matching (`otlp-ingester`).
+
+### Upgrade
+
+- Deploy the ingester before enabling endpoint regression detection in the Autter backend. Migration `0005-latency-histograms` creates the required table.
+- Set the release commit SHA and enable slow-request retention before an incident occurs. Historical histogram buckets and discarded traces cannot be rebuilt.
+- The Next.js package now requires `@autter/runtime-node` version `^1.3.0`. Browser behavior is unchanged.
+- See `docs/ENDPOINT-REGRESSIONS.md` for setup and retention limits.
+
+## [1.2.1] - 2026-09-07
+
+### Fixes
+
+- **One failed request no longer splits into two error issues**: `captureException` records the exception onto the active HTTP request span instead of a separate error span, so a thrown Express error and its failed request stay one issue. Before, a single request produced both an `Error` group and a duplicate `SpanError` group. The exception stack trace is now kept on the request span as well (`runtime-node`)
+
+## [1.2.0] - 2026-09-07
+
+### Features
+
+- **Cross-language error grouping**: the ingester now parses native stack formats for Go, Rust, JVM (Java, Kotlin, Scala), and .NET, alongside JavaScript/TypeScript and Python. Each frame is reduced to a stable `function (file)` token, so errors group by their real code location instead of collapsing onto the message alone (`otlp-ingester`)
+
+### Fixes
+
+- Stop unrelated backend errors from grouping into one issue when their stack frames were discarded — Go and Rust frames were dropped entirely, and .NET/Rust frames lost the function name or kept volatile line numbers that fragmented one defect across deploys (`otlp-ingester`)
+
+### Internal
+
+- Add representative stack-trace fixtures and golden fingerprint tests for every supported language (`otlp-ingester`)
+
 ## [1.1.0] - 2026-09-01
 
 ### Features

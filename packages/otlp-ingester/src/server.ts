@@ -5,6 +5,7 @@ import express, {
 } from "express";
 import { KeyResolver, RateLimiter } from "./auth.js";
 import { ClickHouseStore } from "./clickhouse.js";
+import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
 import {
 	deriveFields,
@@ -21,7 +22,11 @@ import {
 	type OtlpMetricsRequest,
 	type OtlpTraceRequest,
 } from "./normalize-otlp.js";
-import { decodeMetricsRequest, decodeTraceRequest } from "./otlp-proto.js";
+import { decodeMetricsRequest, decodeTraceRequest, decodeLogsRequest } from "./otlp-proto.js";
+import { normalizeLogs, type OtlpLogsRequest } from "./logs.js";
+import { decodeProfile } from "./profiles.js";
+import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
+import { validateSourceMap } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
 import type {
 	IngestContext,
@@ -48,6 +53,8 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 
 	const app = express();
 	app.disable("x-powered-by");
+	app.use(express.raw({ limit: "1mb", type: ["application/x-pprof"] }));
+	app.use("/v1/sourcemaps", express.json({ limit: "5mb" }));
 	app.use(
 		express.json({
 			limit: config.maxBodyBytes,
@@ -194,6 +201,57 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		res.status(200).json({ partialSuccess: {} });
 	}
 
+	app.post("/v1/profiles", async (req, res) => {
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		if (!req.is("application/x-pprof") || !Buffer.isBuffer(req.body)) {
+			res.status(415).json({ error: "expected application/x-pprof" });
+			return;
+		}
+		const service = req.header("x-autter-service")?.trim() ?? "";
+		const environment = req.header("x-autter-environment")?.trim() || "production";
+		const release = req.header("x-autter-release")?.trim() ?? "";
+		const traceId = req.header("x-autter-trace-id")?.trim() ?? "";
+		const instanceId = req.header("x-autter-instance-id")?.trim() ?? "";
+		if (!/^[a-zA-Z0-9._-]{1,200}$/.test(service) || environment.length > 100 || release.length > 200 || instanceId.length > 128 || (traceId && !/^[a-f0-9]{32}$/.test(traceId))) {
+			res.status(400).json({ error: "invalid profile metadata" });
+			return;
+		}
+		let samples;
+		try {
+			samples = decodeProfile(req.body, { service, environment, release, traceId, instanceId });
+			if (!samples.length) throw new Error("empty profile");
+		} catch {
+			res.status(400).json({ error: "invalid or unsymbolized profile" });
+			return;
+		}
+		try {
+			await store.insertProfileSamples(ctx, samples);
+			res.status(202).json({ profileId: samples[0]!.profileId, samples: samples.length });
+		} catch (err) { storageError(res, err); }
+	});
+
+	app.post("/v1/sourcemaps", async (req, res) => {
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		const sourceMap = validateSourceMap(req.body);
+		if (!sourceMap) { res.status(400).json({ error: "invalid source map" }); return; }
+		try { await store.insertSourceMap(ctx, sourceMap); res.status(202).json({ accepted: true }); }
+		catch (err) { storageError(res, err); }
+	});
+
+	/** ECS/Kubernetes event forwarders use the same server key as OTLP. */
+	app.post("/v1/platform-events", async (req, res) => {
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		const parsed = platformEventSchema.safeParse(req.body);
+		if (!parsed.success) { res.status(400).json({ error: "invalid platform event" }); return; }
+		const event = normalizePlatformEvent(parsed.data);
+		if (!event) { res.status(400).json({ error: "event timestamp outside retention window" }); return; }
+		try { await store.insertPlatformEvent(ctx, event); res.status(202).json({ accepted: true }); }
+		catch (err) { storageError(res, err); }
+	});
+
 	app.post("/v1/traces", async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
@@ -234,6 +292,19 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		otlpSuccess(req, res);
 	});
 
+	app.post("/v1/logs", async (req, res) => {
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		let logs;
+		try { logs = normalizeLogs(req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest); }
+		catch { res.status(400).json({ error: "invalid OTLP logs payload" }); return; }
+		try { await store.insertLogs(ctx, logs); }
+		catch (err) { storageError(res, err); return; }
+		// Logs are diagnostic evidence. Exceptions and failed outcomes use the trace sink,
+		// so one operation does not create duplicate issues through two export paths.
+		otlpSuccess(req, res);
+	});
+
 	app.post("/v1/metrics", async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
@@ -249,8 +320,11 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			request = req.body as OtlpMetricsRequest;
 		}
 		const metricPoints = normalizeMetrics(request);
+		const memorySamples = normalizeMemoryMetrics(request);
 		try {
+			await store.insertLatencyHistograms(ctx, normalizeLatencyHistograms(request));
 			await store.insertMetricPoints(ctx, metricPoints);
+			await store.insertMemorySamples(ctx, memorySamples);
 		} catch (err) {
 			storageError(res, err);
 			return;

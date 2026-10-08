@@ -1,5 +1,21 @@
 # @autter/runtime-browser
 
+The tracker also observes enforced Content Security Policy violations, failed fetch and XHR requests, HTTP 5xx responses, long tasks, and
+slow resources by default. Call `captureOutcome(name, message)` for a bad
+result returned without an exception. Failures include a coarse browser and
+operating system, the most recent button, link, or form action from the
+preceding 30 seconds, and a short trail of route changes and those actions.
+Exceptions and CSP blocks also include the script URLs on the page, with query
+strings removed. A cross-origin `Script error` is flagged when the browser
+hides the throwing file; the script list is the set that was loaded, not the
+hidden origin. Use a stable, non-sensitive
+`data-autter-action="send-email"` attribute for a useful action name; otherwise
+only the element type is recorded. Set `captureActions: false` to disable this
+context. Set `captureNetworkFailures: false` or `captureTimings: false` to
+disable either observer. Production browser fixes
+can use release keyed source maps uploaded by CI; see
+`docs/CONTINUOUS-DETECTION.md` in the repository.
+
 Tiny, dependency-free browser error + usage tracker for Autter Runtime.
 **~1 KB brotlied** (5 KB CI budget), zero runtime dependencies, no OTel SDK,
 no console patching, no DOM recording, no offline storage.
@@ -22,7 +38,7 @@ initAutterBrowser({
   release: "e4a218f",                // e.g. a git SHA
 });
 
-// Unhandled errors and promise rejections are captured automatically.
+// Unhandled errors, promise rejections, and enforced CSP blocks are captured automatically.
 
 // Handled errors:
 try {
@@ -59,7 +75,7 @@ initAutterBrowser({
 
 | Function | Notes |
 | --- | --- |
-| `initAutterBrowser(options)` | Installs `error`/`unhandledrejection` listeners, sends a session ping |
+| `initAutterBrowser(options)` | Installs error, rejection, CSP, and recent-action listeners; sends a session ping |
 | `captureException(error, context?)` | Handled errors; fast-flushed |
 | `captureMessage(message, severity?, context?)` | Warnings/info without an exception (`"warning"` default); grouped and aggregated like errors |
 | `trackEvent(name, props?)` | Usage counter; aggregated server-side per minute |
@@ -78,9 +94,12 @@ prevents error loops from flooding.
 
 ## What is never sent
 
-Full URLs with query strings, cookies, localStorage, DOM content, form
-values, request headers/bodies, console history, IP addresses.
-Routes are `location.pathname` only; filenames are query-stripped.
+Full URLs with query strings, the raw User-Agent header, cookies,
+localStorage, DOM text, form values, request headers/bodies, console history,
+IP addresses, and CSP policy text. Routes are `location.pathname` only.
+Browser and OS are a family plus major version. Filenames and script URLs are
+query-stripped. For CSP blocks, the directive, blocked resource origin, script
+path, and a short policy hash are retained.
 
 Custom `context` is free-form, so it is scrubbed before send: values under
 sensitive-looking keys (`email`, `password`, `token`, `secret`, `auth`,

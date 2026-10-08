@@ -151,6 +151,8 @@ export interface AutoFlushOptions {
 	 * signals, proceeding to exit anyway). Default 3000 ms.
 	 */
 	timeoutMs?: number;
+	/** Flush after a fatal uncaught exception, then exit with Node's crash code. Default true. */
+	flushOnUncaughtException?: boolean;
 	/** Signals handled besides the defaults. Default ["SIGINT", "SIGTERM"]. */
 	signals?: string[];
 }
@@ -179,6 +181,8 @@ const SIGNAL_EXIT_CODES: Record<string, number> = {
  *     concurrently and let your handler decide the exit — installing this
  *     never changes an existing graceful-shutdown path. A second signal
  *     always exits immediately.
+ *   - uncaughtException — delays Node's fatal exit only for the same bounded
+ *     flush, then exits with its default crash status (1).
  *
  * Idempotent per options object; `initAutterServer` installs it by default
  * (`autoFlush: false` opts out).
@@ -191,6 +195,7 @@ export function installAutterAutoFlush(
 	const warnOnUnflushedExit = options.warnOnUnflushedExit !== false;
 	const timeoutMs = Math.max(100, options.timeoutMs ?? 3_000);
 	const signals = options.signals ?? DEFAULT_SIGNALS;
+	const flushOnUncaughtException = options.flushOnUncaughtException !== false;
 	let disposed = false;
 
 	let inFlight: Promise<boolean> | null = null;
@@ -241,6 +246,23 @@ export function installAutterAutoFlush(
 	};
 
 	const signalCounts = new Map<string, number>();
+	let handlingUncaughtException = false;
+	const onUncaughtException = (error: unknown): void => {
+		// An application may intentionally own this event (including recovery).
+		// Do not turn its existing handler into a forced process exit.
+		if (process.listenerCount("uncaughtException") > 1) return;
+		if (handlingUncaughtException) return;
+		handlingUncaughtException = true;
+		logger.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+		// uncaughtExceptionMonitor has already captured the exception and Node
+		// has emitted its normal fatal diagnostic. Keep the process alive only
+		// for the bounded flush, then preserve Node's default exit status.
+		const keepAlive = setTimeout(() => {}, timeoutMs + 50);
+		void flush("uncaughtException").finally(() => {
+			clearTimeout(keepAlive);
+			process.exit(1);
+		});
+	};
 
 	const onSignal = (signal: string): void => {
 		const count = (signalCounts.get(signal) ?? 0) + 1;
@@ -299,6 +321,9 @@ export function installAutterAutoFlush(
 	const signalHandlers = new Map<string, () => void>();
 
 	process.on("beforeExit", onBeforeExit);
+	if (flushOnUncaughtException) {
+		process.on("uncaughtException", onUncaughtException);
+	}
 	for (const signal of signals) {
 		const handler = () => onSignal(signal);
 		signalHandlers.set(signal, handler);
@@ -311,6 +336,7 @@ export function installAutterAutoFlush(
 		dispose(): void {
 			disposed = true;
 			process.removeListener("beforeExit", onBeforeExit);
+			process.removeListener("uncaughtException", onUncaughtException);
 			process.removeListener("exit", onExit);
 			for (const [signal, handler] of signalHandlers) {
 				process.removeListener(signal, handler);

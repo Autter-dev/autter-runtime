@@ -1,4 +1,5 @@
 import { ServerResponse, type IncomingMessage } from "node:http";
+import { randomUUID } from "node:crypto";
 import {
 	context,
 	trace,
@@ -19,7 +20,7 @@ import {
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
 import { Resource } from "@opentelemetry/resources";
-import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
+import { ExplicitBucketHistogramAggregation, PeriodicExportingMetricReader, View } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import {
 	BatchSpanProcessor,
@@ -55,6 +56,8 @@ import {
 	redactAttributes,
 	type RedactOptions,
 } from "./redact.js";
+import { startMemoryMetrics } from "./memory.js";
+import { configureRuntimeLogger, flushRuntimeLogs, shutdownRuntimeLogger, type RuntimeLoggingOptions } from "./logger.js";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -82,11 +85,15 @@ import {
  */
 
 export interface AutterServerOptions {
+	/** Structured logs and completed operation summaries. */
+	logging?: RuntimeLoggingOptions;
 	/** Private ingest key (autter_rt_…). */
 	apiKey: string;
 	/** Ingester base URL. Default: https://otlp.autter.dev */
 	endpoint?: string;
 	service: string;
+	/** Stable for this process lifetime; use an ECS task/container ID or pod UID plus restart count to correlate platform events. */
+	instanceId?: string;
 	environment?: string;
 	/** e.g. a git SHA. Maps to service.version / release. */
 	release?: string;
@@ -103,8 +110,11 @@ export interface AutterServerOptions {
 	 * Default true.
 	 */
 	retainTracesOnError?: boolean;
+	retainTracesAboveMs?: number;
 	/** Metric export interval. Default 60_000 ms. */
 	metricIntervalMs?: number;
+	/** Collect RSS, heap, limit, and GC signals per process instance. Default true. */
+	memoryMetrics?: boolean;
 	/** Capture crashing exceptions via process.uncaughtExceptionMonitor (default true). */
 	captureGlobalErrors?: boolean;
 	/**
@@ -202,6 +212,8 @@ export interface AutterServer {
 		severity?: AutterSeverity,
 		attributes?: Attributes,
 	): void;
+	/** Report a failed result from code that returned normally. Name must be stable. */
+	reportOutcome(name: string, message: string, attributes?: Attributes): void;
 	/**
 	 * Wrap a named unit of work — a background job, queue consumer, cron
 	 * tick, or DB-heavy call — in an always-recorded span. Unlike regular
@@ -411,7 +423,11 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 	private bufferedSpans = 0;
 	private readonly sweeper: NodeJS.Timeout;
 
-	constructor(private readonly inner: SpanProcessor) {
+	constructor(
+		private readonly inner: SpanProcessor,
+		private readonly retainErrors = true,
+		private readonly slowThresholdMs = 0,
+	) {
 		this.sweeper = setInterval(() => this.sweep(), RETENTION_SWEEP_INTERVAL_MS);
 		// Never hold the process open just to babysit the buffer.
 		this.sweeper.unref?.();
@@ -427,7 +443,9 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		const entry = this.entryFor(ctx.traceId);
 		if (entry.retained) {
 			this.forward(span);
-		} else if (spanIndicatesError(span)) {
+		} else if ((this.retainErrors && spanIndicatesError(span)) ||
+			(this.slowThresholdMs > 0 && span.kind === SpanKind.SERVER &&
+				span.duration[0] * 1000 + span.duration[1] / 1e6 >= this.slowThresholdMs)) {
 			entry.retained = true;
 			this.flush(entry);
 			this.forward(span);
@@ -470,6 +488,10 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 	private entryFor(traceId: string): RetentionEntry {
 		let entry = this.traces.get(traceId);
 		if (!entry) {
+			if (this.traces.size >= RETENTION_MAX_BUFFERED_SPANS) {
+				const oldest = this.traces.keys().next().value;
+				if (oldest) this.drop(oldest);
+			}
 			entry = { spans: [], retained: false, firstSeenAtMs: Date.now() };
 			this.traces.set(traceId, entry);
 		}
@@ -720,6 +742,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 
 	const resource = new Resource({
 		[ATTR_SERVICE_NAME]: options.service,
+		"service.instance.id": (options.instanceId || process.env.AUTTER_RUNTIME_INSTANCE_ID || randomUUID()).slice(0, 128),
 		...(options.release ? { [ATTR_SERVICE_VERSION]: options.release } : {}),
 		"deployment.environment": environment,
 		// Tells the ingester request metrics arrive on the metrics pipe, so
@@ -732,18 +755,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		root: new TraceIdRatioBasedSampler(options.traceSampleRate ?? 0.01),
 	});
 	const retainOnError = options.retainTracesOnError !== false;
+	const slowThresholdMs = Number.isFinite(options.retainTracesAboveMs)
+		? Math.max(0, options.retainTracesAboveMs!) : 0;
+	const retainTraces = retainOnError || slowThresholdMs > 0;
 	// Error-linked trace retention (default on): unsampled spans are still
 	// recorded in-process and briefly buffered, so a trace can be exported in
 	// full once it turns out to contain an error. Rescued spans ride their
 	// own batch processor on the errors' 2 s flush cadence.
-	let sampler: Sampler = retainOnError
+	let sampler: Sampler = retainTraces
 		? new RecordUnsampledSampler(headSampler)
 		: headSampler;
 	// LLM tracing is on by default: gen_ai/ai.* spans emitted through the
 	// global provider (Vercel AI SDK, GenAI instrumentations) skip head
 	// sampling so every model call reaches the ingester.
 	if (options.llmTracing !== false) sampler = new LlmAwareSampler(sampler);
-	const errorTraceBuffer = retainOnError
+	const errorTraceBuffer = retainTraces
 		? new ErrorTraceRetentionProcessor(
 				new BatchSpanProcessor(
 					new CountingExporter(
@@ -751,6 +777,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					),
 					{ scheduledDelayMillis: 2000 },
 				),
+				retainOnError,
+				slowThresholdMs,
 			)
 		: null;
 
@@ -780,12 +808,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			...(errorTraceBuffer ? [errorTraceBuffer] : []),
 		],
 		metricReader,
+		views: [
+			new View({ instrumentName: "http.server.duration", aggregation: new ExplicitBucketHistogramAggregation(
+				[5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000],
+			) }),
+			new View({ instrumentName: "http.server.request.duration", aggregation: new ExplicitBucketHistogramAggregation(
+				[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 20, 30, 60, 120],
+			) }),
+		],
 		instrumentations: [
 			new HttpInstrumentation({ responseHook: captureExpressRoute }),
 			...((options.instrumentations ?? []) as never[]),
 		],
 	});
 	sdk.start();
+	const stopMemoryMetrics = options.memoryMetrics === false ? null : startMemoryMetrics();
 
 	// Errors, LLM calls, and process spans must never be lost to head
 	// sampling, so they go through a dedicated always-on provider with its
@@ -816,16 +853,39 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		telemetryStats.markCaptured();
 		const isError = error instanceof Error;
 		const message = isError ? error.message : String(error);
-		const span = errorTracer.startSpan(isError ? error.name : "Error", {
-			attributes: {
-				"autter.severity": "error",
-				// Redaction is applied here, not at export time: PII must not
-				// leave the process even if an exporter misbehaves.
-				...activeRedactor(attributes),
-			},
-		});
+		// Redaction is applied here, not at export time: PII must not leave
+		// the process even if an exporter misbehaves.
+		const redacted = activeRedactor(attributes);
+
+		// Prefer the live request span (the HTTP server span inside an Express
+		// handler or error middleware) so the thrown exception and its failed
+		// request stay one issue. Opening a separate error span here is what
+		// used to split one failure into an "Error" group AND a "SpanError"
+		// group: the request span carried only an error status (no exception
+		// event), so the ingester synthesized a second SpanError occurrence.
+		// Recording the exception onto the request span gives it a real
+		// exception event (type, message, stack), so no SpanError is derived.
+		// Global handlers (uncaught/unhandled) run with no active span, so we
+		// still open a dedicated always-on error span for them.
+		const activeSpan = trace.getActiveSpan();
+		const reuseActive = activeSpan?.isRecording() === true;
+		const span = reuseActive
+			? (activeSpan as Span)
+			: errorTracer.startSpan(isError ? error.name : "Error");
+		span.setAttributes({ "autter.severity": "error", ...redacted });
+
 		if (isError && error.stack) {
-			span.recordException(error);
+			if (redacted["autter.handled"] === true) {
+				span.addEvent("exception", {
+					"exception.type": error.name,
+					"exception.message": message,
+					"exception.stacktrace": error.stack,
+					"autter.handled": true,
+					"autter.sampled": redacted["autter.sampled"] === true,
+				});
+			} else {
+				span.recordException(error);
+			}
 		} else {
 			// No usable stack — an Error thrown without one, or a non-Error
 			// value. Synthesize the call site (minus this frame) so the
@@ -839,10 +899,15 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 				"exception.type": isError ? error.name : "Error",
 				"exception.message": message,
 				...(stack ? { "exception.stacktrace": stack } : {}),
+				...(redacted["autter.handled"] === true
+					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
+					: {}),
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
-		span.end();
+		// Only end spans we own. The request span is owned by the HTTP
+		// instrumentation, which ends it when the response completes.
+		if (!reuseActive) span.end();
 	}
 
 	function captureMessage(
@@ -877,29 +942,41 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		span.end();
 	}
 
+	function reportOutcome(name: string, message: string, attributes?: Attributes): void {
+		errorTraceBuffer?.retainActiveTrace();
+		telemetryStats.markCaptured();
+		const activeSpan = trace.getActiveSpan();
+		const reuseActive = activeSpan?.isRecording() === true;
+		const span = reuseActive ? activeSpan : errorTracer.startSpan("OutcomeFailure");
+		const safeOutcome = activeRedactor({ "autter.outcome.name": name.slice(0, 200), "autter.outcome.message": message.slice(0, 1000) });
+		const safeName = String(safeOutcome["autter.outcome.name"] ?? "operation");
+		const safeMessage = String(safeOutcome["autter.outcome.message"] ?? "failed");
+		span.addEvent("autter.outcome", {
+			...activeRedactor(attributes),
+			"autter.outcome.status": "error",
+			"autter.outcome.name": safeName,
+			"autter.outcome.message": safeMessage,
+		});
+		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
+		if (!reuseActive) span.end();
+	}
+	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment,
+		release: options.release, options: options.logging, redact: activeRedactor,
+		run: (name, fn, attributes) => runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
+		reportOutcome,
+	});
+
 	if (options.captureGlobalErrors !== false) {
 		// `uncaughtExceptionMonitor` observes crashes WITHOUT changing the
 		// process's exit semantics (unlike an `uncaughtException` listener).
 		// Best-effort: the batch may not fully flush before the process dies.
 		process.on("uncaughtExceptionMonitor", (err) => {
 			captureException(err, { "autter.unhandled": true });
-			void flushTarget.forceFlush();
+			if (options.autoFlush === false) void Promise.resolve(flushTarget.forceFlush()).catch(() => {});
 		});
-		// The async twin of an uncaught exception: a rejected promise with no
-		// `.catch`. Registering this listener also stops Node's default
-		// `throw` mode from crashing the process, so — unlike the monitor
-		// above — execution continues and the batch exporter flushes on its
-		// normal schedule.
-		process.on("unhandledRejection", (reason: unknown) => {
-			// A non-Error reason has no stack and no real type — usually
-			// injected junk rather than an app fault. Report it as a warning so
-			// it does not open a first-class issue. Mirrors the browser SDK's
-			// `unhandledrejection` handling.
-			captureException(reason, {
-				"autter.unhandled": true,
-				...(reason instanceof Error ? {} : { "autter.severity": "warning" }),
-			});
-		});
+		// In Node's default throw mode, an unhandled rejection reaches the
+		// uncaughtExceptionMonitor above. Installing an unhandledRejection
+		// listener would suppress that default crash, so leave it alone.
 	}
 
 	// Everything that buffers telemetry in-process, reachable as one unit:
@@ -908,6 +985,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const flushTarget: FlushTarget = {
 		forceFlush: async () => {
 			const results = await Promise.allSettled([
+				flushRuntimeLogs(),
 				Promise.resolve().then(() => alwaysOnProvider.forceFlush()),
 				Promise.resolve().then(() => mainSpanProcessor.forceFlush()),
 				...(errorTraceBuffer
@@ -935,11 +1013,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const server: AutterServer = {
 		captureException,
 		captureMessage,
+		reportOutcome,
 		withProcessSpan: (name, fn, attributes) =>
 			runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
+			const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
+			stopMemoryMetrics?.();
 			active = null;
 			activeAlwaysOnProvider = null;
 			autoFlushHandle?.dispose();
@@ -947,6 +1028,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			unregisterFlushTargets();
 			telemetryStats.markAllFlushed();
 			await Promise.allSettled([alwaysOnProvider.shutdown(), sdk.shutdown()]);
+			if (logShutdown[0]?.status === "rejected") throw logShutdown[0].reason;
 		},
 	};
 	active = server;
@@ -1030,6 +1112,23 @@ export function captureMessage(
 		"autter.severity": severity,
 	});
 	span.setStatus({ code: SpanStatusCode.ERROR, message });
+	span.end();
+}
+
+/** Portable OTLP `autter.outcome` event for failed results without exceptions. */
+export function reportOutcome(name: string, message: string, attributes?: Attributes): void {
+	if (active) return active.reportOutcome(name, message, attributes);
+	const span = trace.getTracer("autter-outcomes").startSpan("OutcomeFailure");
+	const safeOutcome = redactAttributes({ "autter.outcome.name": name.slice(0, 200), "autter.outcome.message": message.slice(0, 1000) });
+	const safeName = String(safeOutcome["autter.outcome.name"] ?? "operation");
+	const safeMessage = String(safeOutcome["autter.outcome.message"] ?? "failed");
+	span.addEvent("autter.outcome", {
+		...redactAttributes(attributes),
+		"autter.outcome.status": "error",
+		"autter.outcome.name": safeName,
+		"autter.outcome.message": safeMessage,
+	});
+	span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 	span.end();
 }
 

@@ -1,4 +1,12 @@
+# Operation logging
+
+For structured messages, completed operation summaries, and explicit outcomes,
+see [Operation logging and diagnostic context](OPERATION-LOGGING.md). These APIs
+require the updated Node/Next.js SDK and ingester described in that guide.
+
 # Getting started
+
+Already collecting logs in an external provider? See [External sources](EXTERNAL-SOURCES.md) for repository connectors. The SDK/OTel setup below applies when you instrument application code.
 
 Autter Runtime tracks **runtime errors and usage** from your frontend and
 backend with two small packages and one ingest endpoint. This guide takes
@@ -7,6 +15,7 @@ you from zero to seeing data in ClickHouse.
 - [1. Concepts (2 minutes)](#1-concepts)
 - [2. Run the ingester](#2-run-the-ingester)
 - [3. Instrument your backend](#3-instrument-your-backend)
+- [LLM instrumentation guide](LLM-INSTRUMENTATION.md)
 - [4. Instrument your frontend](#4-instrument-your-frontend)
 - [5. Next.js: both in one package](#5-nextjs-both-in-one-package)
 - [6. Other languages (Go, Rust, Python, …)](#6-other-languages)
@@ -138,6 +147,10 @@ enriched with `@opentelemetry/instrumentation-express` via the
 `instrumentations` option.
 
 ### Track LLM usage & cost
+
+For the complete `withLlmCall` / `trackLlmCall` API, emitted `gen_ai.*`
+attributes, and cross-language OTLP conventions, see the
+[LLM instrumentation guide](LLM-INSTRUMENTATION.md).
 
 `initAutterServer` initialises LLM tracing too: every recognised LLM call
 is recorded 100% (an LLM-aware sampler keeps GenAI spans even at 1% trace

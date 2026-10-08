@@ -1,4 +1,17 @@
+# Operation logging
+
+Use `withRuntimeOperation`, `runtimeLogger`, and `createRuntimeLogger` to attach
+application context to logs and completed operations. See the full
+[operation logging guide](../../docs/OPERATION-LOGGING.md) for initialization,
+steps, outcomes, redaction, export lifecycle, and release requirements.
+
 # @autter/runtime-node
+
+The server tracker exports per-instance RSS, heap, memory limit, and GC
+metrics by default. See [memory pressure incidents](../../docs/MEMORY-PRESSURE.md)
+for ECS/Kubernetes OOM event forwarding and optional heap profiles. Set
+`memoryMetrics: false` only if another exporter already emits equivalent
+process metrics.
 
 Autter Runtime for Node.js — two halves in one package:
 
@@ -186,6 +199,9 @@ whitelist; it is best-effort scrubbing of obvious PII shapes, not a DLP
 engine — keep secrets out of attributes in the first place.
 
 ## 3. LLM tracing
+
+For the field contract, manual reporting patterns, and provider-agnostic
+OpenTelemetry setup, see the dedicated [LLM instrumentation guide](../../docs/LLM-INSTRUMENTATION.md).
 
 `initAutterServer` initialises LLM tracing automatically: any GenAI span —
 `gen_ai.*` semconv attributes or the Vercel AI SDK's `ai.*` spans — bypasses

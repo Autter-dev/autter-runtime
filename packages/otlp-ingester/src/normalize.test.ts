@@ -147,6 +147,67 @@ test("server-span exceptions are not double counted", () => {
 	assert.equal(totals.errorCount, 1);
 });
 
+test("exception spans inherit method, route, status, and duration from the HTTP parent", () => {
+	const start = NANOS;
+	const end = String(BigInt(NANOS) + 120_000_000n);
+	const { occurrences } = normalizeTraces({
+		resourceSpans: [
+			{
+				scopeSpans: [
+					{
+						spans: [
+							{
+								traceId: "a".repeat(32),
+								spanId: "c".repeat(16),
+								name: "POST /api/gmails",
+								kind: 2,
+								startTimeUnixNano: start,
+								endTimeUnixNano: end,
+								status: { code: 2 },
+								attributes: [
+									{ key: "http.route", value: { stringValue: "/api/gmails" } },
+									{ key: "http.request.method", value: { stringValue: "POST" } },
+									{ key: "http.response.status_code", value: { intValue: 500 } },
+								],
+							},
+							{
+								traceId: "a".repeat(32),
+								spanId: "d".repeat(16),
+								parentSpanId: "c".repeat(16),
+								name: "Error",
+								kind: 1,
+								startTimeUnixNano: start,
+								endTimeUnixNano: end,
+								status: { code: 2, message: "Database Error" },
+								events: [
+									{
+										name: "exception",
+										timeUnixNano: start,
+										attributes: [
+											{ key: "exception.type", value: { stringValue: "Error" } },
+											{
+												key: "exception.message",
+												value: { stringValue: "Database Error" },
+											},
+										],
+									},
+								],
+							},
+						],
+					},
+				],
+			},
+		],
+	});
+
+	const error = occurrences.find((row) => row.message === "Database Error");
+	assert.ok(error);
+	assert.equal(error.route, "/api/gmails");
+	assert.equal(error.method, "POST");
+	assert.equal(error.statusCode, 500);
+	assert.equal(error.attributes?.["http.server.duration_ms"], 120);
+});
+
 test("warning occurrences count as events but not error events", () => {
 	const { metricPoints } = normalizeTraces(
 		otlpSpan({

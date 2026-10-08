@@ -69,6 +69,10 @@ const EVENT_TYPES = new Set([
 	"message",
 	"session_start",
 	"track_event",
+	"outcome",
+	"request_failure",
+	"csp_violation",
+	"timing",
 ]);
 
 const SEVERITIES = new Set(["fatal", "error", "warning", "info"]);
@@ -277,6 +281,8 @@ export function sanitizeBrowserPayload(raw: unknown): object | null {
 			message:
 				typeof e.message === "string" ? e.message.slice(0, 4000) : "",
 			...(typeof e.name === "string" ? { name: e.name.slice(0, 200) } : {}),
+			...(typeof e.durationMs === "number" && Number.isFinite(e.durationMs)
+				? { durationMs: Math.max(0, Math.min(120000, e.durationMs)) } : {}),
 			...(typeof e.stack === "string"
 				? { stack: e.stack.slice(0, 32000) }
 				: {}),

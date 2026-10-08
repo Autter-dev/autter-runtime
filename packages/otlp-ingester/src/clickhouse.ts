@@ -4,6 +4,11 @@ import {
 	type ClickHouseSettings,
 } from "@clickhouse/client";
 import type { IngesterConfig } from "./config.js";
+import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
+import { profileTableDDL, type ProfileSample } from "./profiles.js";
+import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
+import { sourceMapTableDDL } from "./source-maps.js";
+import { logTableDDL, type RuntimeLogRecord } from "./logs.js";
 import {
 	MIGRATIONS,
 	migrationsTableDDL,
@@ -66,6 +71,12 @@ export class ClickHouseStore {
 			this.config;
 		return [
 			`CREATE DATABASE IF NOT EXISTS ${db}`,
+			latencyTableDDL(db, metricsTtlDays),
+			profileTableDDL(db),
+			memoryTableDDL(db),
+			platformEventTableDDL(db),
+			sourceMapTableDDL(db),
+			logTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -285,6 +296,68 @@ export class ClickHouseStore {
 		});
 	}
 
+	async insertLogs(ctx: IngestContext, logs: RuntimeLogRecord[]): Promise<void> {
+		if (!logs.length) return;
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({ table: this.table("runtime_logs"), format: "JSONEachRow", clickhouse_settings: INSERT_SETTINGS,
+			values: logs.map((row) => ({ org_id: ctx.orgId, repository_id: ctx.repositoryId, event_id: row.id,
+				service: row.service, environment: row.environment, release: row.release, trace_id: row.traceId,
+				span_id: row.spanId, operation_id: row.operationId, operation: row.operation, event_type: row.type,
+				severity: row.severity, message: row.message, outcome: row.outcome, duration_ms: row.durationMs,
+				attributes: JSON.stringify(row.attributes), occurred_at: row.occurredAt.toISOString() })) });
+	}
+
+	async insertProfileSamples(ctx: IngestContext, samples: ProfileSample[]): Promise<void> {
+		if (!samples.length) return;
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_profile_samples"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: samples.map((sample) => ({
+				org_id: ctx.orgId, repository_id: ctx.repositoryId,
+				profile_id: sample.profileId, sample_index: sample.sampleIndex, service: sample.service,
+				environment: sample.environment, release: sample.release,
+				trace_id: sample.traceId, instance_id: sample.instanceId, observed_at: sample.observedAt.toISOString(),
+				sample_type: sample.sampleType, unit: sample.unit,
+				stack: sample.stack, value: sample.value,
+			})),
+		});
+	}
+
+	async insertMemorySamples(ctx: IngestContext, samples: MemorySample[]): Promise<void> {
+		if (!samples.length) return;
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({ table: this.table("runtime_memory_samples"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: samples.map((s) => ({ org_id: ctx.orgId, repository_id: ctx.repositoryId,
+				service: s.service, environment: s.environment, release: s.release,
+				instance_id: s.instanceId, metric: s.metric, value: s.value, temporality: s.temporality,
+				observed_at: s.observedAt.toISOString() })) });
+	}
+
+	async insertPlatformEvent(ctx: IngestContext, event: PlatformEvent): Promise<void> {
+		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
+		await this.ensureSchema();
+		await this.getClient().insert({ table: this.table("runtime_platform_events"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, event_id: event.eventId,
+				service: event.service, environment: event.environment, release: event.release,
+				instance_id: event.instanceId, platform: event.platform, kind: event.kind,
+				occurred_at: event.occurredAt }] });
+	}
+
+	async insertSourceMap(ctx: IngestContext, sourceMap: { release: string; filename: string; map: string }): Promise<void> {
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_source_maps"), format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, ...sourceMap }],
+		});
+	}
+
 	async insertLlmCalls(
 		ctx: IngestContext,
 		calls: RuntimeLlmCall[],
@@ -343,6 +416,23 @@ export class ClickHouseStore {
 				error_count: Math.max(0, Math.round(p.errorCount)),
 				duration_sum_ms: p.durationSumMs,
 				session_count: Math.max(0, Math.round(p.sessionCount)),
+			})),
+		});
+	}
+
+	async insertLatencyHistograms(ctx: IngestContext, points: LatencyHistogram[]): Promise<void> {
+		if (points.length === 0 || !this.configured) return;
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_latency_histograms"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: points.map((point) => ({
+				org_id: ctx.orgId, repository_id: ctx.repositoryId, point_id: point.pointId,
+				service: point.service, environment: point.environment, release: point.release,
+				method: point.method, route: point.route, bucket_at: point.bucketAt.toISOString(),
+				request_count: point.requestCount, error_count: point.errorCount,
+				duration_sum_ms: point.durationSumMs, bounds_ms: point.boundsMs, counts: point.counts,
 			})),
 		});
 	}

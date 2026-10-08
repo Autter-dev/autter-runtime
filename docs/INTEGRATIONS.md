@@ -1,7 +1,7 @@
 # Stack integrations
 
-Autter Runtime is two credentials and three endpoints; everything else is
-per-stack sugar.
+Autter Runtime uses two key types and portable OTLP endpoints; optional
+profile and source-map uploads use the server key.
 
 | Credential | Where it lives | Can |
 | --- | --- | --- |
@@ -12,9 +12,21 @@ per-stack sugar.
 | --- | --- |
 | `POST /v1/traces`, `POST /v1/metrics` | OTLP/HTTP — **protobuf or JSON**, gzip ok |
 | `POST /v1/browser` | compact JSON (`@autter/runtime-browser` payload v1) |
+| `POST /v1/profiles` | symbolized pprof (server key only) |
+| `POST /v1/sourcemaps` | release-keyed source map JSON (server key only) |
+| `POST /v1/platform-events` | ECS/Kubernetes OOM and restart JSON (server key only) |
 
 Any language with an OpenTelemetry SDK can send server telemetry — point
 its OTLP/HTTP exporter at the ingester and add the key as a header.
+Memory pressure detection uses the same `/v1/metrics` endpoint for every
+language. Enable process/runtime metrics or emit the portable RSS/heap gauges
+in [Memory pressure incidents](MEMORY-PRESSURE.md), with a unique
+`service.instance.id` for each process. Node SDK 1.3.3+ emits these by
+default; other language exporters need a process metric instrument or
+collector. An OTel trace exporter alone does not measure memory.
+The [memory setup and deployment requirements](MEMORY-PRESSURE.md#what-must-be-running)
+also include the ingester, detector/UI deployment, application redeploy, and
+an ECS/Kubernetes event forwarder for OOM correlation.
 
 ## Client-side React / SPA / static sites
 

@@ -16,6 +16,7 @@ permissions:
 
 jobs:
   publish:
+    # npm provenance currently accepts GitHub-hosted runners only.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

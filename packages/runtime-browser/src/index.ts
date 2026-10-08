@@ -34,6 +34,12 @@ export interface AutterBrowserOptions {
 	sessionTracking?: boolean;
 	/** Last-chance hook: mutate or drop (return null) an event before send. */
 	beforeSend?: (event: BrowserEvent) => BrowserEvent | null;
+	/** Observe failed fetch and XHR requests and 5xx responses (default true). */
+	captureNetworkFailures?: boolean;
+	/** Observe long tasks and slow resource timings (default true). */
+	captureTimings?: boolean;
+	/** Attach the last safe click or form action to failures (default true). */
+	captureActions?: boolean;
 }
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
@@ -44,7 +50,11 @@ export interface BrowserEvent {
 		| "unhandled_rejection"
 		| "message"
 		| "session_start"
-		| "track_event";
+		| "track_event"
+		| "outcome"
+		| "request_failure"
+		| "csp_violation"
+		| "timing";
 	timestamp: string;
 	/** Signal level; the ingester defaults it per type when omitted. */
 	severity?: AutterSeverity;
@@ -57,6 +67,7 @@ export interface BrowserEvent {
 	column?: number;
 	route?: string;
 	context?: Record<string, unknown>;
+	durationMs?: number;
 }
 
 const MAX_QUEUE = 10;
@@ -73,6 +84,13 @@ let globalContext: Record<string, unknown> | undefined;
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 let sentCount = 0;
 let initialized = false;
+let timingCount = 0;
+let lastAction: { name: string; at: number; route: string } | undefined;
+const ACTION_WINDOW_MS = 30_000;
+const TRAIL_MAX = 8;
+let trail: string[] = [];
+let clientCache: { browser: string; os: string } | undefined;
+let seenCspPolicyHash = "";
 
 function uid(): string {
 	try {
@@ -131,8 +149,165 @@ function route(): string {
 	}
 }
 
+function pushTrail(step: string): void {
+	const clean = step.slice(0, 80);
+	if (!clean || trail[trail.length - 1] === clean) return;
+	trail.push(clean);
+	if (trail.length > TRAIL_MAX) trail.shift();
+}
+
+/** Coarse browser and OS only. The raw User-Agent is a fingerprint and is never sent. */
+function clientEnv(): { browser: string; os: string } {
+	if (clientCache) return clientCache;
+	let browser = "";
+	let os = "";
+	try {
+		const nav = navigator as Navigator & {
+			userAgentData?: {
+				platform?: string;
+				brands?: Array<{ brand: string; version: string }>;
+			};
+		};
+		const hints = nav.userAgentData;
+		if (hints) {
+			os = (hints.platform || "").slice(0, 40);
+			const brand = (hints.brands || []).find(
+				(item) => !/not.?a.?brand|chromium/i.test(item.brand),
+			);
+			if (brand) browser = `${brand.brand} ${brand.version}`.trim().slice(0, 40);
+		}
+		const ua = nav.userAgent || "";
+		if (!os) {
+			os = /Windows/.test(ua)
+				? "Windows"
+				: /Android/.test(ua)
+					? "Android"
+					: /iPhone|iPad|iPod/.test(ua)
+						? "iOS"
+						: /Mac OS X/.test(ua)
+							? "macOS"
+							: /CrOS/.test(ua)
+								? "ChromeOS"
+								: /Linux/.test(ua)
+									? "Linux"
+									: "";
+		}
+		if (!browser) {
+			const edge = /Edg\/(\d+)/.exec(ua);
+			const firefox = /Firefox\/(\d+)/.exec(ua);
+			const chrome = /Chrome\/(\d+)/.exec(ua);
+			const safari = /Version\/(\d+).+Safari/.exec(ua);
+			browser = edge
+				? `Edge ${edge[1]}`
+				: firefox
+					? `Firefox ${firefox[1]}`
+					: chrome
+						? `Chrome ${chrome[1]}`
+						: safari
+							? `Safari ${safari[1]}`
+							: "";
+		}
+	} catch {
+		/* Navigator is unavailable. */
+	}
+	clientCache = { browser, os };
+	return clientCache;
+}
+
+/** Query-stripped script identity: pathname on this origin, origin+path elsewhere, extension id for injected scripts. */
+function scriptLabel(raw: string | undefined): string | undefined {
+	if (!raw || raw === "inline" || raw === "eval" || raw === "self") return undefined;
+	try {
+		const url = new URL(raw, location.href);
+		if (/^(chrome-extension|moz-extension|safari-web-extension|iabjs):$/.test(url.protocol)) {
+			return `${url.protocol}//${url.host}`.slice(0, 160);
+		}
+		if (url.origin === location.origin) return (url.pathname || "/").slice(0, 180);
+		const path = url.pathname === "/" ? "" : url.pathname;
+		return `${url.origin}${path}`.slice(0, 180);
+	} catch {
+		return undefined;
+	}
+}
+
+function pageScripts(): string {
+	try {
+		const list = document.scripts;
+		if (!list || list.length === 0) return "";
+		const seen: string[] = [];
+		for (let i = 0; i < list.length && seen.length < 12; i++) {
+			const label = scriptLabel(list[i]?.src);
+			if (label && !seen.includes(label)) seen.push(label);
+		}
+		return seen.join(" | ").slice(0, 700);
+	} catch {
+		return "";
+	}
+}
+
+function attachClient(event: BrowserEvent): void {
+	if (event.type === "session_start" || event.type === "track_event" || event.type === "timing") return;
+	const env = clientEnv();
+	const extra: Record<string, unknown> = {};
+	if (env.browser) extra["autter.browser"] = env.browser;
+	if (env.os) extra["autter.os"] = env.os;
+	if (trail.length > 0) extra["autter.trail"] = trail.join(" > ").slice(0, 400);
+	if (event.type === "exception" || event.type === "unhandled_rejection" || event.type === "csp_violation") {
+		const scripts = pageScripts();
+		if (scripts) extra["autter.scripts"] = scripts;
+	}
+	if (
+		seenCspPolicyHash &&
+		(event.type === "exception" || event.type === "unhandled_rejection") &&
+		event.context?.cspPolicyHash == null
+	) {
+		extra.cspPolicyHash = seenCspPolicyHash;
+	}
+	if (Object.keys(extra).length > 0) {
+		event.context = { ...(event.context || {}), ...extra };
+	}
+}
+
+function watchRoutes(): void {
+	const record = () => {
+		const path = route();
+		if (path) pushTrail(`nav:${path}`);
+	};
+	record();
+	try {
+		const hist = window.history;
+		if (hist && typeof hist.pushState === "function") {
+			const push = hist.pushState.bind(hist);
+			const replace = hist.replaceState.bind(hist);
+			hist.pushState = ((...args: Parameters<History["pushState"]>) => {
+				push(...args);
+				record();
+			}) as History["pushState"];
+			hist.replaceState = ((...args: Parameters<History["replaceState"]>) => {
+				replace(...args);
+				record();
+			}) as History["replaceState"];
+		}
+	} catch {
+		/* History is unavailable. */
+	}
+	window.addEventListener("popstate", record);
+}
+
 function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	if (!initialized || sentCount + queue.length >= MAX_EVENTS_PER_SESSION) return;
+	if (lastAction && !["session_start", "track_event", "timing"].includes(event.type)) {
+		const age = Date.now() - lastAction.at;
+		if (age >= 0 && age <= ACTION_WINDOW_MS) {
+			event.context = {
+				...(event.context || {}),
+				"autter.action": lastAction.name,
+				"autter.actionRoute": lastAction.route,
+				"autter.actionAgeMs": age,
+			};
+		}
+	}
+	attachClient(event);
 	// Scrub before beforeSend so the last-chance hook sees the final form.
 	if (event.context) event.context = redactContext(event.context);
 	if (opts.beforeSend) {
@@ -253,6 +428,16 @@ export function captureMessage(
 	enqueue(event, severity === "error" || severity === "fatal");
 }
 
+/** Report an application outcome that failed without throwing. Use a stable name. */
+export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
+	const event = baseEvent("outcome", String(message).replace(EMAIL_RE, MASK));
+	event.name = String(name).replace(EMAIL_RE, MASK).slice(0, 200);
+	event.errorType = "OutcomeFailure";
+	event.severity = "error";
+	if (context) event.context = { ...(event.context || {}), ...context };
+	enqueue(event, true);
+}
+
 /** Coarse usage signal — counts only, no PII in `props`. */
 export function trackEvent(
 	name: string,
@@ -278,16 +463,157 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 	opts = options as typeof opts;
 	sessionId = getSessionId();
 	initialized = true;
+	watchRoutes();
+	if (options.captureActions !== false) {
+		const rememberAction = (event: Event) => {
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			const element = event.type === "submit"
+				? target.closest("form")
+				: target.closest("button, a, [role='button'], input[type='submit'], input[type='button']");
+			if (!element) return;
+			// Application-owned labels are opt-in. Never read text, values, hrefs,
+			// arbitrary ids, or form data from the DOM.
+			const explicit = element.getAttribute("data-autter-action");
+			const label = explicit && /^[a-zA-Z0-9_.:-]{1,80}$/.test(explicit)
+				? explicit : element.tagName.toLowerCase();
+			lastAction = { name: `${event.type}:${label}`, at: Date.now(), route: route() };
+			pushTrail(`${event.type}:${label}`);
+		};
+		document.addEventListener("click", rememberAction, true);
+		document.addEventListener("submit", rememberAction, true);
+	}
+	if (options.captureNetworkFailures !== false && typeof fetch === "function") {
+		const originalFetch = window.fetch.bind(window);
+		window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+			const started = performance.now();
+			const target = input instanceof Request ? input.url : String(input);
+			const isTelemetry = target.includes(options.endpoint);
+			const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
+			return originalFetch(input, init).then((response) => {
+				if (!isTelemetry && response.status >= 500) {
+					const event = baseEvent("request_failure", `Request returned ${response.status}`);
+					event.name = path;
+					event.errorType = "HttpRequestError";
+					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					enqueue(event, true);
+				}
+				return response;
+			}, (error: unknown) => {
+				if (!isTelemetry) {
+					const event = baseEvent("request_failure", "Request failed");
+					event.name = path;
+					event.errorType = "NetworkError";
+					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					enqueue(event, true);
+				}
+				throw error;
+			});
+		}) as typeof fetch;
+	}
+	if (options.captureNetworkFailures !== false && typeof XMLHttpRequest !== "undefined") {
+		const xhrUrls = new WeakMap<XMLHttpRequest, string>();
+		const originalOpen = XMLHttpRequest.prototype.open;
+		const originalSend = XMLHttpRequest.prototype.send;
+		XMLHttpRequest.prototype.open = (function (this: XMLHttpRequest, ...args: unknown[]) {
+			xhrUrls.set(this, String(args[1] ?? ""));
+			return Reflect.apply(originalOpen, this, args);
+		}) as typeof XMLHttpRequest.prototype.open;
+		XMLHttpRequest.prototype.send = function (...args: Parameters<XMLHttpRequest["send"]>) {
+			const target = xhrUrls.get(this) ?? "";
+			if (!target.includes(options.endpoint)) {
+				const started = performance.now();
+				const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
+				let recorded = false;
+				const record = (message: string, errorType: string) => {
+					if (recorded) return;
+					recorded = true;
+					const event = baseEvent("request_failure", message);
+					event.name = path;
+					event.errorType = errorType;
+					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					enqueue(event, true);
+				};
+				const onError = () => record("Request failed", "NetworkError");
+				const onTimeout = () => record("Request timed out", "NetworkError");
+				this.addEventListener("loadend", () => {
+					if (this.status >= 500) record(`Request returned ${this.status}`, "HttpRequestError");
+					this.removeEventListener("error", onError);
+					this.removeEventListener("timeout", onTimeout);
+				}, { once: true });
+				this.addEventListener("error", onError, { once: true });
+				this.addEventListener("timeout", onTimeout, { once: true });
+			}
+			return Reflect.apply(originalSend, this, args);
+		};
+	}
+	if (options.captureTimings !== false && typeof PerformanceObserver !== "undefined") {
+		try {
+			const observer = new PerformanceObserver((list) => {
+				for (const entry of list.getEntries()) {
+					if (entry.duration < 200 || entry.name.includes(options.endpoint) || timingCount >= 20) continue;
+					const event = baseEvent("timing", "");
+					event.name = entry.entryType === "longtask" ? "browser.longtask" : "browser.resource:" + (() => {
+						try { return new URL(entry.name, location.href).pathname; } catch { return "unknown"; }
+					})();
+					event.durationMs = Math.min(120000, Math.round(entry.duration));
+					timingCount++;
+					enqueue(event);
+				}
+			});
+			observer.observe({ entryTypes: ["longtask", "resource"] });
+		} catch { /* Browser does not support these entry types. */ }
+	}
 
 	window.addEventListener("error", (event: ErrorEvent) => {
-		const e = baseEvent("exception", event.message || "Unknown error");
-		e.errorType = event.error instanceof Error ? event.error.name : "Error";
-		if (event.error instanceof Error && event.error.stack) {
-			e.stack = String(event.error.stack).slice(0, 32000);
+		const target = event.target as (EventTarget & { tagName?: string; src?: string }) | null;
+		const failedScript = target && target !== window && target.tagName === "SCRIPT" ? target : null;
+		const e = baseEvent("exception", failedScript ? "Script failed to load" : event.message || "Unknown error");
+		if (failedScript) {
+			e.errorType = "ScriptLoadError";
+			const label = scriptLabel(failedScript.src);
+			if (label) e.filename = label;
+		} else {
+			e.errorType = event.error instanceof Error ? event.error.name : "Error";
+			if (event.error instanceof Error && event.error.stack) {
+				e.stack = String(event.error.stack).slice(0, 32000);
+			}
+			e.filename = stripQuery(event.filename);
+			if (event.lineno) e.line = event.lineno;
+			if (event.colno) e.column = event.colno;
+			// Cross-origin scripts without CORS are reported as "Script error." with no file.
+			if (!e.filename && /^Script error\.?$/i.test(e.message)) {
+				e.context = { ...(e.context || {}), "autter.crossOriginScript": true };
+			}
 		}
-		e.filename = stripQuery(event.filename);
-		if (event.lineno) e.line = event.lineno;
-		if (event.colno) e.column = event.colno;
+		enqueue(e, true);
+	}, true);
+	window.addEventListener("securitypolicyviolation", (event: SecurityPolicyViolationEvent) => {
+		if (event.disposition === "report") return;
+		const directive = event.effectiveDirective || event.violatedDirective || "unknown";
+		const e = baseEvent("csp_violation", `Content Security Policy blocked ${directive}`);
+		e.errorType = "CspViolation";
+		e.severity = "error";
+		let blockedOrigin = event.blockedURI;
+		if (blockedOrigin && !["inline", "eval", "self"].includes(blockedOrigin)) {
+			try { blockedOrigin = new URL(blockedOrigin).origin; } catch { blockedOrigin = "other"; }
+		}
+		const source = scriptLabel(event.sourceFile) || scriptLabel(event.blockedURI);
+		if (source) e.filename = source;
+		if (event.lineNumber) e.line = event.lineNumber;
+		if (event.columnNumber) e.column = event.columnNumber;
+		let policyHash = "";
+		const policy = event.originalPolicy;
+		if (policy) {
+			let hash = 5381;
+			const length = Math.min(policy.length, 4000);
+			for (let i = 0; i < length; i++) hash = ((hash << 5) + hash) ^ policy.charCodeAt(i);
+			policyHash = (hash >>> 0).toString(16);
+			seenCspPolicyHash = policyHash;
+		}
+		e.context = { ...(e.context || {}), cspDirective: directive.slice(0, 100),
+			...(blockedOrigin ? { cspBlockedOrigin: blockedOrigin.slice(0, 200) } : {}),
+			...(policyHash ? { cspPolicyHash: policyHash } : {}) };
 		enqueue(e, true);
 	});
 

@@ -1,0 +1,521 @@
+[
+	{
+		"resourceLogs": [
+			{
+				"resource": {
+					"attributes": [
+						{
+							"key": "service.name",
+							"value": {
+								"stringValue": "golden"
+							}
+						},
+						{
+							"key": "deployment.environment.name",
+							"value": {
+								"stringValue": "test"
+							}
+						},
+						{
+							"key": "service.version",
+							"value": {
+								"stringValue": "v1"
+							}
+						}
+					]
+				},
+				"scopeLogs": [
+					{
+						"scope": {
+							"name": "autter-runtime"
+						},
+						"logRecords": [
+							{
+								"timeUnixNano": "<time>",
+								"severityNumber": 17,
+								"severityText": "ERROR",
+								"body": {
+									"stringValue": "charge: failed"
+								},
+								"attributes": [
+									{
+										"key": "autter.event.id",
+										"value": {
+											"stringValue": "<event-id>"
+										}
+									},
+									{
+										"key": "autter.event.type",
+										"value": {
+											"stringValue": "operation"
+										}
+									},
+									{
+										"key": "autter.operation.outcome",
+										"value": {
+											"stringValue": "failed"
+										}
+									},
+									{
+										"key": "autter.operation.duration_ms",
+										"value": {
+											"doubleValue": "<duration>"
+										}
+									},
+									{
+										"key": "autter.operation.steps",
+										"value": {
+											"arrayValue": {
+												"values": [
+													{
+														"kvlistValue": {
+															"values": [
+																{
+																	"key": "name",
+																	"value": {
+																		"stringValue": "authorize"
+																	}
+																},
+																{
+																	"key": "status",
+																	"value": {
+																		"stringValue": "failed"
+																	}
+																},
+																{
+																	"key": "durationMs",
+																	"value": {
+																		"doubleValue": "<ms>"
+																	}
+																}
+															]
+														}
+													}
+												]
+											}
+										}
+									},
+									{
+										"key": "autter.operation.id",
+										"value": {
+											"stringValue": "<id-1>"
+										}
+									},
+									{
+										"key": "autter.operation.name",
+										"value": {
+											"stringValue": "charge"
+										}
+									},
+									{
+										"key": "autter.operation.parent_id",
+										"value": {
+											"stringValue": "<id-2>"
+										}
+									},
+									{
+										"key": "exception.type",
+										"value": {
+											"stringValue": "TypeError"
+										}
+									},
+									{
+										"key": "exception.stacktrace",
+										"value": {
+											"stringValue": "<stack>"
+										}
+									},
+									{
+										"key": "tenant",
+										"value": {
+											"stringValue": "acme"
+										}
+									},
+									{
+										"key": "cart",
+										"value": {
+											"kvlistValue": {
+												"values": [
+													{
+														"key": "items",
+														"value": {
+															"doubleValue": 3
+														}
+													},
+													{
+														"key": "coupon",
+														"value": {
+															"stringValue": "SPRING"
+														}
+													},
+													{
+														"key": "total",
+														"value": {
+															"doubleValue": 42.5
+														}
+													}
+												]
+											}
+										}
+									},
+									{
+										"key": "token",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									},
+									{
+										"key": "note",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									}
+								],
+								"traceId": "<trace>",
+								"spanId": "<span>"
+							},
+							{
+								"timeUnixNano": "<time>",
+								"severityNumber": 9,
+								"severityText": "INFO",
+								"body": {
+									"stringValue": "reserved"
+								},
+								"attributes": [
+									{
+										"key": "autter.event.id",
+										"value": {
+											"stringValue": "<event-id>"
+										}
+									},
+									{
+										"key": "autter.operation.id",
+										"value": {
+											"stringValue": "<id-2>"
+										}
+									},
+									{
+										"key": "autter.operation.name",
+										"value": {
+											"stringValue": "checkout"
+										}
+									},
+									{
+										"key": "tenant",
+										"value": {
+											"stringValue": "acme"
+										}
+									},
+									{
+										"key": "cart",
+										"value": {
+											"kvlistValue": {
+												"values": [
+													{
+														"key": "items",
+														"value": {
+															"doubleValue": 3
+														}
+													},
+													{
+														"key": "coupon",
+														"value": {
+															"stringValue": "SPRING"
+														}
+													},
+													{
+														"key": "total",
+														"value": {
+															"doubleValue": 42.5
+														}
+													}
+												]
+											}
+										}
+									},
+									{
+										"key": "token",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									},
+									{
+										"key": "note",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									},
+									{
+										"key": "sku",
+										"value": {
+											"stringValue": "A1"
+										}
+									}
+								],
+								"traceId": "<trace>",
+								"spanId": "<span>"
+							},
+							{
+								"timeUnixNano": "<time>",
+								"severityNumber": 13,
+								"severityText": "WARNING",
+								"body": {
+									"stringValue": "slow dependency"
+								},
+								"attributes": [
+									{
+										"key": "autter.event.id",
+										"value": {
+											"stringValue": "<event-id>"
+										}
+									},
+									{
+										"key": "autter.operation.id",
+										"value": {
+											"stringValue": "<id-2>"
+										}
+									},
+									{
+										"key": "autter.operation.name",
+										"value": {
+											"stringValue": "checkout"
+										}
+									},
+									{
+										"key": "tenant",
+										"value": {
+											"stringValue": "acme"
+										}
+									},
+									{
+										"key": "cart",
+										"value": {
+											"kvlistValue": {
+												"values": [
+													{
+														"key": "items",
+														"value": {
+															"doubleValue": 3
+														}
+													},
+													{
+														"key": "coupon",
+														"value": {
+															"stringValue": "SPRING"
+														}
+													},
+													{
+														"key": "total",
+														"value": {
+															"doubleValue": 42.5
+														}
+													}
+												]
+											}
+										}
+									},
+									{
+										"key": "token",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									},
+									{
+										"key": "note",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									},
+									{
+										"key": "ms",
+										"value": {
+											"doubleValue": 900
+										}
+									}
+								],
+								"traceId": "<trace>",
+								"spanId": "<span>"
+							},
+							{
+								"timeUnixNano": "<time>",
+								"severityNumber": 9,
+								"severityText": "INFO",
+								"body": {
+									"stringValue": "Used cached prices"
+								},
+								"attributes": [
+									{
+										"key": "autter.event.id",
+										"value": {
+											"stringValue": "<event-id>"
+										}
+									},
+									{
+										"key": "autter.event.type",
+										"value": {
+											"stringValue": "operation"
+										}
+									},
+									{
+										"key": "autter.operation.outcome",
+										"value": {
+											"stringValue": "degraded"
+										}
+									},
+									{
+										"key": "autter.operation.duration_ms",
+										"value": {
+											"doubleValue": "<duration>"
+										}
+									},
+									{
+										"key": "autter.operation.steps",
+										"value": {
+											"arrayValue": {
+												"values": [
+													{
+														"kvlistValue": {
+															"values": [
+																{
+																	"key": "name",
+																	"value": {
+																		"stringValue": "reserve"
+																	}
+																},
+																{
+																	"key": "status",
+																	"value": {
+																		"stringValue": "succeeded"
+																	}
+																},
+																{
+																	"key": "durationMs",
+																	"value": {
+																		"doubleValue": "<ms>"
+																	}
+																}
+															]
+														}
+													}
+												]
+											}
+										}
+									},
+									{
+										"key": "autter.operation.id",
+										"value": {
+											"stringValue": "<id-2>"
+										}
+									},
+									{
+										"key": "autter.operation.name",
+										"value": {
+											"stringValue": "checkout"
+										}
+									},
+									{
+										"key": "tenant",
+										"value": {
+											"stringValue": "acme"
+										}
+									},
+									{
+										"key": "cart",
+										"value": {
+											"kvlistValue": {
+												"values": [
+													{
+														"key": "items",
+														"value": {
+															"doubleValue": 3
+														}
+													},
+													{
+														"key": "coupon",
+														"value": {
+															"stringValue": "SPRING"
+														}
+													},
+													{
+														"key": "total",
+														"value": {
+															"doubleValue": 42.5
+														}
+													}
+												]
+											}
+										}
+									},
+									{
+										"key": "token",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									},
+									{
+										"key": "note",
+										"value": {
+											"stringValue": "[redacted]"
+										}
+									}
+								],
+								"traceId": "<trace>",
+								"spanId": "<span>"
+							},
+							{
+								"timeUnixNano": "<time>",
+								"severityNumber": 17,
+								"severityText": "ERROR",
+								"body": {
+									"stringValue": "outside"
+								},
+								"attributes": [
+									{
+										"key": "autter.event.id",
+										"value": {
+											"stringValue": "<event-id>"
+										}
+									},
+									{
+										"key": "exception.type",
+										"value": {
+											"stringValue": "RangeError"
+										}
+									},
+									{
+										"key": "exception.stacktrace",
+										"value": {
+											"stringValue": "<stack>"
+										}
+									},
+									{
+										"key": "phase",
+										"value": {
+											"stringValue": "boot"
+										}
+									}
+								]
+							},
+							{
+								"timeUnixNano": "<time>",
+								"severityNumber": 5,
+								"severityText": "DEBUG",
+								"body": {
+									"stringValue": "debug line"
+								},
+								"attributes": [
+									{
+										"key": "autter.event.id",
+										"value": {
+											"stringValue": "<event-id>"
+										}
+									}
+								]
+							}
+						]
+					}
+				]
+			}
+		]
+	}
+]

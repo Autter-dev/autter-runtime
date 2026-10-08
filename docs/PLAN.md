@@ -113,6 +113,41 @@ initialisation in the Node SDKs:
 - Non-Node stacks: any OTel GenAI instrumentation works — see
   INTEGRATIONS.md for the sampling exemption they must add.
 
+## Milestone 7 — Operation logging (1.4.0, shipped)
+
+`/v1/logs` (OTLP JSON + protobuf) → `runtime_logs`; `withRuntimeOperation`,
+`runtimeLogger`, steps and outcomes in runtime-node/next 1.4.0. See
+OPERATION-LOGGING.md.
+
+## Milestone 8 — Request wide events and coded errors (1.5.0, shipped)
+
+Releases: runtime-node/next 1.5.0, **new `@autter/runtime-edge` 1.0.0**,
+runtime-browser 1.4.0, otlp-ingester 1.5.0 (ingester first). Built natively on
+1.4.0 operations; no dependency on evlog. See REQUESTS-AND-ERRORS.md.
+
+- **Private `packages/runtime-core`** (never published, bundled into node and
+  edge): coded errors, context bounding/redaction, record building, OTLP logs
+  encoding, carriers, the `code-v1` fingerprint with shared test vectors.
+- **Logger pipeline** `enrich → redact/bound → sinks[]`, with a golden test
+  proving a 1.4.0 operation still exports byte-identical OTLP JSON (apart from
+  the additive `kind`/`level` keys).
+- **Request summaries** — `autterRequests`, `autterFastify`,
+  `withRuntimeRequest` (Next: `after()` wired), experimental `logging.requests`
+  hook mode; request ids honoured/echoed/exposed to CORS; always kept, no
+  sampling (`ignore` globs, field budgets and `LOG_TTL_DAYS` are the volume
+  knobs).
+- **`runtimeContext`**, inline messages (`autter.operation.logs`, max 50),
+  `autter.operation.level`, `kind` on every summary.
+- **Coded errors** — `RuntimeError`, `defineRuntimeErrors`, duck-typed
+  `captureException`, `autterErrorResponse`/`toClientError`, `expected`
+  business failures, span-only `internal`, cause chains; ingester groups by code.
+- **Beyond the request** — `fork`, `runInBackground`, carriers with OTel links,
+  AI usage rollup, `waitUntil`.
+- **Logger-only mode** `initAutterLogging` (no NodeSDK; promoted log
+  exceptions) and `@autter/runtime-edge` (Workers, Vercel Edge, Deno, Bun).
+- Enrichers, `otlp`/`console`/`file` sinks (`.autter/runtime/*.jsonl` in
+  development), `@autter/runtime-node/testing`.
+
 ## Later / explicitly deferred
 
 - Opt-in same-origin network tracing (`traceparent` propagation) in the
@@ -120,7 +155,6 @@ initialisation in the Node SDKs:
 - Web Vitals, failed-request capture.
 - Public DSN-style endpoint for static sites (origin allow-list, aggressive
   rate limits).
-- Logs signal (`/v1/logs`).
 - Full OpenTelemetry browser SDK support — only if demanded.
 
 ## Compatibility contract
@@ -130,5 +164,7 @@ initialisation in the Node SDKs:
 | `/v1/traces`, `/v1/metrics` OTLP/HTTP | OTLP spec-stable |
 | `/v1/browser` payload (`version: 1`) | additive-only changes |
 | ClickHouse table schemas | additive-only; TTLs configurable via env |
-| Sink webhook payload (`version: 1`) | additive-only (`llmCalls`, `batchId`) |
+| `/v1/logs` OTLP/HTTP | OTLP spec-stable; Autter attributes (`autter.operation.*`, `autter.request.id`, `autter.error.*`) additive-only |
+| Sink webhook payload (`version: 1`) | additive-only (`llmCalls`, `batchId`, coded-error/request fields) |
+| `runtimeContext.carrier()` (`v: 1`) | additive-only |
 | Sink webhook delivery | at-least-once; dedupe on `batchId`/`occurrenceId` |

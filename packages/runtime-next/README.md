@@ -103,3 +103,51 @@ See the [operation logging guide](../../docs/OPERATION-LOGGING.md) for measured
 steps, explicit business outcomes, privacy and flushing. Ordinary error logs
 are diagnostics; captured exceptions and declared failed outcomes use tracing
 for issue grouping.
+
+## Requests, coded errors and edge middleware (1.5.0+)
+
+Route handlers become request summaries (always kept, request id echoed in
+`x-request-id`); the log flush is handed to Next's `after()` automatically
+(Next 15+, `unstable_after` on 14.2):
+
+```ts
+// app/api/checkout/route.ts
+import { withRuntimeRequest, runtimeContext, defineRuntimeErrors, toClientError } from "@autter/runtime-next";
+
+const billing = defineRuntimeErrors("billing", {
+  declined: { status: 402, message: "Payment declined", expected: true },
+});
+
+export const POST = withRuntimeRequest(async (request) => {
+  runtimeContext.set({ plan: "pro" });
+  const ok = await charge(await request.json());
+  if (!ok) {
+    const error = billing.declined();
+    return Response.json(toClientError(error, runtimeContext.requestId), { status: 402 });
+  }
+  return Response.json({ ok: true });
+}, { name: "checkout" });
+```
+
+Everything new in `@autter/runtime-node` 1.5.0 (`runtimeContext`,
+`RuntimeError`, `defineRuntimeErrors`, `runInBackground`, `initAutterLogging`,
+enrichers, sinks, …) is re-exported from `@autter/runtime-next` and
+`/server`. `@autter/runtime-next/client` adds `autterErrorFromResponse`.
+
+`middleware.ts` runs on the edge runtime — use `@autter/runtime-next/edge`
+(re-exports [`@autter/runtime-edge`](../runtime-edge)):
+
+```ts
+import { NextResponse } from "next/server";
+import { withAutter } from "@autter/runtime-next/edge";
+
+export default withAutter(
+  { apiKey: process.env.AUTTER_RUNTIME_KEY, service: "web-middleware" },
+  async (request, _event, _ctx, rt) => {
+    rt.set({ locale: request.headers.get("accept-language")?.slice(0, 2) });
+    return NextResponse.next();
+  },
+);
+```
+
+See [Requests, coded errors and background work](../../docs/REQUESTS-AND-ERRORS.md).

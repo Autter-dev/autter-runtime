@@ -8,9 +8,15 @@ import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
 import { profileTableDDL, type ProfileSample } from "./profiles.js";
 import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
 import { sourceMapTableDDL } from "./source-maps.js";
-import { logTableDDL, type RuntimeLogRecord } from "./logs.js";
+import {
+	logTableDDL,
+	requestRollupTableDDL,
+	type RuntimeLogRecord,
+} from "./logs.js";
 import {
 	MIGRATIONS,
+	OCCURRENCE_CODE_COLUMNS,
+	OCCURRENCE_REQUEST_ID_INDEX,
 	migrationsTableDDL,
 	type Migration,
 } from "./migrations.js";
@@ -34,6 +40,11 @@ const INSERT_SETTINGS: ClickHouseSettings = {
 	async_insert: 1,
 	wait_for_async_insert: 1,
 };
+
+/** "YYYY-MM-DD hh:mm:ss.sss" (UTC) — the DateTime64 query-parameter form. */
+function chDateTime(date: Date): string {
+	return date.toISOString().replace("T", " ").replace("Z", "");
+}
 
 export class ClickHouseStore {
 	private client: ClickHouseClient | null = null;
@@ -69,6 +80,7 @@ export class ClickHouseStore {
 		const db = this.config.clickhouseDatabase;
 		const { occurrenceTtlDays, spanTtlDays, metricsTtlDays, llmCallTtlDays } =
 			this.config;
+		const logTtlDays = this.config.logTtlDays ?? 14;
 		return [
 			`CREATE DATABASE IF NOT EXISTS ${db}`,
 			latencyTableDDL(db, metricsTtlDays),
@@ -76,7 +88,11 @@ export class ClickHouseStore {
 			memoryTableDDL(db),
 			platformEventTableDDL(db),
 			sourceMapTableDDL(db),
-			logTableDDL(db),
+			logTableDDL(db, logTtlDays),
+			// The table only: its materialized view reads 0012 columns that an
+			// existing runtime_logs lacks until migrations run, so the view is
+			// created by migration 0014 alone (migrations also run on fresh DBs).
+			requestRollupTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -101,7 +117,9 @@ export class ClickHouseStore {
 				session_id         String DEFAULT '',
 				attributes         String DEFAULT '{}' CODEC(ZSTD(1)),
 				occurred_at        DateTime64(3, 'UTC'),
-				ingested_at        DateTime64(3, 'UTC') DEFAULT now64(3)
+				ingested_at        DateTime64(3, 'UTC') DEFAULT now64(3),
+				${OCCURRENCE_CODE_COLUMNS.join(",\n\t\t\t\t")},
+				${OCCURRENCE_REQUEST_ID_INDEX}
 			)
 			ENGINE = MergeTree
 			PARTITION BY toDate(occurred_at)
@@ -217,11 +235,90 @@ export class ClickHouseStore {
 				});
 				console.log(`clickhouse migration applied: ${migration.id}`);
 			}
+			await this.applyLogTtl();
 		})().catch((err) => {
 			this.ensurePromise = null;
 			throw err;
 		});
 		return this.ensurePromise;
+	}
+
+	/**
+	 * Bring runtime_logs' TTL in line with LOG_TTL_DAYS. Idempotent: reads the
+	 * current TTL from system.tables and only issues `MODIFY TTL` when it
+	 * differs (MODIFY TTL rewrites TTL info for existing parts, so it must not
+	 * run on every boot). Best-effort — a failure is logged and never blocks
+	 * ingest; the next boot retries.
+	 */
+	async applyLogTtl(): Promise<void> {
+		const days = this.config.logTtlDays ?? 14;
+		const db = this.config.clickhouseDatabase;
+		try {
+			const client = this.getClient();
+			const rows = await client.query({
+				query: `SELECT engine_full FROM system.tables WHERE database = {db:String} AND name = 'runtime_logs'`,
+				query_params: { db },
+				format: "JSONEachRow",
+			});
+			const [table] = await rows.json<{ engine_full: string }>();
+			if (!table) return;
+			const current = /\bTTL\b[^]*?toIntervalDay\((\d+)\)/.exec(table.engine_full);
+			if (!current) {
+				console.warn(
+					"runtime_logs TTL not recognised — LOG_TTL_DAYS not applied",
+				);
+				return;
+			}
+			if (Number(current[1]) === days) return;
+			await client.command({
+				query: `ALTER TABLE ${db}.runtime_logs MODIFY TTL toDateTime(occurred_at) + INTERVAL ${days} DAY`,
+			});
+			console.log(
+				`runtime_logs TTL changed from ${current[1]} to ${days} days (LOG_TTL_DAYS)`,
+			);
+		} catch (err) {
+			console.warn(
+				"applying LOG_TTL_DAYS to runtime_logs failed (will retry next boot):",
+				err instanceof Error ? err.message : err,
+			);
+		}
+	}
+
+	/**
+	 * Trace ids (from `traceIds`) that already produced an occurrence for
+	 * this tenant in [from, to] — the cross-batch half of the log-promotion
+	 * dedupe. `excludeIds` are the candidate occurrences' own deterministic
+	 * ids, so a retried batch does not dedupe against its own earlier,
+	 * partially-committed write. Throws on failure; the caller decides.
+	 */
+	async recentOccurrenceTraceIds(
+		ctx: IngestContext,
+		traceIds: string[],
+		from: Date,
+		to: Date,
+		excludeIds: string[],
+	): Promise<Set<string>> {
+		if (traceIds.length === 0 || !this.configured) return new Set();
+		await this.ensureSchema();
+		const rows = await this.getClient().query({
+			query: `SELECT DISTINCT trace_id FROM ${this.table("runtime_error_occurrences")}
+				WHERE org_id = {org:String} AND repository_id = {repo:String}
+					AND occurred_at >= {from:DateTime64(3, 'UTC')} AND occurred_at <= {to:DateTime64(3, 'UTC')}
+					AND has({traces:Array(String)}, trace_id)
+					AND NOT has({exclude:Array(String)}, occurrence_id)`,
+			query_params: {
+				org: ctx.orgId,
+				repo: ctx.repositoryId,
+				from: chDateTime(from),
+				to: chDateTime(to),
+				traces: traceIds,
+				exclude: excludeIds,
+			},
+			format: "JSONEachRow",
+		});
+		return new Set(
+			(await rows.json<{ trace_id: string }>()).map((row) => row.trace_id),
+		);
 	}
 
 	async ping(): Promise<boolean> {
@@ -264,6 +361,13 @@ export class ClickHouseStore {
 				session_id: o.sessionId ?? "",
 				attributes: JSON.stringify(o.attributes ?? {}),
 				occurred_at: o.occurredAt.toISOString(),
+				error_code: o.errorCode ?? "",
+				error_why: o.why ?? "",
+				error_fix: o.fix ?? "",
+				error_link: o.link ?? "",
+				expected: o.expected ? 1 : 0,
+				request_id: o.requestId ?? "",
+				fingerprint_scheme: o.fingerprintScheme,
 			})),
 		});
 	}
@@ -305,7 +409,9 @@ export class ClickHouseStore {
 				service: row.service, environment: row.environment, release: row.release, trace_id: row.traceId,
 				span_id: row.spanId, operation_id: row.operationId, operation: row.operation, event_type: row.type,
 				severity: row.severity, message: row.message, outcome: row.outcome, duration_ms: row.durationMs,
-				attributes: JSON.stringify(row.attributes), occurred_at: row.occurredAt.toISOString() })) });
+				attributes: JSON.stringify(row.attributes), occurred_at: row.occurredAt.toISOString(),
+				kind: row.kind, request_id: row.requestId, route: row.route, status_code: row.statusCode,
+				error_code: row.errorCode, ai_cost_usd: row.aiCostUsd, ai_calls: row.aiCalls })) });
 	}
 
 	async insertProfileSamples(ctx: IngestContext, samples: ProfileSample[]): Promise<void> {

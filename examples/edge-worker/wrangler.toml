@@ -1,0 +1,9 @@
+# Sketch only — `wrangler` is not a dependency of this repo.
+# npx wrangler secret put AUTTER_RUNTIME_KEY   (a SERVER ingest key)
+name = "autter-edge-example"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+AUTTER_ENDPOINT = "https://otlp.autter.dev"
+ENVIRONMENT = "production"

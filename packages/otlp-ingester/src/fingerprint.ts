@@ -271,7 +271,62 @@ export function normalizeStackFrames(
 	return frames.length > 0 ? frames : fallbackFrames(lines, topN);
 }
 
+/**
+ * Error codes (`autter.error.code`) — namespaced, stable, low-cardinality
+ * identifiers such as "billing.declined". Anything else (Node's "ECONNRESET",
+ * ids, free text) is not a code and the error groups by message as before.
+ * Shared spec: runtime-core and the Autter backend validate identically.
+ */
+export const CODE_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$/;
+export const CODE_MAX_LENGTH = 80;
+
+export function validErrorCode(value: unknown): string | undefined {
+	return typeof value === "string" &&
+		value.length <= CODE_MAX_LENGTH &&
+		CODE_PATTERN.test(value)
+		? value
+		: undefined;
+}
+
+export type FingerprintScheme = "message-v1" | "code-v1";
+
+/**
+ * Scheme "code-v1": a SOURCE-INDEPENDENT issue identity for coded errors.
+ * Source, error type, message, stack and route are deliberately left out so
+ * the same code from the trace path, log promotion, the browser or an
+ * external connector (Sentry, PostHog, …) lands in ONE issue. Route and
+ * message stay as facets on the occurrence rows. Mirrored byte-for-byte by
+ * the backend (`runtime-code-fingerprint.ts`) — shared test vectors pin it.
+ */
+export function codeFingerprint(service: string, code: string): string {
+	return createHash("sha256")
+		.update(`code-v1\u0000${service}\u0000${code}`)
+		.digest("hex")
+		.slice(0, 32);
+}
+
+/**
+ * Issue identity plus the scheme that produced it. A valid
+ * `autter.error.code` selects "code-v1"; everything else keeps the
+ * historical message/stack/route fingerprint ("message-v1") byte-for-byte,
+ * so existing issues never regroup.
+ */
+export function occurrenceFingerprint(input: RuntimeOccurrenceInput): {
+	fingerprint: string;
+	scheme: FingerprintScheme;
+} {
+	const code = validErrorCode(input.errorCode);
+	return code
+		? { fingerprint: codeFingerprint(input.service, code), scheme: "code-v1" }
+		: { fingerprint: messageFingerprint(input), scheme: "message-v1" };
+}
+
 export function fingerprintOccurrence(input: RuntimeOccurrenceInput): string {
+	return occurrenceFingerprint(input).fingerprint;
+}
+
+/** Scheme "message-v1" — the pre-1.5.0 fingerprint, unchanged. */
+function messageFingerprint(input: RuntimeOccurrenceInput): string {
 	const parts = [
 		input.source,
 		input.service,

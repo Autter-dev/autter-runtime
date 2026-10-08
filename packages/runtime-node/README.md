@@ -5,6 +5,49 @@ application context to logs and completed operations. See the full
 [operation logging guide](../../docs/OPERATION-LOGGING.md) for initialization,
 steps, outcomes, redaction, export lifecycle, and release requirements.
 
+# Requests and coded errors (1.5.0)
+
+Requires ingester 1.5.0. One summary per request (always kept), request ids
+echoed to clients, one issue per error code:
+
+```ts
+import {
+  autterRequests, autterErrorResponse, defineRuntimeErrors, runtimeContext,
+} from "@autter/runtime-node";
+
+export const billingErrors = defineRuntimeErrors("billing", {
+  declined: { status: 402, message: "Payment declined", expected: true,
+              why: "The card issuer rejected the charge", fix: "Ask for another card" },
+  limit: ({ plan }: { plan: string }) => ({ status: 429, message: `Plan ${plan} limit reached` }),
+});
+
+app.use(autterRequests({ ignore: ["/healthz", "/metrics"] }));
+app.post("/checkout", async (req, res) => {
+  runtimeContext.set({ cart: { items: req.body.items.length } });
+  runtimeContext.info("Applied coupon", { coupon: "SPRING" });   // folded into the summary
+  if (overLimit) throw billingErrors.limit({ plan: "free" });     // Express 5 (next(err) on 4)
+  res.json({ ok: true, requestId: runtimeContext.requestId });
+});
+app.use(autterErrorResponse());   // { error: { message, code, why?, fix?, link?, requestId } }
+```
+
+Also: `autterFastify`, `withRuntimeRequest` (fetch-style handlers),
+`runtimeContext.fork` / `runInBackground` / `carrier()` for background work and
+queues, the per-operation AI usage rollup, `waitUntil`, `initAutterLogging`
+(no NodeSDK — for apps with their own OTel), enrichers (`enrichUserAgent`,
+`enrichRequestSize`, `enrichEdgeGeo`, `enrichDeployment`), sinks (`otlpSink`,
+`consoleSink`, `fileSink` → `.autter/runtime/*.jsonl` in development) and test
+helpers:
+
+```ts
+import { captureRuntime, expectOperation } from "@autter/runtime-node/testing";
+const runtime = captureRuntime();
+// … exercise the app …
+expectOperation(runtime, "POST /checkout").toHaveOutcome("degraded").toHaveErrorCode("billing.declined");
+```
+
+Full guide: [Requests, coded errors and background work](../../docs/REQUESTS-AND-ERRORS.md).
+
 # @autter/runtime-node
 
 The server tracker exports per-instance RSS, heap, memory limit, and GC

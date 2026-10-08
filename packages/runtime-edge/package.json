@@ -1,0 +1,54 @@
+{
+	"name": "@autter/runtime-edge",
+	"version": "1.0.0",
+	"description": "Autter Runtime for edge runtimes (Cloudflare Workers, Vercel Edge, Deno, Bun): request wide events and coded errors over fetch, zero dependencies",
+	"license": "MIT",
+	"type": "module",
+	"sideEffects": false,
+	"main": "./dist/index.cjs",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"require": "./dist/index.cjs"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Autter-dev/autter-runtime.git",
+		"directory": "packages/runtime-edge"
+	},
+	"scripts": {
+		"build": "tsup",
+		"test": "npm run build -w @autter/runtime-core && npm run build && node --test test/*.test.mjs"
+	},
+	"devDependencies": {
+		"@autter/runtime-core": "0.0.0",
+		"tsup": "^8.3.5",
+		"typescript": "^5.7.0"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"homepage": "https://github.com/Autter-dev/autter-runtime#readme",
+	"bugs": "https://github.com/Autter-dev/autter-runtime/issues",
+	"keywords": [
+		"edge",
+		"cloudflare-workers",
+		"vercel-edge",
+		"deno",
+		"bun",
+		"error-tracking",
+		"telemetry",
+		"otlp"
+	]
+}

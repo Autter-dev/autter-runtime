@@ -36,6 +36,58 @@ with `autter.outcome.status=error`, `autter.outcome.name=<stable name>`, and
 ensure failed traces are retained by the exporter. Autter groups the event as
 an `OutcomeFailure`; no exception or log is required.
 
+## Coded errors and expected failures
+
+Ingester 1.5.0 groups an error by its **code** when it carries a valid
+`autter.error.code` (`^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$`, at most 80
+characters): one code in one service is one issue, whatever the message,
+stack, route or source (server spans, logger-only and edge log records,
+the browser, and external connectors all use the same `code-v1`
+fingerprint). Uncoded errors keep message-based grouping unchanged.
+
+```ts
+import { defineRuntimeErrors } from "@autter/runtime-node";
+
+export const billingErrors = defineRuntimeErrors("billing", {
+  declined: { status: 402, message: "Payment declined", expected: true,
+              why: "The card issuer rejected the charge", fix: "Ask the customer for another card" },
+});
+throw billingErrors.declined();                       // code "billing.declined"
+```
+
+Any error with a `code` property in that shape benefits without a rewrite:
+`captureException` in the Node, edge and browser SDKs reads
+`code/why/fix/link/expected` from the error. Other OTel languages set the
+attributes on the `exception` event (or its span):
+
+| Attribute | Meaning |
+| --- | --- |
+| `autter.error.code` | Grouping key (invalid values are ignored) |
+| `autter.error.why` / `autter.error.fix` | Declared cause and remedy, up to 1,000 characters each |
+| `autter.error.link` | http(s) docs link, up to 500 characters |
+| `autter.error.expected` | `true` for an expected business failure |
+| `autter.request.id` | Request id; links the error to its request summary |
+
+The declared `why` and `fix` are shown on the issue and handed to root-cause
+analysis **as declared**: the analysis confirms or contradicts them with
+evidence rather than repeating them.
+
+**Expected failures** (`expected: true` — declines, validation, quota) are
+still recorded and counted, but they never open incidents or trigger
+automatic fixes. They are hidden from the default issues view; include them
+with the "expected" filter. Use them for outcomes your product handles on
+purpose, not to silence real defects.
+
+In the browser, `autterErrorFromResponse(res)` turns a failed `fetch`
+response with an `{ "error": { "code", … } }` body into an error carrying
+the server's code, and automatically observed 5xx responses carry their
+`x-request-id` so the browser failure links to the server request.
+
+Services without a trace pipeline (logger-only mode and
+`@autter/runtime-edge`) send errors as log records marked
+`autter.capture.mode=log`; the ingester promotes those into issues, skipping
+any whose trace already produced one in the last minute.
+
 ## Traces and profiles
 
 Install framework, database, HTTP client, and queue instrumentations so a slow
@@ -104,7 +156,10 @@ expanded detection or automatic drafts off in Runtime Overview.
 ## Rollout order
 
 Deploy the ingester first so it creates the profile and source map ClickHouse
-tables (including migrations for existing databases). Then deploy the backend
+tables (including migrations for existing databases). For coded errors and
+request summaries, ingester 1.5.0 must be deployed before runtime-node/next
+1.5.0, runtime-browser 1.4.0 or runtime-edge 1.0.0 send them; older ingesters
+keep codes only inside the attributes JSON and group by message. Then deploy the backend
 and frontend; their organization tables are created for new organizations and
 upgraded on first use for existing ones. Finally publish the SDKs and enable
 profilers or the optional caught exception hooks service by service. Profiles

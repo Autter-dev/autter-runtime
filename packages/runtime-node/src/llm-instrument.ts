@@ -5,6 +5,7 @@ import {
 	type Span,
 } from "@opentelemetry/api";
 import { autterLlmTracer } from "./server.js";
+import { recordOperationAiUsage } from "./logger.js";
 
 /**
  * One-line LLM client auto-instrumentation:
@@ -69,6 +70,7 @@ function detectProvider(client: object): string {
 interface UsageShape {
 	inputTokens: number | undefined;
 	outputTokens: number | undefined;
+	cacheReadTokens?: number | undefined;
 	responseModel: string | undefined;
 }
 
@@ -83,6 +85,12 @@ function extractUsage(result: unknown): UsageShape {
 	} | null;
 	const usage = r?.usage ?? r?.message?.usage;
 	const meta = r?.usageMetadata;
+	const details = (usage as { prompt_tokens_details?: { cached_tokens?: unknown } } | undefined)
+		?.prompt_tokens_details;
+	const cached =
+		usage?.cache_read_input_tokens ??
+		(typeof details?.cached_tokens === "number" ? details.cached_tokens : undefined) ??
+		meta?.cachedContentTokenCount;
 	const input =
 		usage?.prompt_tokens ??
 		usage?.input_tokens ??
@@ -97,9 +105,20 @@ function extractUsage(result: unknown): UsageShape {
 	return {
 		inputTokens: typeof input === "number" ? input : undefined,
 		outputTokens: typeof output === "number" ? output : undefined,
+		cacheReadTokens: typeof cached === "number" ? cached : undefined,
 		responseModel:
 			typeof responseModel === "string" ? responseModel : undefined,
 	};
+}
+
+/** Fold one finished call into the current operation's `autter.operation.ai`. */
+function rollUp(model: string, usage: UsageShape): void {
+	recordOperationAiUsage({
+		model: usage.responseModel ?? model,
+		...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+		...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+		...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+	});
 }
 
 function applyUsage(span: Span, usage: UsageShape): void {
@@ -129,7 +148,7 @@ function endWithError(span: Span, err: unknown): void {
  * chunk (with `stream_options: { include_usage: true }`), Anthropic's
  * message_start/message_delta events, Google's per-chunk usageMetadata.
  */
-function wrapStream<T extends object>(stream: T, span: Span): T {
+function wrapStream<T extends object>(stream: T, span: Span, model: string): T {
 	let ended = false;
 	const seen: UsageShape = {
 		inputTokens: undefined,
@@ -140,6 +159,7 @@ function wrapStream<T extends object>(stream: T, span: Span): T {
 		if (ended) return;
 		ended = true;
 		applyUsage(span, seen);
+		rollUp(model, seen);
 		span.setAttribute("autter.llm.streamed", true);
 		if (err !== undefined) {
 			endWithError(span, err);
@@ -163,6 +183,7 @@ function wrapStream<T extends object>(stream: T, span: Span): T {
 									const usage = extractUsage(step.value);
 									if (usage.inputTokens !== undefined) seen.inputTokens = usage.inputTokens;
 									if (usage.outputTokens !== undefined) seen.outputTokens = usage.outputTokens;
+									if (usage.cacheReadTokens !== undefined) seen.cacheReadTokens = usage.cacheReadTokens;
 									if (usage.responseModel) seen.responseModel = usage.responseModel;
 								} else {
 									finish();
@@ -236,9 +257,11 @@ export function instrumentLlmClient<T extends object>(
 		if (!(result instanceof Promise)) {
 			// Anthropic's .stream() returns a MessageStream synchronously.
 			if (result && typeof result === "object" && Symbol.asyncIterator in result) {
-				return wrapStream(result, span);
+				return wrapStream(result, span, request.model);
 			}
-			applyUsage(span, extractUsage(result));
+			const usage = extractUsage(result);
+			applyUsage(span, usage);
+			rollUp(request.model, usage);
 			span.setStatus({ code: SpanStatusCode.OK });
 			span.end();
 			return result;
@@ -250,9 +273,11 @@ export function instrumentLlmClient<T extends object>(
 					typeof resolved === "object" &&
 					Symbol.asyncIterator in resolved
 				) {
-					return wrapStream(resolved, span);
+					return wrapStream(resolved, span, request.model);
 				}
-				applyUsage(span, extractUsage(resolved));
+				const usage = extractUsage(resolved);
+				applyUsage(span, usage);
+				rollUp(request.model, usage);
 				span.setStatus({ code: SpanStatusCode.OK });
 				span.end();
 				return resolved;

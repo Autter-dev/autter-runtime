@@ -29,7 +29,9 @@ jobs:
       - run: npm run size -w @autter/runtime-browser
       - name: Publish packages (skips versions that already exist)
         run: |
-          for pkg in runtime-browser runtime-node runtime-next otlp-ingester; do
+          # runtime-core is private (bundled into node + edge) and never published.
+          # Dependencies first: runtime-next depends on node, edge and browser.
+          for pkg in runtime-browser runtime-node runtime-edge runtime-next otlp-ingester; do
             name=$(node -p "require('./packages/$pkg/package.json').name")
             version=$(node -p "require('./packages/$pkg/package.json').version")
             if npm view "$name@$version" version >/dev/null 2>&1; then

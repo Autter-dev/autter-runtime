@@ -9,9 +9,14 @@ import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
 import {
 	deriveFields,
-	fingerprintOccurrence,
+	occurrenceFingerprint,
 	occurrenceIdFor,
 } from "./fingerprint.js";
+import {
+	logPromotionCandidates,
+	promotionLookups,
+	promotionRollups,
+} from "./log-promotion.js";
 import {
 	browserPayloadSchema,
 	normalizeBrowserPayload,
@@ -50,6 +55,9 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	const keys = new KeyResolver(config);
 	const serverRateLimiter = new RateLimiter(config.rateLimitPerMinute);
 	const clientRateLimiter = new RateLimiter(config.clientRateLimitPerMinute);
+	// ClickHouse dedupe lookups made by /v1/logs promotion, per tenant. Far
+	// tighter than the request limit: each lookup is a query, not an insert.
+	const promotionLookupLimiter = new RateLimiter(config.promotionLookupsPerMinute ?? 30);
 
 	const app = express();
 	app.disable("x-powered-by");
@@ -176,14 +184,49 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		inputs: RuntimeOccurrenceInput[],
 	): RuntimeOccurrence[] {
 		return inputs.map((input, index) => {
-			const fingerprint = fingerprintOccurrence(input);
+			const { fingerprint, scheme } = occurrenceFingerprint(input);
 			return {
 				...input,
 				occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
 				fingerprint,
+				fingerprintScheme: scheme,
 				...deriveFields(input),
 			};
 		});
+	}
+
+	/** Fingerprint log-promotion candidates and drop the ones whose trace
+	 * already produced an occurrence (in this batch, or within ±60 s). Ids
+	 * are assigned BEFORE the lookup so they stay stable across retries
+	 * whatever the lookup returns. */
+	async function promoteLogs(
+		ctx: IngestContext,
+		logs: ReturnType<typeof normalizeLogs>,
+	): Promise<RuntimeOccurrence[]> {
+		const candidates = logPromotionCandidates(logs);
+		if (candidates.length === 0) return [];
+		const fingerprinted = fingerprintAll(ctx, candidates);
+		const seen = new Set<string>();
+		const ownIds = fingerprinted.map((o) => o.occurrenceId);
+		for (const lookup of promotionLookups(candidates)) {
+			if (!promotionLookupLimiter.allow(`${ctx.orgId}:${ctx.repositoryId}`)) break;
+			try {
+				const found = await store.recentOccurrenceTraceIds(
+					ctx,
+					lookup.traceIds,
+					lookup.from,
+					lookup.to,
+					ownIds,
+				);
+				for (const traceId of found) seen.add(traceId);
+			} catch (err) {
+				console.warn(
+					"log promotion dedupe lookup failed — promoting without it:",
+					err instanceof Error ? err.message : err,
+				);
+			}
+		}
+		return fingerprinted.filter((o) => !o.traceId || !seen.has(o.traceId));
 	}
 
 	function storageError(res: Response, err: unknown): void {
@@ -298,10 +341,21 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		let logs;
 		try { logs = normalizeLogs(req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest); }
 		catch { res.status(400).json({ error: "invalid OTLP logs payload" }); return; }
-		try { await store.insertLogs(ctx, logs); }
+		// Logs are diagnostic evidence; exceptions and failed outcomes normally
+		// reach grouping through the trace path. The exception: logger-only /
+		// edge SDKs mark span-less error records `autter.capture.mode = "log"`,
+		// and those are promoted to occurrences here — see log-promotion.ts.
+		const promoted = await promoteLogs(ctx, logs);
+		const metricPoints = promotionRollups(promoted);
+		try {
+			await Promise.all([
+				store.insertLogs(ctx, logs),
+				store.insertOccurrences(ctx, promoted),
+				store.insertMetricPoints(ctx, metricPoints),
+			]);
+		}
 		catch (err) { storageError(res, err); return; }
-		// Logs are diagnostic evidence. Exceptions and failed outcomes use the trace sink,
-		// so one operation does not create duplicate issues through two export paths.
+		sink?.enqueue(ctx, promoted, metricPoints);
 		otlpSuccess(req, res);
 	});
 

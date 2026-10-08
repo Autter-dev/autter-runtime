@@ -1,0 +1,26 @@
+{
+	"name": "@autter/runtime-core",
+	"private": true,
+	"version": "0.0.0",
+	"description": "Internal, unpublished code shared by @autter/runtime-node and @autter/runtime-edge (bundled into both at build time)",
+	"license": "MIT",
+	"type": "module",
+	"main": "./dist/index.js",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"sideEffects": false,
+	"scripts": {
+		"build": "tsup src/index.ts --format esm --dts --target es2022 --clean",
+		"test": "npm run build && node --test test/*.test.mjs"
+	},
+	"devDependencies": {
+		"tsup": "^8.3.5",
+		"typescript": "^5.7.0"
+	}
+}

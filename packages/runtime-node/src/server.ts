@@ -57,7 +57,23 @@ import {
 	type RedactOptions,
 } from "./redact.js";
 import { startMemoryMetrics } from "./memory.js";
-import { configureRuntimeLogger, flushRuntimeLogs, shutdownRuntimeLogger, type RuntimeLoggingOptions } from "./logger.js";
+import {
+	configureRuntimeLogger,
+	currentOperation,
+	flushRuntimeLogs,
+	noteOperationError,
+	notifyException,
+	recordOperationAiUsage,
+	shutdownRuntimeLogger,
+	type RuntimeLoggingOptions,
+} from "./logger.js";
+import {
+	expressRouteOf,
+	markCaptured,
+	setRequestExceptionCapturer,
+	startHookRequest,
+} from "./requests.js";
+import { errorAttributes, errorInternal } from "@autter/runtime-core";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -78,10 +94,16 @@ import { configureRuntimeLogger, flushRuntimeLogs, shutdownRuntimeLogger, type R
  *   request metrics              : aggregated every 60 s, keyed by route
  *                                  template (Express routes detected
  *                                  out of the box — see captureExpressRoute)
- *   logs                         : not collected
+ *   operation / request summaries: 100%  (withRuntimeOperation,
+ *                                         autterRequests, … — one wide
+ *                                         record per unit of work, never
+ *                                         sampled)
+ *   logs                         : runtimeLogger / runtimeContext records
+ *                                  (debug/info folded into the current
+ *                                  operation's summary; minLevel applies)
  *
  * Exports OTLP/HTTP JSON to the Autter ingester (`/v1/traces`,
- * `/v1/metrics`) with the ingest key as a bearer header.
+ * `/v1/metrics`, `/v1/logs`) with the ingest key as a bearer header.
  */
 
 export interface AutterServerOptions {
@@ -161,6 +183,8 @@ export interface LlmUsage {
 	 * built-in per-model price estimate.
 	 */
 	costUsd?: number;
+	/** Prompt tokens served from the provider cache (rolled into `autter.operation.ai`). */
+	cacheReadTokens?: number;
 }
 
 export interface LlmCallInfo {
@@ -578,11 +602,21 @@ async function runLlmSpan<T>(
 		kind: SpanKind.CLIENT,
 		attributes: llmBaseAttributes(info),
 	});
-	const setResponseModel = (model: string) =>
+	const usage: LlmUsage = {};
+	let responseModel: string | undefined;
+	const setResponseModel = (model: string) => {
+		responseModel = model;
 		span.setAttribute("gen_ai.response.model", model);
+	};
 	const handle: LlmCallHandle = {
-		setUsage: (usage) => span.setAttributes(usageAttributes(usage)),
-		setCost: (usd) => span.setAttribute("autter.llm.cost_usd", usd),
+		setUsage: (next) => {
+			Object.assign(usage, next);
+			span.setAttributes(usageAttributes(next));
+		},
+		setCost: (usd) => {
+			usage.costUsd = usd;
+			span.setAttribute("autter.llm.cost_usd", usd);
+		},
 		setResponseModel,
 		setModel: setResponseModel,
 		setAttributes: (attributes) => span.setAttributes(attributes),
@@ -606,10 +640,12 @@ async function runLlmSpan<T>(
 		throw err;
 	} finally {
 		span.end();
+		recordOperationAiUsage({ ...usage, model: responseModel ?? info.model });
 	}
 }
 
 function recordLlmCall(tracer: Tracer, call: TrackedLlmCall): void {
+	recordOperationAiUsage({ ...call, model: call.model });
 	const durationMs = Math.max(0, call.durationMs ?? 0);
 	const endTime = new Date();
 	const startTime = new Date(endTime.getTime() - durationMs);
@@ -642,8 +678,12 @@ async function runWithSpan<T>(
 	name: string,
 	fn: () => T | Promise<T>,
 	attributes?: Attributes,
+	links?: Link[],
 ): Promise<T> {
-	const span = tracer.startSpan(name, { attributes });
+	const span = tracer.startSpan(name, {
+		attributes,
+		...(links?.length ? { links } : {}),
+	});
 	try {
 		const result = await context.with(
 			trace.setSpan(context.active(), span),
@@ -661,28 +701,6 @@ async function runWithSpan<T>(
 	} finally {
 		span.end();
 	}
-}
-
-/** Express (4/5) assigns routing state onto the core request object; a
- * matched handler leaves the route template on `req.route.path` and the
- * mount prefix on `req.baseUrl`. */
-interface ExpressRequestProps {
-	baseUrl?: unknown;
-	route?: { path?: unknown };
-}
-
-/**
- * Route template of a finished Express request ("/api/users/:id"), or null
- * when no route matched (404s, static files) or the server isn't Express.
- * Only meaningful at response end — Express fills `req.route` during routing.
- */
-function expressRouteOf(req: unknown): string | null {
-	const props = req as ExpressRequestProps | null | undefined;
-	const path = props?.route?.path;
-	if (typeof path !== "string" || path === "") return null;
-	const base = typeof props?.baseUrl === "string" ? props.baseUrl : "";
-	const route = base + path;
-	return route.startsWith("/") ? route : null;
 }
 
 /**
@@ -713,6 +731,27 @@ function captureExpressRoute(
 	// 'close' covers aborted ones; setRoute is idempotent.
 	response.prependListener("finish", setRoute);
 	response.prependListener("close", setRoute);
+	if (hookRequests) startHookRequest(response);
+}
+
+/** `logging.requests: true` — zero-code request summaries (experimental). */
+let hookRequests = false;
+
+/** Span attributes for a structured error: autter.error.* (and the
+ * redacted, span-only `autter.error.internal`). */
+function structuredErrorAttributes(error: unknown): Attributes {
+	const attrs: Attributes = { ...errorAttributes(error, { causes: false }) };
+	const internal = errorInternal(error);
+	if (internal) {
+		try {
+			attrs["autter.error.internal"] = JSON.stringify(
+				activeRedactor(internal as Attributes),
+			).slice(0, 4000);
+		} catch {
+			/* unserialisable internal payload */
+		}
+	}
+	return attrs;
 }
 
 let active: AutterServer | null = null;
@@ -872,7 +911,26 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		const span = reuseActive
 			? (activeSpan as Span)
 			: errorTracer.startSpan(isError ? error.name : "Error");
-		span.setAttributes({ "autter.severity": "error", ...redacted });
+		// Coded errors (RuntimeError, catalogs, or ANY error with
+		// code/why/fix/link/status/expected): autter.error.* on the span AND
+		// on the exception event (one span can carry several exceptions);
+		// cause chains on the event; `internal` on the span only.
+		const structured = structuredErrorAttributes(error);
+		const causes = errorAttributes(error);
+		const declared = Object.fromEntries(
+			Object.entries(causes).filter(([key]) => key !== "autter.error.internal"),
+		);
+		const coded = Object.keys(declared).length > 0;
+		const requestId = currentOperation()?.requestId;
+		span.setAttributes({
+			"autter.severity": "error",
+			...redacted,
+			...structured,
+			...(requestId ? { "autter.request.id": requestId } : {}),
+		});
+		markCaptured(error);
+		noteOperationError(error);
+		notifyException(error, redacted);
 
 		if (isError && error.stack) {
 			if (redacted["autter.handled"] === true) {
@@ -882,6 +940,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					"exception.stacktrace": error.stack,
 					"autter.handled": true,
 					"autter.sampled": redacted["autter.sampled"] === true,
+					...declared,
+				});
+			} else if (coded) {
+				span.addEvent("exception", {
+					"exception.type": error.name,
+					"exception.message": message,
+					"exception.stacktrace": error.stack,
+					...declared,
 				});
 			} else {
 				span.recordException(error);
@@ -902,6 +968,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 				...(redacted["autter.handled"] === true
 					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
 					: {}),
+				...declared,
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -962,9 +1029,10 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	}
 	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment,
 		release: options.release, options: options.logging, redact: activeRedactor,
-		run: (name, fn, attributes) => runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
+		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, activeRedactor(attributes), links),
 		reportOutcome,
 	});
+	hookRequests = options.logging?.requests === true;
 
 	if (options.captureGlobalErrors !== false) {
 		// `uncaughtExceptionMonitor` observes crashes WITHOUT changing the
@@ -1020,6 +1088,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
 			const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
+			hookRequests = false;
 			stopMemoryMetrics?.();
 			active = null;
 			activeAlwaysOnProvider = null;
@@ -1046,6 +1115,13 @@ export function captureException(
 		active.captureException(error, attributes);
 		return;
 	}
+	if (loggerOnlyCapture) {
+		loggerOnlyCapture(error, attributes);
+		return;
+	}
+	markCaptured(error);
+	noteOperationError(error);
+	notifyException(error, attributes);
 	const span = trace
 		.getTracer("autter-errors")
 		.startSpan(error instanceof Error ? error.name : "Error", { attributes });
@@ -1056,6 +1132,23 @@ export function captureException(
 	});
 	span.end();
 }
+
+/** @internal Set by initAutterLogging: exception capture without NodeSDK. */
+let loggerOnlyCapture: ((error: unknown, attributes?: Attributes) => void) | null = null;
+/** @internal */
+export function setLoggerOnlyCapture(
+	fn: ((error: unknown, attributes?: Attributes) => void) | null,
+): void {
+	loggerOnlyCapture = fn;
+}
+/** @internal True while initAutterServer's NodeSDK pipeline is active. */
+export function serverActive(): boolean {
+	return active !== null;
+}
+/** @internal Redacted structured-error span attributes (logger-only mode). */
+export { structuredErrorAttributes };
+
+setRequestExceptionCapturer((error) => captureException(error));
 
 /**
  * Module-level convenience — see AutterServer.withProcessSpan. Before

@@ -123,8 +123,11 @@ function stripQuery(value: string | undefined): string | undefined {
 // anything leaves the page. Deliberately tiny: this bundle is size-capped.
 const SENSITIVE_KEY_RE =
 	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
-const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// Bounded quantifiers keep this linear (lookbehind would break older
+// Safari); scrub() also caps the input it scans.
+const EMAIL_RE = /[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}/gi;
 const MASK = "[redacted]";
+const scrub = (value: string) => value.slice(0, 8192).replace(EMAIL_RE, MASK);
 
 export function redactContext(
 	context: Record<string, unknown>,
@@ -135,10 +138,96 @@ export function redactContext(
 		out[key] = SENSITIVE_KEY_RE.test(key)
 			? MASK
 			: typeof value === "string"
-				? value.replace(EMAIL_RE, MASK)
+				? scrub(value)
 				: value;
 	}
 	return out;
+}
+
+// Coded errors: the same CODE_PATTERN as runtime-core and the ingester. A
+// value that doesn't match (e.g. "ECONNRESET") is simply not sent, and the
+// error groups by message as before.
+const CODE_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$/;
+const REQUEST_ID_RE = /^[\w.-]{8,128}$/;
+
+/**
+ * Declared error fields duck-typed off ANY thrown value — RuntimeError,
+ * `autterErrorFromResponse` results, or an app's own error class with a
+ * `code` property — as `autter.error.*` / `autter.request.id` context keys.
+ */
+function errorContext(error: unknown): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	if (!error || typeof error !== "object") return out;
+	// Metadata is optional: a throwing getter or Proxy must never stop the
+	// original error from being reported, so read every field defensively.
+	const e: Record<string, unknown> = {};
+	for (const key of ["code", "why", "fix", "link", "expected", "requestId"]) {
+		try {
+			e[key] = (error as Record<string, unknown>)[key];
+		} catch {
+			/* ignore unreadable metadata */
+		}
+	}
+	if (typeof e.code === "string" && e.code.length <= 80 && CODE_RE.test(e.code)) {
+		out["autter.error.code"] = e.code;
+	}
+	if (typeof e.why === "string") out["autter.error.why"] = e.why.slice(0, 1000);
+	if (typeof e.fix === "string") out["autter.error.fix"] = e.fix.slice(0, 1000);
+	if (typeof e.link === "string" && e.link.length <= 500 && /^https?:\/\//.test(e.link)) {
+		out["autter.error.link"] = e.link;
+	}
+	if (e.expected === true) out["autter.error.expected"] = true;
+	if (typeof e.requestId === "string" && REQUEST_ID_RE.test(e.requestId)) {
+		out["autter.request.id"] = e.requestId;
+	}
+	return out;
+}
+
+function addContext(event: BrowserEvent, extra: Record<string, unknown>): void {
+	if (Object.keys(extra).length > 0) event.context = { ...event.context, ...extra };
+}
+
+/** `x-request-id` of a failed response → `autter.request.id`, linking the
+ * browser failure to the server's request summary. Cross-origin APIs must
+ * list the header in Access-Control-Expose-Headers for the page to see it. */
+function addRequestId(event: BrowserEvent, id: string | null | undefined): void {
+	if (id && REQUEST_ID_RE.test(id)) addContext(event, { "autter.request.id": id });
+}
+
+/**
+ * Turn a failed `fetch` Response into an Error carrying the server's
+ * declared fields. Reads `{ error: { message, code, why, fix, link,
+ * requestId } }` (the `autterErrorResponse` / `toClientError` body) from a
+ * clone, so the caller can still read the original body; anything else
+ * falls back to the status text. Pass the result to `captureException` (or
+ * throw it) and the error groups by its code.
+ */
+export async function autterErrorFromResponse(response: Response): Promise<Error> {
+	let body: Record<string, unknown> = {};
+	try {
+		const parsed = (await response.clone().json())?.error;
+		body = typeof parsed === "string" ? { message: parsed } : parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		/* Not JSON, or the body was already read. */
+	}
+	const error = new Error(
+		typeof body.message === "string" && body.message
+			? body.message
+			: response.statusText || `Request failed with status ${response.status}`,
+	) as Error & Record<string, unknown>;
+	error.name = "HttpResponseError";
+	error.status = response.status;
+	for (const key of ["code", "why", "fix", "link", "requestId"]) {
+		if (typeof body[key] === "string") error[key] = body[key];
+	}
+	if (!error.requestId) {
+		try {
+			error.requestId = response.headers.get("x-request-id") || undefined;
+		} catch {
+			/* No headers. */
+		}
+	}
+	return error;
 }
 
 function route(): string {
@@ -264,7 +353,7 @@ function attachClient(event: BrowserEvent): void {
 		extra.cspPolicyHash = seenCspPolicyHash;
 	}
 	if (Object.keys(extra).length > 0) {
-		event.context = { ...(event.context || {}), ...extra };
+		event.context = { ...event.context, ...extra };
 	}
 }
 
@@ -412,7 +501,8 @@ export function captureException(
 		event.errorType = error.name;
 		if (error.stack) event.stack = String(error.stack).slice(0, 32000);
 	}
-	if (context) event.context = { ...(event.context || {}), ...context };
+	// Explicit context wins over the duck-typed declared fields.
+	addContext(event, { ...errorContext(error), ...context });
 	enqueue(event, true);
 }
 
@@ -435,8 +525,8 @@ export function captureMessage(
 
 /** Report an application outcome that failed without throwing. Use a stable name. */
 export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
-	const event = baseEvent("outcome", String(message).replace(EMAIL_RE, MASK));
-	event.name = String(name).replace(EMAIL_RE, MASK).slice(0, 200);
+	const event = baseEvent("outcome", scrub(String(message)));
+	event.name = scrub(String(name)).slice(0, 200);
 	event.errorType = "OutcomeFailure";
 	event.severity = "error";
 	if (context) event.context = { ...(event.context || {}), ...context };
@@ -501,6 +591,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 					event.name = path;
 					event.errorType = "HttpRequestError";
 					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					try { addRequestId(event, response.headers.get("x-request-id")); } catch { /* No headers. */ }
 					enqueue(event, true);
 				}
 				return response;
@@ -530,19 +621,24 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				const started = performance.now();
 				const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
 				let recorded = false;
-				const record = (message: string, errorType: string) => {
+				const record = (message: string, errorType: string, requestId?: string | null) => {
 					if (recorded) return;
 					recorded = true;
 					const event = baseEvent("request_failure", message);
 					event.name = path;
 					event.errorType = errorType;
 					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					addRequestId(event, requestId);
 					enqueue(event, true);
 				};
 				const onError = () => record("Request failed", "NetworkError");
 				const onTimeout = () => record("Request timed out", "NetworkError");
 				this.addEventListener("loadend", () => {
-					if (this.status >= 500) record(`Request returned ${this.status}`, "HttpRequestError");
+					if (this.status >= 500) {
+						let requestId: string | null = null;
+						try { requestId = this.getResponseHeader("x-request-id"); } catch { /* Not exposed. */ }
+						record(`Request returned ${this.status}`, "HttpRequestError", requestId);
+					}
 					this.removeEventListener("error", onError);
 					this.removeEventListener("timeout", onTimeout);
 				}, { once: true });
@@ -580,6 +676,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			if (label) e.filename = label;
 		} else {
 			e.errorType = event.error instanceof Error ? event.error.name : "Error";
+			addContext(e, errorContext(event.error));
 			if (event.error instanceof Error && event.error.stack) {
 				e.stack = String(event.error.stack).slice(0, 32000);
 			}
@@ -631,6 +728,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				"unhandled_rejection",
 				isError ? reason.message : String(reason),
 			);
+			addContext(e, errorContext(reason));
 			if (isError) {
 				e.errorType = reason.name;
 				if (reason.stack) e.stack = String(reason.stack).slice(0, 32000);

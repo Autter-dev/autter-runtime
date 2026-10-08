@@ -18,6 +18,7 @@ export {
 	setUser,
 	setContext,
 	flush,
+	autterErrorFromResponse,
 	type AutterSeverity,
 } from "@autter/runtime-browser";
 export {

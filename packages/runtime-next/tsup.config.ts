@@ -6,7 +6,18 @@ export default defineConfig([
 		format: ["esm", "cjs"],
 		dts: true,
 		target: "node20",
-		clean: true,
+		// No `clean` here: the three configs build in parallel and a clean in
+		// one would race the others' declaration output. The build script
+		// empties dist/ first instead.
+		// Optional, resolved at runtime (after() wiring) — never bundled.
+		external: ["next", "next/server"],
+	},
+	{
+		entry: { edge: "src/edge.ts" },
+		format: ["esm", "cjs"],
+		dts: true,
+		target: "es2022",
+		platform: "neutral",
 	},
 	{
 		entry: { client: "src/client.ts" },

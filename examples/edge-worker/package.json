@@ -1,0 +1,14 @@
+{
+	"name": "example-edge-worker",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"scripts": {
+		"build": "node --check src/index.js",
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy"
+	},
+	"dependencies": {
+		"@autter/runtime-edge": "^1.0.0"
+	}
+}

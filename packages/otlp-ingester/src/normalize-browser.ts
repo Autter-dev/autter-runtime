@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { liftErrorFields } from "./error-fields.js";
 import { normalizeRoute } from "./fingerprint.js";
 import {
 	asSeverity,
@@ -41,6 +42,14 @@ const browserEventSchema = z.object({
 	column: z.number().int().nonnegative().optional(),
 	/** Path only; query strings are stripped defensively anyway. */
 	route: z.string().max(1000).optional(),
+	/**
+	 * Free-form, scrubbed context. runtime-browser ≥1.4.0 also sends the
+	 * declared-error keys `autter.error.code|why|fix|link|expected` (from
+	 * coded errors / `autterErrorFromResponse`) and `autter.request.id` (the
+	 * `x-request-id` of a failed fetch/XHR). They are validated one by one
+	 * in normalizeBrowserPayload — a malformed value is dropped on its own
+	 * instead of rejecting the whole beacon.
+	 */
 	context: z.record(z.unknown()).optional(),
 });
 
@@ -71,7 +80,8 @@ const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 // @autter/runtime-node and redactContext() in @autter/runtime-browser.
 const SENSITIVE_KEY_RE =
 	/email|pass|token|secret|^auth([-_.]|$)|authorization|bearer|cookie|credential|api[-_.]?key|ssn|cvv|card([-_. ]?(number|num|no))?$/i;
-const EMAIL_VALUE_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// Lookbehind keeps this linear on long runs (see runtime-core redact.ts).
+const EMAIL_VALUE_RE = /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const REDACTED = "[redacted]";
 
 function scrubContext(context: Record<string, unknown>): Record<string, unknown> {
@@ -198,6 +208,7 @@ export function normalizeBrowserPayload(
 				...(event.context ? { context: scrubContext(event.context) } : {}),
 			},
 			occurredAt,
+			...liftErrorFields(event.context),
 		});
 	}
 

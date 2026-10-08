@@ -82,6 +82,7 @@ before(async () => {
 		spanTtlDays: 7,
 		metricsTtlDays: 90,
 		llmCallTtlDays: 90,
+		logTtlDays: 14,
 	};
 	const { app } = createIngesterApp(config);
 	appServer = app.listen(0);

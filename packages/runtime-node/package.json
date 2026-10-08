@@ -1,7 +1,7 @@
 {
 	"name": "@autter/runtime-node",
-	"version": "1.4.0",
-	"description": "Autter Runtime for Node.js: same-origin browser relay handler + curated OpenTelemetry server tracker",
+	"version": "1.5.0",
+	"description": "Autter Runtime for Node.js: request wide events, coded errors, operation logging, same-origin browser relay and a curated OpenTelemetry server tracker",
 	"license": "MIT",
 	"type": "module",
 	"main": "./dist/index.cjs",
@@ -12,7 +12,13 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js",
 			"require": "./dist/index.cjs"
-		}
+		},
+		"./testing": {
+			"types": "./dist/testing.d.ts",
+			"import": "./dist/testing.js",
+			"require": "./dist/testing.cjs"
+		},
+		"./package.json": "./package.json"
 	},
 	"files": [
 		"dist"
@@ -23,8 +29,8 @@
 		"directory": "packages/runtime-node"
 	},
 	"scripts": {
-		"build": "tsup src/index.ts --format esm,cjs --dts --target node20 --clean",
-		"test": "npm run build && npm run build -w @autter/otlp-ingester && node --test test/*.test.mjs"
+		"build": "node ../../scripts/ensure-built.mjs runtime-core && tsup",
+		"test": "npm run build -w @autter/runtime-core && npm run build && npm run build -w @autter/otlp-ingester && node --test test/*.test.mjs"
 	},
 	"dependencies": {
 		"@opentelemetry/api": "^1.9.0",
@@ -39,7 +45,9 @@
 		"@opentelemetry/semantic-conventions": "^1.28.0"
 	},
 	"devDependencies": {
+		"@autter/runtime-core": "0.0.0",
 		"@types/node": "^22.10.0",
+		"express": "^4.21.2",
 		"tsup": "^8.3.5",
 		"typescript": "^5.7.0"
 	},

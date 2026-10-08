@@ -9,6 +9,7 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 | Route | Payload | Purpose |
 | --- | --- | --- |
 | `POST /v1/traces` | OTLP/JSON `ExportTraceServiceRequest` | Error spans → occurrences; all spans → `runtime_spans`; server spans → usage rollups; GenAI spans → `runtime_llm_calls` |
+| `POST /v1/logs` | OTLP `ExportLogsServiceRequest`, server key | Wide events (request/operation summaries, logs) → `runtime_logs` (+ `runtime_request_1m` rollup); logger-only error records (`autter.capture.mode=log`) → occurrences |
 | `POST /v1/metrics` | OTLP `ExportMetricsServiceRequest` | HTTP-server duration histograms → usage rollups; portable process memory/GC metrics → per-instance memory samples |
 | `POST /v1/platform-events` | JSON, server key | ECS/Kubernetes OOM kills and restarts → memory incident correlation |
 | `POST /v1/profiles` | Symbolized pprof, server key | CPU/in-use heap profile samples |
@@ -64,8 +65,42 @@ The validator webhook may return the same extra fields:
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |
 | `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
+| `PROMOTION_LOOKUPS_PER_MINUTE` | `30` | Per-tenant ClickHouse dedupe lookups for `/v1/logs` error promotion; over budget, records are promoted with in-batch dedupe only |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 | `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
+| `LOG_TTL_DAYS` | `14` | Retention for `runtime_logs` (request summaries are always kept, never sampled, so this is the main volume knob). Unlike the other TTLs it is also applied to **existing** tables: at boot the ingester compares it with the table's TTL and runs `ALTER TABLE … MODIFY TTL` only when they differ; a failure is logged and retried next boot |
+
+## Coded errors and request summaries (1.5.0)
+
+- **Code-based grouping.** An occurrence carrying a valid `autter.error.code`
+  (`^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$`, ≤80 chars) is fingerprinted by
+  scheme `code-v1`: `sha256("code-v1\0" + service + "\0" + code)[:32]` —
+  independent of source, message, stack and route, so one code is one issue
+  across traces, log promotion, the browser and external connectors.
+  Uncoded errors keep the historical fingerprint (`message-v1`) byte-for-byte.
+  `fingerprint_scheme` is stored per occurrence and sent to the sink.
+- **Declared fields.** `autter.error.why|fix|link|expected` and
+  `autter.request.id` are lifted from span/exception-event attributes, log
+  attributes and browser context into `runtime_error_occurrences`
+  (`error_why`, `error_fix`, `error_link`, `expected`, `request_id`) and the
+  sink payload. why/fix are scrubbed and capped at 1000 chars; links must be
+  http(s) and ≤500 chars. Exception spans inherit the request id of their
+  server span.
+- **Request summaries.** `/v1/logs` lifts `autter.operation.kind`,
+  `autter.request.id`, `http.route` (id-normalised), `http.response.status_code`,
+  `autter.error.code` and the `autter.operation.ai` rollup (`cost_usd`, `calls`)
+  into `runtime_logs` columns. `kind = 'request'` rows feed the
+  `runtime_request_1m` materialized view (per route/method/minute: count,
+  failed, duration sum, p50/p95). The view counts every insert, so a retried
+  batch can be counted twice — route stats are approximate under exporter
+  retries; `runtime_logs` itself collapses duplicates.
+- **Log promotion.** SDKs without a trace pipeline (logger-only mode,
+  `@autter/runtime-edge`) send errors as log records with `exception.*` and
+  `autter.capture.mode = "log"`. `/v1/logs` promotes those (severity ≥ error)
+  to server occurrences — stored, counted and forwarded to the sink —
+  skipping a record when its trace id already produced an occurrence in the
+  same batch or (ClickHouse lookup) within ±60 s. If the lookup fails the
+  record is promoted anyway.
 
 ## LLM / GenAI calls
 

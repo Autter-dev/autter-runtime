@@ -39,6 +39,7 @@ function cfg(overrides: Partial<IngesterConfig> = {}): IngesterConfig {
 		spanTtlDays: 7,
 		metricsTtlDays: 90,
 		llmCallTtlDays: 90,
+		logTtlDays: 14,
 		...overrides,
 	};
 }
@@ -66,6 +67,7 @@ function occ(overrides: Partial<RuntimeOccurrence> = {}): RuntimeOccurrence {
 		occurredAt: new Date("2026-01-01T00:00:00.000Z"),
 		occurrenceId: "occ-1",
 		fingerprint: "fp-1",
+		fingerprintScheme: "message-v1",
 		routeNormalized: "/x",
 		messageNormalized: "boom",
 		topFrames: [],

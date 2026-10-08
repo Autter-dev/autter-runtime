@@ -6,7 +6,8 @@
 browser app ──tiny JSON──▶ customer's same-origin relay ──▶ /v1/browser ─┐
                                                                           ├─▶ normalise → fingerprint
 server app ──OTLP/HTTP────────────────────────────────────▶ /v1/traces ──┤
-                                                            /v1/metrics ─┘
+                                                            /v1/metrics ─┤
+                                                            /v1/logs ────┘
                                                                           │
                                               ┌───────────────────────────┤
                                               ▼                           ▼
@@ -43,8 +44,12 @@ Two key scopes separate frontend and backend credentials:
 | --- | --- | --- | --- |
 | `runtime_error_occurrences` | MergeTree | `(org_id, repository_id, fingerprint, occurred_at)` | 14 d |
 | `runtime_spans` | MergeTree | `(org_id, repository_id, trace_id, started_at)` | 7 d |
-| `runtime_logs` | ReplacingMergeTree | `(org_id, repository_id, occurred_at, event_id)` | 14 d |
+| `runtime_logs` | ReplacingMergeTree | `(org_id, repository_id, occurred_at, event_id)` | `LOG_TTL_DAYS` (14 d) |
+| `runtime_request_1m` | AggregatingMergeTree (fed by `runtime_request_1m_mv`) | `(org_id, repository_id, service, environment, route, method, bucket_at)` | 90 d |
 | `runtime_metrics_1m` | SummingMergeTree | `(org_id, repository_id, service, environment, release, route, bucket_at)` | 90 d |
+| `runtime_latency_histograms` | ReplacingMergeTree | `(org_id, repository_id, service, environment, bucket_at, point_id)` | 90 d (`METRICS_TTL_DAYS`) |
+| `runtime_memory_samples` | ReplacingMergeTree | `(org_id, repository_id, service, environment, instance_id, metric, observed_at)` | 14 d |
+| `runtime_platform_events` | ReplacingMergeTree | `(org_id, repository_id, event_id)` | 30 d |
 | `runtime_llm_calls` | MergeTree | `(org_id, repository_id, started_at)` | 90 d |
 | `runtime_profile_samples` | MergeTree | `(org_id, repository_id, service, environment, release, observed_at, profile_id)` | 7 d |
 | `runtime_source_maps` | ReplacingMergeTree | `(org_id, repository_id, release, filename)` | 30 d |
@@ -59,6 +64,51 @@ magnitude smaller than HTTP, spend analysis needs per-call granularity
 (model, tokens, `cost_usd`, `cost_source`, user/session, and `error_type`
 for failed calls), and SDKs send GenAI spans unsampled (the errors-are-100%
 rule applies to money too).
+
+`runtime_latency_histograms` stores per-route OTLP duration histograms
+(bucket bounds + counts) so latency percentiles can be computed from
+unsampled metrics. `runtime_memory_samples` holds per-instance process
+memory/GC gauges and `runtime_platform_events` ECS/Kubernetes OOM kills and
+restarts (`POST /v1/platform-events`), which the consumer correlates with
+memory incidents.
+
+### Wide events: `runtime_logs` and `runtime_request_1m`
+
+`runtime_logs` holds plain log records, operation summaries and (from
+runtime-node 1.5.0) **request summaries** — one row per HTTP request or job,
+always kept (no sampling; `LOG_TTL_DAYS` is the volume knob). Migration
+0012 lifts the attributes every query filters on into columns:
+
+| Column | Source attribute | Notes |
+| --- | --- | --- |
+| `kind` | `autter.operation.kind` | `request` / `operation` (1.4.0 operation summaries without it → `operation`); `''` for plain logs |
+| `request_id` | `autter.request.id` | bloom-filter skip index `idx_logs_request_id` — "everything for request X" |
+| `route` | `http.route` | query-stripped, id-normalised (`/orders/:id`) |
+| `status_code` | `http.response.status_code` | `0` when absent |
+| `error_code` | `autter.error.code` | only when it matches `CODE_PATTERN` |
+| `ai_cost_usd` / `ai_calls` | `autter.operation.ai` (`cost_usd`, `calls`) or the flattened `autter.operation.ai.*` keys | AI rollup per summary |
+
+The full event (context, steps, inline `autter.operation.logs`) stays in the
+`attributes` JSON. `runtime_request_1m_mv` aggregates `kind = 'request'` rows
+into `runtime_request_1m` per route/method/minute (`method` comes from the
+`http.request.method` attribute). Read it with `sum(request_count)`,
+`sum(failed_count)` (`outcome = 'failed'`), `sum(duration_sum_ms)` and
+`quantilesMerge(0.5, 0.95)(duration_quantiles)`. The view only sees rows
+inserted after it exists, and it counts every insert: a batch retried by an
+exporter (after a 503 or a lost 2xx) is collapsed in `runtime_logs` by
+`event_id` but counted twice in the rollup — route stats are approximate
+under retries; exact per-request answers come from `runtime_logs`.
+
+**Log promotion.** Logger-only mode and `@autter/runtime-edge` have no span
+to record an exception on; they send error log records with `exception.*`
+and `autter.capture.mode = "log"`. `/v1/logs` promotes such records (severity
+≥ error) to server occurrences — fingerprinted, written to
+`runtime_error_occurrences`, counted in `runtime_metrics_1m` and forwarded to
+the sink. A record is skipped when its trace id already produced an
+occurrence in the same batch or, per a ClickHouse lookup, within ±60 s for
+the same org/repo (the lookup ignores the candidates' own deterministic
+ids, so a retried batch never dedupes against itself). A failed lookup
+promotes anyway. Records without a trace id are always promoted.
 
 `runtime_metrics_1m` is pre-aggregated per minute; readers must
 `SUM(...) GROUP BY` because SummingMergeTree collapses rows at merge time,
@@ -87,13 +137,18 @@ stacks or routes in SQL:
 
 | Column | Derivation | Aggregation use |
 | --- | --- | --- |
-| `fingerprint` | hash of source+service+type+normalised message+top frames+normalised route | the issue group key |
+| `fingerprint` | `code-v1`: hash of service+error code; `message-v1`: hash of source+service+type+normalised message+top frames+normalised route (see [Fingerprinting](#fingerprinting)) | the issue group key |
 | `severity` | SDK-declared (`autter.severity`); `autter.unhandled` ⇒ `fatal` | errors vs warnings, alert thresholds |
 | `message_normalized` | ids/numbers/quoted strings templated out | "what is this group" label |
 | `route_normalized` | `/users/8812` → `/users/:id` | errors-by-endpoint, low-cardinality |
 | `top_frames` (Array) | top ≤5 normalised stack frames | "point of error" drill-down |
 | `first_frame` | `top_frames[1]` | single-column GROUP BY for hotspot files |
 | `method` | `http.request.method` | split GET vs POST failures |
+| `fingerprint_scheme` | `code-v1` when grouped by a valid error code, else `message-v1` | tell coded issues from message-grouped ones |
+| `error_code` | `autter.error.code` (validated) | errors-by-code |
+| `error_why` / `error_fix` / `error_link` | `autter.error.why` / `.fix` / `.link` (scrubbed; ≤1000 / ≤1000 / ≤500 chars, http(s) links only) | declared cause/remedy for triage and RCA |
+| `expected` (UInt8) | `autter.error.expected` | expected business failures — recorded, never paged |
+| `request_id` | `autter.request.id` (exception spans inherit it from their server span; browser failures read `x-request-id`) | join to the request summary; bloom index `idx_occ_request_id` |
 
 Severity is deliberately **not** part of the fingerprint: the same defect
 reported as a warning in one code path and an error in another stays one
@@ -111,6 +166,26 @@ version *is* the schema deployment. Readers (dashboards, the Autter
 backend) should treat columns as additive-only within a major version.
 
 ## Fingerprinting
+
+Two schemes; `fingerprint_scheme` records which one produced a row.
+
+**`code-v1`** — when the occurrence carries a valid `autter.error.code`
+(`^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$`, ≤80 chars):
+
+```
+sha256("code-v1" + "\0" + service + "\0" + code).hex()[:32]
+```
+
+Source, error type, message, stack and route are deliberately left out, so
+the same code from the trace path, log promotion, the browser or an external
+connector (Sentry, PostHog, Datadog, Loki, generic webhook — mapped by the
+Autter backend) lands in **one issue**. Route and message stay as facets on
+the occurrence rows. Test vector: `payments-api` + `billing.declined` →
+`1692d304df5e4edbd3a0bbac5d7658bb`. Invalid codes (`ECONNRESET`, ids, free
+text) are ignored and the error falls back to `message-v1`.
+
+**`message-v1`** — every uncoded error, unchanged byte-for-byte from
+pre-1.5.0 so existing issues never regroup:
 
 `sha256(source + service + error_type + normalised_message + top_5_frames + normalised_route)`,
 truncated to 32 hex chars.
@@ -214,6 +289,12 @@ failures group into issues like any other error.
 }
 ```
 
+Declared-error context keys (runtime-browser ≥1.4.0) are lifted into the
+occurrence fields above: `autter.error.code|why|fix|link|expected` (from coded
+errors and `autterErrorFromResponse`) and `autter.request.id` (the
+`x-request-id` header of a failed fetch/XHR). Each is validated on its own; a
+malformed value is dropped without rejecting the payload.
+
 Event types: `exception`, `unhandled_rejection`, `session_start`, and
 `track_event` (carries a `name`; counted into `runtime_metrics_1m` as
 `request_count` on the synthetic route `event:<name>` — coarse usage
@@ -253,11 +334,27 @@ When `AUTTER_SINK_URL` is set, each ingest batch POSTs:
       "statusCode": 500,
       "traceId": "...",
       "sessionId": "",
-      "occurredAt": "2026-07-21T11:22:00.123Z"
+      "occurredAt": "2026-07-21T11:22:00.123Z",
+      "method": "POST",
+      "fingerprintScheme": "code-v1",
+      "errorCode": "billing.declined",
+      "why": "The card issuer rejected the charge",
+      "fix": "Ask the customer for another card",
+      "link": "https://docs.example.com/payments#declined",
+      "expected": true,
+      "requestId": "req_3f9a…"
     }
   ]
 }
 ```
+
+1.5.0 additions to occurrences, all optional and omitted when absent (the
+payload stays `version: 1`; older consumers ignore unknown keys):
+`errorCode`, `why`, `fix`, `link`, `expected`, `requestId`, `traceId`,
+`route`, `method`, `statusCode`, `fingerprintScheme` (`message-v1` |
+`code-v1`). `traceId`/`route`/`method`/`statusCode` used to be sent as `null`
+when unknown; they are now left out instead. Occurrences promoted from
+`/v1/logs` arrive through the same payload.
 
 Batches also carry `metrics` (1-minute usage rollup points) and `llmCalls`
 (per-call LLM usage — provider, model, tokens, `costUsd`, `costSource`,

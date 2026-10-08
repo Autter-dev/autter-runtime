@@ -1,4 +1,5 @@
 import { decodeOtlpAttributes, sanitizeRuntimeContext, type OtlpValue } from "./context.js";
+import { liftErrorFields, validRequestId } from "./error-fields.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
 import {
@@ -294,6 +295,9 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
 							...(handled ? { "autter.handled": true, "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) }),
 						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
+						// Event attributes first: one span can carry several
+						// exceptions, each with its own code.
+						...liftErrorFields(eventAttrs, attrs),
 					});
 				}
 				const failedOutcomes = (span.events ?? []).filter((event) => {
@@ -313,6 +317,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						traceId: span.traceId ?? null, sessionId: null,
 						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }),
 						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
+						...liftErrorFields(outcome, attrs),
 					});
 				}
 				if (exceptionEvents.length === 0 && failedOutcomes.length === 0 && isError) {
@@ -335,6 +340,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						sessionId: null,
 						attributes: decodeOtlpAttributes(span.attributes),
 						occurredAt: startedAt,
+						...liftErrorFields(attrs),
 					});
 				}
 
@@ -435,6 +441,10 @@ function inheritHttpFromParent(
 		const http = httpServerAncestor(byId, spanId);
 		if (!http) continue;
 		if (!occurrence.route && http.route) occurrence.route = http.route;
+		// Request ids live on the request (server) span; child error spans
+		// from captureException inherit it so the issue links to the request.
+		const requestId = validRequestId(http.attributes?.["autter.request.id"]);
+		if (!occurrence.requestId && requestId) occurrence.requestId = requestId;
 		const method = methodFromSpan(http);
 		if (!occurrence.method && method) occurrence.method = method;
 		if (

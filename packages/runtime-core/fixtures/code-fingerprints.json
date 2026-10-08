@@ -1,0 +1,6 @@
+[
+	{ "service": "payments-api", "code": "billing.declined", "fingerprint": "1692d304df5e4edbd3a0bbac5d7658bb" },
+	{ "service": "payments-api", "code": "billing.limit", "fingerprint": "be8302686d461915fb67bd28cdba26ba" },
+	{ "service": "web-app", "code": "auth.session_expired", "fingerprint": "b997fe46c7a61540917324f78b710d83" },
+	{ "service": "autter-api", "code": "github.app_permission_missing", "fingerprint": "ce80dc4c785f51a0851e99cd5dd1316f" }
+]

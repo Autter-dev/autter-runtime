@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.5.0] - 2026-10-08
+
+Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `runtime-browser` 1.4.0, new `runtime-edge` 1.0.0. Additive: 1.4.0 code keeps working unchanged (golden-tested).
+
+### Features
+
+- Request summaries: `autterRequests` (Express/Connect), `autterFastify` and `withRuntimeRequest` emit one summary per request with route, status, duration, outcome and a request id. `x-request-id` is honoured or generated, echoed (CORS-exposed) and stamped on spans and records. Summaries are always kept; `ignore` globs skip health/metrics routes (`runtime-node`, `runtime-next`).
+- `runtimeContext` (`set`, `outcome`, `debug/info/warn/error`, `id`, `requestId`, `fork`, `carrier`) and `runInBackground`. Debug/info messages inside an operation fold into its summary (`autter.operation.logs`, max 50) and summaries carry `kind` and `autter.operation.level` (`runtime-node`).
+- Coded errors: `RuntimeError`, `defineRuntimeErrors`, `isRuntimeErrorLike`, `toClientError` and `autterErrorResponse`. `captureException` reads `code/why/fix/link/status/expected` from any error, records cause chains, keeps `internal` on the span only, and treats `expected` failures as `degraded` (`runtime-node`).
+- Code-based grouping: errors with a valid `autter.error.code` get the source-independent `code-v1` fingerprint; uncoded errors keep `message-v1` byte-for-byte (`otlp-ingester`).
+- Cross-process carriers (`withRuntimeOperation(name, fn, attrs, { from, waitUntil })`) with OTel span links, and per-operation AI usage rollup (`autter.operation.ai`) (`runtime-node`).
+- `initAutterLogging` runs requests, operations and coded errors without starting NodeSDK, for apps that already run their own OpenTelemetry SDK. Its error records (`autter.capture.mode=log`) are promoted to occurrences by `/v1/logs`, deduplicated by trace id (`runtime-node`, `otlp-ingester`).
+- Enrichers (`enrichUserAgent`, `enrichRequestSize`, `enrichEdgeGeo`, `enrichDeployment`), sinks (`otlpSink`, `consoleSink`, `fileSink` writing `.autter/runtime/*.jsonl` in development) and the `@autter/runtime-node/testing` subpath (`runtime-node`).
+- New `@autter/runtime-edge` 1.0.0: `withAutter` for Cloudflare Workers, Vercel Edge, Deno and Bun with zero dependencies; also exposed as `@autter/runtime-next/edge`.
+- `runtime_logs` gains `kind`, `request_id`, `route`, `status_code`, `error_code`, `ai_cost_usd`, `ai_calls` (migration 0012) and feeds the `runtime_request_1m` rollup (migration 0014). `runtime_error_occurrences` gains `error_code`, `error_why`, `error_fix`, `error_link`, `expected`, `request_id`, `fingerprint_scheme` (migration 0013) (`otlp-ingester`).
+- Sink payload (still `version: 1`) adds optional `errorCode`, `why`, `fix`, `link`, `expected`, `requestId`, `traceId`, `route`, `method`, `statusCode` and `fingerprintScheme`; absent values are omitted (`otlp-ingester`).
+- New `LOG_TTL_DAYS` (default 14) applied idempotently to `runtime_logs` at boot (`otlp-ingester`).
+- Browser: `captureException` and the global handlers send `code/why/fix/link/expected/requestId`; new `autterErrorFromResponse(response)`; failed fetch/XHR 5xx responses carry `x-request-id` (`runtime-browser`).
+- Experimental zero-code `logging.requests` hook mode, off by default (`runtime-node`).
+
+### Changes
+
+- Console output is a pretty tree outside production; production keeps JSON lines (`runtime-node`).
+- Debug/info logged inside an operation are folded into its summary instead of separate records; `logging.inline: false` restores 1.4.0 behaviour (`runtime-node`).
+- `cache_read_tokens`, `cache_creation_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `cached_tokens` and `reasoning_tokens` counts are no longer masked as tokens by redaction (`runtime-node`, `otlp-ingester`).
+
+### Fixes
+
+- Value redaction is linear on adversarial strings. The email, URL-credential, JWT, Slack and Autter-key patterns could take seconds to minutes on long runs such as `"a".repeat(65536)`; they now only start a match at the beginning of a run, query-string stripping is procedural, and strings are capped before scrubbing (`runtime-core`, `runtime-node`, `runtime-edge`, `otlp-ingester`, `runtime-browser`). The patterns predate 1.5.0; 1.5.0 routes more input through them.
+- `@autter/runtime-edge` keeps the request summary when its queue is full (a summary evicts the oldest plain record), caps warn/error records at 50 per request, and no longer throws from `rt.error` / `rt.captureException` when attributes have throwing getters or are Proxies.
+- `@autter/runtime-edge` queues records with the destination (key, endpoint, service, environment) they were created for, and no longer queues records when no key is configured, so a later request can't export them under its own key.
+- `/v1/logs` promotion dedupe lookups are bounded: windows of at most 10 minutes, at most 4 per request, newest records first, only for timestamps within the last 24 hours, and a per-tenant budget (`PROMOTION_LOOKUPS_PER_MINUTE`, default 30) (`otlp-ingester`).
+- A throwing getter or Proxy on an error's metadata no longer stops `captureException` from reporting the error (`runtime-browser`).
+- The sink keeps a numeric `statusCode` of `0` (`otlp-ingester`).
+- An invalid `autter.error.code` or request id on an exception event no longer hides a valid one on its span (`otlp-ingester`).
+- `proxy-addr` 2.0.8 in the lockfile (CVE-2026-90711; reached through Express in the ingester and examples).
+- Package test scripts build the workspace packages they import first, so each suite runs on a clean checkout.
+- `runtime-browser` no longer declares a `./dist/index.cjs` entry that the ESM-only build never produced.
+- `runtime-next` builds no longer race on `dist/` cleanup and drop `client.d.ts` / `edge.d.ts`.
+
+### Upgrade
+
+- Deploy otlp-ingester 1.5.0 first (migrations 0012–0014 run at boot), then SDKs. Older ingesters accept 1.5.0 SDK traffic but ignore the new fields.
+- The `runtime_request_1m` rollup counts every insert, so it is approximate when exporters retry a batch.
+
 ## [1.3.1] - 2026-09-08
 
 ### Fixes

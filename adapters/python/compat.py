@@ -145,6 +145,35 @@ MANIFEST: dict[str, Any] = json.loads(
                 "@autter/runtime-node": "1.4.0",
                 "@autter/runtime-next": "1.4.0"
             }
+        },
+        {
+            "id": "request_summaries",
+            "title": "Request summaries and the per-route request rollup",
+            "ingester": "1.5.0",
+            "migrations": [
+                "0012-runtime-logs-requests",
+                "0014-runtime-request-1m"
+            ],
+            "route": "/v1/logs",
+            "sdks": {
+                "@autter/runtime-node": "1.5.0",
+                "@autter/runtime-next": "1.5.0",
+                "@autter/runtime-edge": "1.0.0"
+            }
+        },
+        {
+            "id": "coded_errors",
+            "title": "Coded errors and code-based grouping",
+            "ingester": "1.5.0",
+            "migrations": [
+                "0013-occurrence-codes"
+            ],
+            "sdks": {
+                "@autter/runtime-node": "1.5.0",
+                "@autter/runtime-next": "1.5.0",
+                "@autter/runtime-browser": "1.4.0",
+                "@autter/runtime-edge": "1.0.0"
+            }
         }
     ]
 }

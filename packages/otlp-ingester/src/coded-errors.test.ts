@@ -23,7 +23,6 @@ import {
 	promotionLookups,
 } from "./log-promotion.js";
 import { sanitizeRuntimeContext } from "./context.js";
-import { sinkOccurrence } from "./sink.js";
 import { logTableDDL, normalizeLogs, requestRollupViewDDL } from "./logs.js";
 import { MIGRATIONS } from "./migrations.js";
 import { normalizeBrowserPayload } from "./normalize-browser.js";

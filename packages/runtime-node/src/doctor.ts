@@ -25,6 +25,8 @@ export interface DoctorOptions {
 	key?: string;
 	features?: string[];
 	json?: boolean;
+	/** Print nothing when compatible, and only the problems otherwise (CI). */
+	quiet?: boolean;
 	cwd?: string;
 	timeoutMs?: number;
 }
@@ -161,7 +163,8 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
 	};
 }
 
-export function formatDoctorReport(report: DoctorReport): string {
+export function formatDoctorReport(report: DoctorReport, options: { quiet?: boolean } = {}): string {
+	if (options.quiet) return formatQuietDoctorReport(report);
 	const lines: string[] = [];
 	lines.push(`Autter Runtime doctor`);
 	lines.push(`  endpoint   ${report.endpoint}`);
@@ -211,7 +214,25 @@ export function formatDoctorReport(report: DoctorReport): string {
 	return lines.join("\n");
 }
 
+/** One line per problem, or nothing at all when everything is compatible. */
+function formatQuietDoctorReport(report: DoctorReport): string {
+	if (report.exitCode === 0) return "";
+	const lines: string[] = [];
+	if (!report.ingester && report.exitCode === 2) {
+		lines.push(`autter doctor: ingester unreachable at ${report.endpoint} (${report.ingesterError ?? "unknown error"})`);
+	}
+	if (report.key === "rejected") lines.push("autter doctor: ingest key rejected (401)");
+	if (report.key === "client_key") lines.push("autter doctor: a client/browser key was given; server SDKs need a server key");
+	for (const feature of report.features) {
+		if (feature.status === "incompatible") lines.push(`autter doctor: feature ${feature.id} is incompatible`);
+	}
+	for (const issue of report.issues) lines.push(`autter doctor: ${issue.message}`);
+	if (lines.length === 0) lines.push(`autter doctor: incompatible (exit ${report.exitCode})`);
+	return lines.join("\n");
+}
+
 export const DOCTOR_USAGE = `Usage: npx @autter/runtime-node doctor [options]
+       npx @autter/runtime-node --version
 
 Checks that your Autter SDKs, ingester and ClickHouse schema versions match.
 
@@ -220,6 +241,7 @@ Options:
   --key <key>         Also verify an ingest key (default: $AUTTER_RUNTIME_KEY)
   --features <a,b>    Only check these features (${COMPAT_MANIFEST.features.map((f) => f.id).join(", ")})
   --json              Machine-readable output
+  -q, --quiet         Print nothing when compatible, only the problems otherwise
   --timeout <ms>      Per-request timeout (default 5000)
 
 Exit codes: 0 compatible, 1 mismatch or rejected key, 2 ingester unreachable.`;
@@ -246,6 +268,10 @@ export function parseDoctorArgs(argv: string[], env: NodeJS.ProcessEnv = process
 			case "--json":
 				options.json = true;
 				break;
+			case "-q":
+			case "--quiet":
+				options.quiet = true;
+				break;
 			case "--timeout": {
 				const ms = Number(value());
 				if (!Number.isFinite(ms) || ms <= 0) return { error: "--timeout needs a positive number of ms" };
@@ -256,6 +282,7 @@ export function parseDoctorArgs(argv: string[], env: NodeJS.ProcessEnv = process
 				return { error: `unknown option ${arg}` };
 		}
 	}
+	if (options.json && options.quiet) return { error: "--json and --quiet cannot be combined" };
 	if (!options.key && env.AUTTER_RUNTIME_KEY) options.key = env.AUTTER_RUNTIME_KEY;
 	return options;
 }

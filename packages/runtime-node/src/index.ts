@@ -102,4 +102,10 @@ export {
 	type IngesterCompatInfo,
 	type SdkIdentity,
 } from "./compat.js";
-export { runDoctor, type DoctorOptions, type DoctorReport } from "./doctor.js";
+export {
+	formatDoctorReport,
+	parseDoctorArgs,
+	runDoctor,
+	type DoctorOptions,
+	type DoctorReport,
+} from "./doctor.js";

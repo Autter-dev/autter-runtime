@@ -1,6 +1,6 @@
 # Connect external logs to Runtime
 
-The Autter platform can ingest repository-scoped logs from Sentry, PostHog, Grafana/Loki, Datadog and generic webhooks. Configure them under **Repository → Settings → Runtime → Data sources** when this feature is enabled on your deployment.
+The Autter platform can ingest repository-scoped logs from Sentry, PostHog, Grafana/Loki, Datadog, Vercel, Cloudflare Workers and generic webhooks. Configure them under **Repository → Settings → Runtime → Data sources** when this feature is enabled on your deployment.
 
 ## Relationship to this repository
 
@@ -11,12 +11,14 @@ SDK telemetry continues through the OTLP ingester and ClickHouse. External occur
 ## Setup
 
 1. Select the connected repository and open Runtime settings. Owners/admins can configure sources.
-2. Choose a provider, enter its project/service and environments, and supply read credentials through the settings form. Sentry uses organization/project slugs; PostHog uses a project ID and personal read key; Grafana uses a Loki URL/query and optional Tempo credentials; Datadog uses an API key plus an application key with logs-read access.
+2. Choose a provider, enter its project/service and environments, and supply read credentials through the settings form. Sentry uses organization/project slugs; PostHog uses a project ID and personal read key; Grafana uses a Loki URL/query and optional Tempo credentials; Datadog uses an API key plus an application key with logs-read access. Vercel uses a team access token and project; Autter creates a log drain on the project (Vercel Pro or Enterprise). Cloudflare uses a user-scoped API token, account ID and Worker name, and requires Workers Logs to be enabled for the Worker.
 3. Test access and inspect matching samples. Save the connection. Store the returned private webhook URL securely if using push delivery.
 4. Choose collection-only, investigation, or investigation plus draft fixes. Warning analysis is separately opt-in; high/critical is the default automatic-draft threshold. The repository's automatic-draft switch also applies.
 5. Inspect Runtime errors for stored messages, severity, stacks/trace context and RCA. Check the actual draft PR URL when a fix completes; a queued job is not a created PR.
 
 Polling is periodic, with a default 60-second interval plus provider delay. The new webhook route returns `202` after committing records and work. Analysis and fixes complete asynchronously. Backfilled historical records do not initiate automatic fixes. Missing stacks/source maps or insufficient code evidence produce a needs-evidence result.
+
+With a Vercel or Cloudflare connection, failed Vercel deployments and failed Workers Builds on the default branch also become CI/CD incidents that include the build log.
 
 Recovery comes from a resolved webhook; monitor-state polling is not implemented. Project selection uses manually entered IDs/slugs. Datadog stores supplied trace context without a separate APM trace fetch; Grafana can fetch a linked Tempo trace. Disconnecting removes credentials and stops new collection while preserving retained evidence.
 

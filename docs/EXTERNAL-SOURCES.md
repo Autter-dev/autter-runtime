@@ -61,6 +61,7 @@ The platform reads the code from the first field that holds one:
 | PostHog | `properties.error_code`, `properties.$exception_list[-1].code`, `properties.autter_error_code` |
 | Datadog | `@error.code`, `attributes.error.code`, tag `error_code:<value>` |
 | Grafana/Loki | Stream label `error_code`, or `code` / `error.code` in a JSON log line |
+| Cloudflare Workers | `error_code`, `errorCode` or `error.code` in a structured (JSON) log event |
 | Generic webhook | `errorCode` |
 
 To use this, set the code where your provider SDK already lets you attach data — for example a Sentry tag `error_code`, or a structured log field `error.code` for Loki and Datadog. Above 500 distinct codes per service per day, new codes fall back to message grouping and Runtime shows a "code cardinality too high" notice; this guards against ids leaking into codes.

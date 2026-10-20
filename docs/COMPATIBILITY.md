@@ -101,6 +101,7 @@ copy that a test keeps identical.
 | Breadcrumbs: the steps before an error (`breadcrumbs`) | 1.6.0 | | | browser/node/next 1.6.0 |
 | Source map debug ids (`source_map_debug_ids`) | 1.6.0 | `0017-source-maps-debug-id` | `/v1/sourcemaps/check` | browser/next 1.6.0 |
 | Fingerprint override (`fingerprint_override`) | 1.6.0 | | | browser/node/next/edge 1.6.0 |
+| Browser trace propagation (`browser_trace_propagation`) | 1.6.0 | | | browser/next/node 1.6.0 |
 
 Notes:
 
@@ -110,6 +111,9 @@ Notes:
   **whole** browser batch with a 400 when it contains a newer event type.
   Errors in the same batch are lost too. Upgrade the ingester before the
   browser SDK.
+- Ingesters older than 1.6.0 accept a browser event's `traceId` but drop it
+  (the event itself is stored), so browser errors are not linked to server
+  traces until the ingester is upgraded. The relay warns once.
 - Upgrade order: ingester first (its migrations run at boot), then SDKs.
 
 ## Adding a feature

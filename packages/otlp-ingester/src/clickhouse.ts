@@ -306,7 +306,9 @@ export class ClickHouseStore {
 	 * this tenant in [from, to] — the cross-batch half of the log-promotion
 	 * dedupe. `excludeIds` are the candidate occurrences' own deterministic
 	 * ids, so a retried batch does not dedupe against its own earlier,
-	 * partially-committed write. Throws on failure; the caller decides.
+	 * partially-committed write. Browser occurrences share the server's trace
+	 * id (runtime-browser traceparent) but are a different signal, so they
+	 * never suppress a server error. Throws on failure; the caller decides.
 	 */
 	async recentOccurrenceTraceIds(
 		ctx: IngestContext,
@@ -321,6 +323,7 @@ export class ClickHouseStore {
 			query: `SELECT DISTINCT trace_id FROM ${this.table("runtime_error_occurrences")}
 				WHERE org_id = {org:String} AND repository_id = {repo:String}
 					AND occurred_at >= {from:DateTime64(3, 'UTC')} AND occurred_at <= {to:DateTime64(3, 'UTC')}
+					AND source != 'browser'
 					AND has({traces:Array(String)}, trace_id)
 					AND NOT has({exclude:Array(String)}, occurrence_id)`,
 			query_params: {

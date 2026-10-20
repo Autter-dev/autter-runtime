@@ -89,6 +89,8 @@ export interface BrowserEvent {
 	debugIds?: Record<string, string>;
 	/** Groups every event that carries it into one issue (see fingerprint.ts). */
 	fingerprint?: Fingerprint;
+	/** W3C trace id of the request behind the event (`@autter/runtime-browser/tracing`). */
+	traceId?: string;
 }
 
 const MAX_QUEUE = 10;
@@ -119,6 +121,21 @@ let crumbs: { add(kind: string, a?: unknown, b?: unknown, status?: number, ms?: 
 /** @internal Installed by `@autter/runtime-browser/breadcrumbs`. */
 export function _useBreadcrumbs(hooks: typeof crumbs): void {
 	crumbs = hooks;
+}
+
+// W3C trace propagation lives in the opt-in `@autter/runtime-browser/tracing`
+// module (it doesn't fit this bundle's 5 KB budget). It installs these hooks:
+// the fetch observer asks it for a traceparent and reports when the request
+// settled, and every event passes through `link` for its trace id. XHR is
+// wrapped by the module itself.
+let tracer: {
+	fetch(url: string, input: RequestInfo | URL, init?: RequestInit): [RequestInit?, string?];
+	settle(id?: string): void;
+	link(event: BrowserEvent): void;
+} | undefined;
+/** @internal Installed by `@autter/runtime-browser/tracing`. */
+export function _useTracing(hooks: typeof tracer): void {
+	tracer = hooks;
 }
 
 function uid(): string {
@@ -482,6 +499,7 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	}
 	attachClient(event);
 	if (crumbs) event.breadcrumbs = crumbs.list(event.type);
+	tracer?.link(event);
 	// Scrub before beforeSend so the last-chance hook sees the final form.
 	// Fields arrive cut with 512 chars of slack; scrub, then cut, so a secret
 	// straddling the limit is masked whole instead of half-exported.
@@ -688,7 +706,9 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			const isTelemetry = target.includes(options.endpoint);
 			const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
 			const method = init?.method || (input as Request).method;
-			return originalFetch(input, init).then((response) => {
+			const [traced, traceId] = (!isTelemetry && tracer?.fetch(target, input, init)) || [init];
+			return originalFetch(input, traced).then((response) => {
+				tracer?.settle(traceId);
 				if (!isTelemetry) crumbs?.add("request", method, path, response.status, performance.now() - started);
 				if (!isTelemetry && response.status >= 500) {
 					const event = baseEvent("request_failure", `Request returned ${response.status}`);
@@ -700,6 +720,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				}
 				return response;
 			}, (error: unknown) => {
+				tracer?.settle(traceId);
 				if (!isTelemetry) {
 					crumbs?.add("request", method, path, 0, performance.now() - started);
 					const event = baseEvent("request_failure", "Request failed");

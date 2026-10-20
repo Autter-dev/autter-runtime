@@ -92,6 +92,8 @@ const EVENT_TYPES = new Set([
 ]);
 
 const SEVERITIES = new Set(["fatal", "error", "warning", "info"]);
+/** W3C trace id (runtime-browser traceparent): 32 lowercase hex, not all zero. */
+const TRACE_ID = /^(?!0{32})[0-9a-f]{32}$/;
 
 // Bound a browser-supplied `context` object so it honors the sanitiser's
 // guarantee that a client can't smuggle unbounded cookies/DOM/bodies through
@@ -331,6 +333,9 @@ export function sanitizeBrowserPayload(
 			...relayBreadcrumbs(e.breadcrumbs, redactor),
 			...relayDebugIds(e.debugIds, redactor),
 			...relayFingerprint(e.fingerprint, redactor),
+			...(typeof e.traceId === "string" && TRACE_ID.test(e.traceId)
+				? { traceId: e.traceId }
+				: {}),
 		});
 	}
 
@@ -372,6 +377,10 @@ function forward(payload: object, opts: RelayOptions): void {
 		);
 		observeIngesterResponse({ status: response.status, headers: response.headers });
 		for (const feature of featuresForBrowserEvents(types)) noteCompatFeature(feature);
+		// Ingesters before 1.6.0 drop browser trace ids silently.
+		if (((payload as { events?: Array<{ traceId?: string }> }).events ?? []).some((e) => e.traceId)) {
+			noteCompatFeature("browser_trace_propagation");
+		}
 		noteRelayRejection(types, response.status, response.headers);
 	}).catch((err) => {
 		(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(

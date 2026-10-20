@@ -180,7 +180,7 @@ Defaults (cheap by construction):
 | Traces containing an error | 100% (tail retention, `retainTracesOnError`) |
 | `withProcessSpan` spans | 100% (same always-on tracer) |
 | LLM/GenAI call spans | 100% (`llmTracing`, on by default) |
-| Healthy traces | 1% head sampling (`traceSampleRate`) |
+| Healthy traces | 1% head sampling (`traceSampleRate`; also for requests whose incoming `traceparent` is unsampled, such as browser fetches from `@autter/runtime-browser`) |
 | Request metrics | exported every 60 s |
 | Logs | not collected |
 | PII in custom attributes | redacted before export (`redactAttributes`) |

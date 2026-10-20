@@ -178,12 +178,73 @@ never as context; the relay and the ingester scrub and bound it again. Needs
 ingester 1.6.0+; older ingesters ignore it. For grouping rules you can change
 without a deploy, use the repository's Runtime settings in Autter.
 
+## Trace propagation (1.6.0, opt-in)
+
+`@autter/runtime-browser/tracing` adds a W3C `traceparent` header
+(`00-<trace id>-<span id>-00`) to `fetch` and `XMLHttpRequest` requests, so
+the server continues the browser's trace and a browser failure links to the
+server spans and request summary of the same request.
+`@autter/runtime-node` (OpenTelemetry HTTP instrumentation) continues it with
+no setup. It is a separate import because it does not fit the main tracker's
+5 KB budget (about 0.6 KB more, brotlied):
+
+```ts
+import { initAutterBrowser } from "@autter/runtime-browser";
+import { enableTracePropagation } from "@autter/runtime-browser/tracing";
+
+initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
+enableTracePropagation({
+  tracePropagationTargets: ["https://api.example.com/", /^https:\/\/[a-z-]+\.internal\.example\.com\//],
+});
+```
+
+| Event | `traceId` |
+| --- | --- |
+| `request_failure` (5xx or network error) | the trace id its own request sent |
+| `exception` / `unhandled_rejection` | the trace id of the request that most recently finished or failed, when that was at most 5 s earlier and that request was traced |
+
+Rules:
+
+- **Same-origin requests always get a header; cross-origin requests only
+  when listed** in `tracePropagationTargets` (a string matches as a URL
+  prefix, a RegExp is tested against the full URL). A third-party API never
+  sees a new CORS preflight.
+- **An existing `traceparent` is never overwritten.** If your code (or another
+  library) already set one on the request, it is sent as is and its trace id
+  is used on the event.
+- **The header is unsampled (`-00`)**: the browser makes no sampling decision.
+  `@autter/runtime-node` 1.6.0 head-samples such requests at its own
+  `traceSampleRate` and keeps error traces in full. Another OpenTelemetry SDK
+  with the default parent-based sampler does not head-sample them; set its
+  `remoteParentNotSampled` sampler to your ratio sampler to keep your usual
+  rate.
+- The tracker's own `endpoint` (the same-origin relay) never gets a header.
+- `fetch` is traced through the tracker's network observer, so
+  `captureNetworkFailures: false` turns fetch propagation off;
+  `XMLHttpRequest` is wrapped by the module itself. Call
+  `enableTracePropagation()` before your app sends requests;
+  `disableTracePropagation()` turns it off at runtime.
+
+**CORS for cross-origin APIs.** `traceparent` is not a CORS-safelisted
+header, so a listed cross-origin API gets a preflight (`OPTIONS`) and must
+allow the header, or the browser blocks the request:
+
+```
+Access-Control-Allow-Headers: traceparent, content-type
+Access-Control-Expose-Headers: x-request-id
+```
+
+Only list APIs you control and whose CORS configuration allows it.
+
 ## API
 
 | Function | Notes |
 | --- | --- |
 | `initAutterBrowser(options)` | Installs error, rejection, CSP, and recent-action listeners; sends a session ping |
 | `captureException(error, context?)` | Handled errors; fast-flushed; duck-types `code/why/fix/link/expected/requestId`; `context.fingerprint` overrides grouping |
+
+| `enableTracePropagation({ tracePropagationTargets? })` | From `@autter/runtime-browser/tracing`: W3C trace propagation, see [Trace propagation](#trace-propagation-160-opt-in) |
+| `captureException(error, context?)` | Handled errors; fast-flushed; duck-types `code/why/fix/link/expected/requestId` |
 | `autterErrorFromResponse(response)` | `Promise<Error>` from a failed Response's JSON error body (or status text) |
 | `captureMessage(message, severity?, context?)` | Warnings/info without an exception (`"warning"` default); grouped and aggregated like errors |
 | `trackEvent(name, props?)` | Usage counter; aggregated server-side per minute |
@@ -210,7 +271,10 @@ IP addresses, and CSP policy text. Routes are `location.pathname` only.
 Browser and OS are a family plus major version. Filenames and script URLs are
 query-stripped. For CSP blocks, the directive, blocked resource origin, script
 path, and a short policy hash are retained. Of response headers, only
-`x-request-id` is read, and only on failed (5xx) requests.
+`x-request-id` is read, and only on failed (5xx) requests. With
+`@autter/runtime-browser/tracing`, the only request header read is
+`traceparent` (to keep an existing one and use its trace id), and the only
+header added is `traceparent`, on same-origin and listed requests.
 
 Messages, stack traces and custom `context` (at any depth) are scrubbed
 before send: values under sensitive-looking keys (`email`, `password`,

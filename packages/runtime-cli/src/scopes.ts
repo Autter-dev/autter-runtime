@@ -19,27 +19,35 @@ import { parse, type Options } from "acorn";
 /** Source map extension field that carries the bundle's function scopes. */
 export const SCOPES_KEY = "x_autter_scopes";
 export const SCOPES_VERSION = 1;
-/** `nameIndex` of a function that has no name (a callback, an IIFE). */
-export const ANONYMOUS_SCOPE = -1;
-/** `nameIndex` of a function whose minified name could not be mapped back:
- * the ingester keeps its pre-scope name for frames inside it. */
-export const UNKNOWN_SCOPE_NAME = -2;
 
 /**
- * `[startLine, startColumn, endLine, endColumn, nameIndex]`: the function's
- * generated range, 0-based lines and 0-based UTF-16 columns as in the map's
- * `mappings`, end exclusive. `nameIndex` points into `names`, or is
- * ANONYMOUS_SCOPE / UNKNOWN_SCOPE_NAME.
+ * The `x_autter_scopes` value. `scopes` is encoded like `mappings`: base64
+ * VLQ, `;` between generated lines (the line each scope starts on), `,`
+ * between the scopes that start on one line, in start order (outer first on
+ * a tie). Each scope is 3 or 4 values, 0-based, in UTF-16 columns:
+ *
+ *   1. start column, relative to the previous scope's start on the same
+ *      line (absolute for a line's first scope);
+ *   2. end line, relative to the start line;
+ *   3. end column (exclusive), relative to the start column when the scope
+ *      ends on its start line, else absolute;
+ *   4. the name, when the function has one: an index into the map's own
+ *      `names` followed by these `names`, relative to the last name index
+ *      written (starting from 0).
+ *
+ * A 3-value scope is anonymous. `names` holds only names the map's own
+ * `names` lacks; a `null` entry stands for a minified name that could not
+ * be mapped back (the ingester then keeps the frame's call-site name).
  */
-export type ScopeEntry = [number, number, number, number, number];
-
-/** The `x_autter_scopes` value: scopes sorted by start (outer before inner
- * on a tie), with each original name stored once in `names`. */
 export interface SourceMapScopes {
 	version: typeof SCOPES_VERSION;
-	names: string[];
-	scopes: ScopeEntry[];
+	names: Array<string | null>;
+	scopes: string;
 }
+
+/** A scope before encoding: generated range, and the index of its name in
+ * the map's `names` + extra names (-1 when anonymous). */
+type ScopeEntry = [startLine: number, startColumn: number, endLine: number, endColumn: number, nameIndex: number];
 
 export type ScopesResult = { scopes: SourceMapScopes } | { error: string };
 
@@ -419,6 +427,52 @@ class NameResolver {
 	}
 }
 
+// ── Encoding ──────────────────────────────────────────────────────────────
+
+const BASE64_DIGITS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function vlq(value: number): string {
+	let rest = value < 0 ? (-value << 1) | 1 : value << 1;
+	let out = "";
+	do {
+		let digit = rest & 31;
+		rest >>>= 5;
+		if (rest > 0) digit |= 32;
+		out += BASE64_DIGITS[digit];
+	} while (rest > 0);
+	return out;
+}
+
+/** Scopes sorted by start, as the `scopes` string (see SourceMapScopes). */
+function encodeScopes(entries: readonly ScopeEntry[]): string {
+	const parts: string[] = [];
+	let line = 0;
+	let previousStart = 0;
+	let previousName = 0;
+	let firstOnLine = true;
+	for (const [startLine, startColumn, endLine, endColumn, nameIndex] of entries) {
+		if (startLine > line) {
+			parts.push(";".repeat(startLine - line));
+			line = startLine;
+			previousStart = 0;
+			firstOnLine = true;
+		}
+		if (!firstOnLine) parts.push(",");
+		firstOnLine = false;
+		let segment =
+			vlq(startColumn - previousStart) +
+			vlq(endLine - startLine) +
+			vlq(endLine === startLine ? endColumn - startColumn : endColumn);
+		previousStart = startColumn;
+		if (nameIndex >= 0) {
+			segment += vlq(nameIndex - previousName);
+			previousName = nameIndex;
+		}
+		parts.push(segment);
+	}
+	return parts.join("");
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────
 
 /**
@@ -467,28 +521,35 @@ function scopesOf(code: string, map: Record<string, unknown>): ScopesResult {
 	});
 
 	functions.sort((a, b) => a.start - b.start || b.end - a.end);
-	const names: string[] = [];
-	const nameIndex = new Map<string, number>();
-	const scopes: ScopeEntry[] = functions.map((fn) => {
+	// Name indexes continue the map's own `names`, which already hold most
+	// original names; only the others are stored in `extraNames`.
+	const mapNames = Array.isArray(map.names) ? map.names : [];
+	const nameIndex = new Map<string | null, number>();
+	mapNames.forEach((name, index) => {
+		if (typeof name === "string" && !nameIndex.has(name)) nameIndex.set(name, index);
+	});
+	const extraNames: Array<string | null> = [];
+	const indexOf = (name: string | null): number => {
+		let index = nameIndex.get(name);
+		if (index === undefined) {
+			index = mapNames.length + extraNames.push(name) - 1;
+			nameIndex.set(name, index);
+		}
+		return index;
+	};
+	const entries: ScopeEntry[] = functions.map((fn) => {
 		let name = fn.own ? resolver.resolve(fn.own) : null;
 		if (name === null && fn.recoverAt !== null) name = resolver.recover(fn.recoverAt);
 		for (const token of fn.context) {
 			if (name !== null) break;
 			name = resolver.resolve(token);
 		}
-		let index: number;
-		if (name !== null) {
-			index = nameIndex.get(name) ?? -1;
-			if (index < 0) {
-				index = names.push(name) - 1;
-				nameIndex.set(name, index);
-			}
-		} else {
-			index = fn.own || fn.context.length > 0 ? UNKNOWN_SCOPE_NAME : ANONYMOUS_SCOPE;
-		}
+		// A named function whose name could not be mapped back gets the
+		// `null` name; one with no name at all is anonymous (-1).
+		const index = name !== null ? indexOf(name) : fn.own || fn.context.length > 0 ? indexOf(null) : -1;
 		const [startLine, startColumn] = positionOf(starts, fn.start);
 		const [endLine, endColumn] = positionOf(starts, fn.end);
 		return [startLine, startColumn, endLine, endColumn, index];
 	});
-	return { scopes: { version: SCOPES_VERSION, names, scopes } };
+	return { scopes: { version: SCOPES_VERSION, names: extraNames, scopes: encodeScopes(entries) } };
 }

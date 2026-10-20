@@ -1,13 +1,23 @@
 import { createHash } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { gzip as gzipCallback } from "node:zlib";
 import { normalizeDebugId, readDebugIdComment } from "./debug-id.js";
 import { findBundles, stripSourceMappingUrl, type BundleWithMap } from "./files.js";
 import { resolveRelease } from "./release.js";
 import { computeScopes, SCOPES_KEY } from "./scopes.js";
 
 export const DEFAULT_ENDPOINT = "https://otlp.autter.dev";
-/** The ingester's `/v1/sourcemaps` body limit. */
-export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+/** Largest map the ingester stores: characters of JSON without
+ * `sourcesContent` (otlp-ingester's SOURCE_MAP_MAX_CHARS). */
+export const MAX_MAP_CHARS = 32 * 1024 * 1024;
+/** The ingester's `/v1/sourcemaps` body limit, counted after the gzip body
+ * is inflated: the map plus room for the rest of the request. */
+export const MAX_UPLOAD_BYTES = MAX_MAP_CHARS + 1024 * 1024;
+/** What ingester 1.6.0 and older accept (the CLI can't tell which it talks to). */
+const LEGACY_MAX_BYTES = 5 * 1024 * 1024;
+
+const gzip = promisify(gzipCallback);
 const CHECK_BATCH = 500;
 const MAX_ATTEMPTS = 3;
 
@@ -85,7 +95,20 @@ export function storedMapJson(map: Record<string, unknown>): string {
 
 interface Prepared extends UploadItem {
 	bundle: BundleWithMap;
-	body: string;
+	/** The gzipped request body (empty in a dry run). */
+	body: Uint8Array<ArrayBuffer>;
+	/** Characters of the stored map JSON. */
+	mapChars: number;
+}
+
+/** A Buffer as the plain Uint8Array `fetch` takes (no copy). */
+function bytesOf(buffer: Buffer): Uint8Array<ArrayBuffer> {
+	return new Uint8Array(buffer.buffer as ArrayBuffer, buffer.byteOffset, buffer.byteLength);
+}
+
+/** Fits the ingester's limits: the stored map and the inflated body. */
+function fits(json: string, body: string): boolean {
+	return json.length <= MAX_MAP_CHARS && Buffer.byteLength(body) <= MAX_UPLOAD_BYTES;
 }
 
 /** The `/v1/sourcemaps` request body for one map. */
@@ -102,6 +125,7 @@ async function prepare(
 	urlPrefix: string | undefined,
 	release: string,
 	log: (line: string) => void,
+	compress: boolean,
 ): Promise<Prepared | { error: string }> {
 	let map: Record<string, unknown>;
 	try {
@@ -123,9 +147,9 @@ async function prepare(
 	let json = storedMapJson(plain);
 	if ("scopes" in scopes) {
 		const scoped = storedMapJson({ ...plain, [SCOPES_KEY]: scopes.scopes });
-		if (Buffer.byteLength(uploadBody(release, filename, debugId, scoped)) <= MAX_UPLOAD_BYTES) json = scoped;
-		else if (Buffer.byteLength(uploadBody(release, filename, debugId, json)) <= MAX_UPLOAD_BYTES) {
-			log(`warning: ${bundle.path}: its map is over 5 MB with function scopes, so it is uploaded without them (frames keep call-site names)`);
+		if (fits(scoped, uploadBody(release, filename, debugId, scoped))) json = scoped;
+		else if (fits(json, uploadBody(release, filename, debugId, json))) {
+			log(`warning: ${bundle.path}: its map is over 32 MB with function scopes, so it is uploaded without them (frames keep call-site names)`);
 		}
 	} else {
 		log(`warning: ${bundle.path}: no function scopes (${scopes.error}); its map is uploaded without them (frames keep call-site names)`);
@@ -133,12 +157,15 @@ async function prepare(
 	const body = uploadBody(release, filename, debugId, json);
 	return {
 		bundle,
-		body,
+		// Maps are text that compresses several times over; the ingester
+		// inflates the body (Content-Encoding: gzip).
+		body: compress && fits(json, body) ? bytesOf(await gzip(body)) : new Uint8Array(0),
 		path: bundle.path,
 		filename,
 		debugId,
 		hash: createHash("sha256").update(json).digest("hex"),
 		bytes: Buffer.byteLength(body),
+		mapChars: json.length,
 	};
 }
 
@@ -162,14 +189,14 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 
 	const items: Prepared[] = [];
 	for (const bundle of await findBundles(dir, options.files)) {
-		const prepared = await prepare(bundle, options.urlPrefix, release, log);
+		const prepared = await prepare(bundle, options.urlPrefix, release, log, !options.dryRun);
 		if ("error" in prepared) {
 			summary.failed.push({ path: bundle.path, filename: servedFilename(options.urlPrefix, bundle.path), error: prepared.error });
-		} else if (prepared.bytes > MAX_UPLOAD_BYTES) {
+		} else if (prepared.mapChars > MAX_MAP_CHARS || prepared.bytes > MAX_UPLOAD_BYTES) {
 			summary.failed.push({
 				path: prepared.path,
 				filename: prepared.filename,
-				error: `map is ${(prepared.bytes / 1048576).toFixed(1)} MB without sourcesContent; the ingester accepts up to 5 MB`,
+				error: `map is ${(prepared.mapChars / 1048576).toFixed(1)} MB without sourcesContent; the ingester accepts up to 32 MB`,
 			});
 		} else {
 			items.push(prepared);
@@ -187,6 +214,7 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 		throw new FatalUploadError("AUTTER_RUNTIME_KEY is a publishable client key (autter_rtc_…); uploads need a server key (autter_rt_…)");
 	}
 	const headers = { "content-type": "application/json", authorization: `Bearer ${key}` };
+	const uploadHeaders = { ...headers, "content-encoding": "gzip" };
 
 	// Skip maps the ingester already has (same release, path, debug id and
 	// content). Older ingesters have no check route: upload everything.
@@ -233,7 +261,7 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 			let status = 0;
 			let detail = "";
 			try {
-				const res = await doFetch(`${endpoint}/v1/sourcemaps`, { method: "POST", headers, body: item.body });
+				const res = await doFetch(`${endpoint}/v1/sourcemaps`, { method: "POST", headers: uploadHeaders, body: item.body });
 				status = res.status;
 				if (res.ok) {
 					uploaded.push(item);
@@ -249,7 +277,11 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 			}
 			const retryable = status === 0 || status === 429 || status >= 500;
 			if (!retryable || attempt >= MAX_ATTEMPTS) {
-				summary.failed.push({ path: item.path, filename: item.filename, error: status ? `HTTP ${status}: ${detail}` : detail });
+				let error = status ? `HTTP ${status}: ${detail}` : detail;
+				if (status === 413 && item.bytes > LEGACY_MAX_BYTES) {
+					error += ` (this map is ${(item.bytes / 1048576).toFixed(1)} MB; ingester 1.6.0 and older accept up to 5 MB, newer ones 32 MB)`;
+				}
+				summary.failed.push({ path: item.path, filename: item.filename, error });
 				return;
 			}
 			await sleep(500 * 2 ** (attempt - 1));

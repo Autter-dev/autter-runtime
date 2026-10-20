@@ -225,9 +225,10 @@ function's original name (`null` when anonymous or in top-level code).
 Without scopes, names come from the map's `names` (the name mapped at the
 caller's position); a resolved frame without one keeps its parsed name unless
 that is an obviously mangled one. See `docs/SOURCE-MAPS.md`.
-Parsed maps (and their scope tables) are cached per (org, repository,
-release, file) in an LRU bounded by `SOURCE_MAP_CACHE_MB`; misses are
-remembered for 5 minutes. A failed lookup or a bad map leaves the frames as
+Parsed maps (compactly decoded mappings and scope tables) are cached per
+(org, repository, release, file) in an LRU bounded by `SOURCE_MAP_CACHE_MB`;
+a map that would take more than half of it is used without being kept;
+misses are remembered for 5 minutes. A failed lookup or a bad map leaves the frames as
 parsed — it never fails ingest.
 
 The two legacy schemes; `fingerprint_scheme` records which one produced a row.

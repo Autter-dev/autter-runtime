@@ -6,17 +6,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
 import { build } from "esbuild";
-import {
-	ANONYMOUS_SCOPE,
-	computeScopes,
-	injectDir,
-	SCOPES_KEY,
-	UNKNOWN_SCOPE_NAME,
-	uploadDir,
-} from "../dist/index.js";
+import { computeScopes, injectDir, MAX_MAP_CHARS, SCOPES_KEY, uploadDir } from "../dist/index.js";
 import { framesV3Fingerprint } from "../../otlp-ingester/dist/fingerprint-v3.js";
+import { ScopeIndex } from "../../otlp-ingester/dist/source-map-scopes.js";
 import { parseStackFrames } from "../../otlp-ingester/dist/stack-frames.js";
-import { Symbolicator } from "../../otlp-ingester/dist/symbolicate.js";
+import { SourceMapCache, Symbolicator } from "../../otlp-ingester/dist/symbolicate.js";
 import { read, readJson, SERVER_KEY, SIMPLE_MAP, startIngester, tempDir } from "./helpers.mjs";
 
 const quiet = { log: () => {} };
@@ -38,29 +32,24 @@ async function bundle(files, { entry = "src/main.js", format = "esm", outfile = 
 	return { root: dir, dir: join(dir, "dist"), js: outfile, map: `${outfile}.map` };
 }
 
-/** The scope entry innermost around a 0-based (line, column). */
-function scopeAt(result, line, column) {
-	let best = null;
-	for (const entry of result.scopes) {
-		const [sl, sc, el, ec] = entry;
-		const afterStart = line > sl || (line === sl && column >= sc);
-		const beforeEnd = line < el || (line === el && column < ec);
-		if (afterStart && beforeEnd && (!best || sl > best[0] || (sl === best[0] && sc >= best[1]))) best = entry;
-	}
-	return best;
-}
-
-/** Name of the function around `marker` in `code`: a string, null (anonymous), or "<unknown>". */
-function nameAround(code, result, marker) {
+/**
+ * Name of the function around `marker` in `code`, as the ingester reads the
+ * scopes (its own decoder, so the CLI's encoding is checked against it): a
+ * string, null (anonymous or top-level), or "<unknown>".
+ */
+function nameAround(code, scopes, map, marker) {
+	const index = ScopeIndex.from(scopes, map.names ?? []);
+	assert.ok(index, "the ingester accepts the scopes");
 	const offset = code.indexOf(marker);
 	assert.ok(offset >= 0, `marker ${marker} is in the bundle`);
 	const before = code.slice(0, offset).split("\n");
-	const entry = scopeAt(result, before.length - 1, before.at(-1).length);
-	if (!entry) return "<top-level>";
-	if (entry[4] === ANONYMOUS_SCOPE) return null;
-	if (entry[4] === UNKNOWN_SCOPE_NAME) return "<unknown>";
-	return result.names[entry[4]];
+	const found = index.nameAt(before.length - 1, before.at(-1).length);
+	return found.kind === "named" ? found.name : found.kind === "unknown" ? "<unknown>" : null;
 }
+
+/** Every marker's name. */
+const namesAround = (code, scopes, map) =>
+	Object.fromEntries(Object.keys(EXPECTED).map((marker) => [marker, nameAround(code, scopes, map, marker)]));
 
 // Each function holds a marker string, which survives minification.
 const CONSTRUCTS = {
@@ -150,7 +139,7 @@ const EXPECTED = {
 	"@anonymous-callback": null,
 	"@nested-arrow": "inner",
 	"@after-nested": "outer",
-	"@top-level": "<top-level>",
+	"@top-level": null,
 };
 
 test("every kind of function maps to its original name through a minified esbuild bundle", async () => {
@@ -160,16 +149,16 @@ test("every kind of function maps to its original name through a minified esbuil
 	assert.ok(!code.includes("function computeTotal") && !code.includes("\n  "), "the bundle is minified");
 	const result = computeScopes(code, map);
 	assert.ok("scopes" in result, result.error);
-	const actual = Object.fromEntries(Object.keys(EXPECTED).map((marker) => [marker, nameAround(code, result.scopes, marker)]));
-	assert.deepEqual(actual, EXPECTED);
-	// Compact: sorted by start, names stored once.
+	assert.deepEqual(namesAround(code, result.scopes, map), EXPECTED);
+	// Compact: a VLQ string, and only names the map's own `names` lacks
+	// (computeTotal, formatPrice, Cart… are there already), each once.
 	const { scopes, names } = result.scopes;
+	assert.match(scopes, /^[A-Za-z0-9+/,;]+$/);
 	assert.equal(new Set(names).size, names.length);
-	for (let i = 1; i < scopes.length; i++) {
-		const [a, b] = [scopes[i - 1], scopes[i]];
-		assert.ok(a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]), "sorted by start");
-	}
-	assert.ok(scopes.every((entry) => entry.length === 5 && entry.every(Number.isInteger)));
+	assert.ok(names.every((name) => !map.names.includes(name)));
+	assert.ok(names.includes("captured") && names.includes("onPayClick") && !names.includes("computeTotal"));
+	assert.equal(ScopeIndex.from(result.scopes, map.names).size, 18);
+	assert.ok(scopes.length < 18 * 10, scopes);
 });
 
 test("without `names`, minified names are read from sourcesContent; without either they are unknown", async () => {
@@ -177,13 +166,10 @@ test("without `names`, minified names are read from sourcesContent; without eith
 	const code = read(out.dir, out.js);
 	const { names: _names, ...noNames } = readJson(out.dir, out.map);
 	const fromSources = computeScopes(code, noNames);
-	assert.deepEqual(
-		Object.fromEntries(Object.keys(EXPECTED).map((marker) => [marker, nameAround(code, fromSources.scopes, marker)])),
-		EXPECTED,
-	);
+	assert.deepEqual(namesAround(code, fromSources.scopes, noNames), EXPECTED);
 	const { sourcesContent: _content, ...bare } = noNames;
 	const blind = computeScopes(code, bare);
-	const names = Object.fromEntries(Object.keys(EXPECTED).map((marker) => [marker, nameAround(code, blind.scopes, marker)]));
+	const names = namesAround(code, blind.scopes, bare);
 	// Keys and properties are never minified; mangled bindings are unknown
 	// (the ingester keeps their call-site names), not guessed.
 	assert.equal(names["@object-method"], "captured");
@@ -196,21 +182,24 @@ test("without `names`, minified names are read from sourcesContent; without eith
 });
 
 test("scopes parse scripts, shebangs and the injected debug-id line; positions are those of the final file", async () => {
+	// Line 1, columns 15 to 34, named "named" (index 0 of the extra names).
 	const script = computeScopes("#!/usr/bin/env node\nwith (x) { y = function named() {}; }\n", { version: 3, sources: [], names: [], mappings: "" });
-	assert.deepEqual(script, { scopes: { version: 1, names: ["named"], scopes: [[1, 15, 1, 34, 0]] } });
+	assert.deepEqual(script, { scopes: { version: 1, names: ["named"], scopes: ";eAmBA" } });
 
 	const out = await bundle(CONSTRUCTS);
-	const before = computeScopes(read(out.dir, out.js), readJson(out.dir, out.map)).scopes;
+	const beforeCode = read(out.dir, out.js);
+	const beforeMap = readJson(out.dir, out.map);
+	const before = computeScopes(beforeCode, beforeMap).scopes;
 	await injectDir(out.dir);
 	const code = read(out.dir, out.js);
-	const after = computeScopes(code, readJson(out.dir, out.map)).scopes;
-	// The snippet is an anonymous function on line 0; everything else moved
-	// down one line and kept its name.
-	assert.deepEqual(after.scopes[0], [0, ";!".length, 0, code.indexOf("}();") + 1, ANONYMOUS_SCOPE]);
-	assert.deepEqual(
-		after.scopes.slice(1).map(([sl, sc, el, ec, n]) => [sl - 1, sc, el - 1, ec, after.names[n] ?? n]),
-		before.scopes.map(([sl, sc, el, ec, n]) => [sl, sc, el, ec, before.names[n] ?? n]),
-	);
+	const map = readJson(out.dir, out.map);
+	const after = computeScopes(code, map).scopes;
+	// Everything moved down one line (the snippet's) and kept its name; the
+	// snippet is an anonymous function of its own.
+	assert.ok(code.startsWith(";!function(){") && !beforeCode.startsWith(";!"));
+	assert.deepEqual(namesAround(code, after, map), EXPECTED);
+	assert.equal(ScopeIndex.from(after, map.names).size, ScopeIndex.from(before, beforeMap.names).size + 1);
+	assert.equal(ScopeIndex.from(after, map.names).nameAt(0, code.indexOf("try")).kind, "anonymous");
 });
 
 test("a bundle that does not parse is uploaded without scopes, with a warning", async (t) => {
@@ -224,28 +213,30 @@ test("a bundle that does not parse is uploaded without scopes, with a warning", 
 	assert.match(warnings.join("\n"), /broken\.js: no function scopes \(could not parse the bundle: Unexpected token/);
 	const stored = Object.fromEntries(ingester.rows.map((row) => [row.filename, JSON.parse(row.map)]));
 	assert.equal(SCOPES_KEY in stored["/broken.js"], false);
-	assert.deepEqual(stored["/ok.js"][SCOPES_KEY], { version: 1, names: ["okay"], scopes: [[0, 0, 0, 18, 0]] });
+	assert.deepEqual(stored["/ok.js"][SCOPES_KEY], { version: 1, names: ["okay"], scopes: "AAkBA" });
 });
 
 test("scopes already in a map are replaced by the ones computed from the served file", async (t) => {
 	const ingester = await startIngester();
 	t.after(ingester.close);
-	const stale = { version: 1, names: ["stale"], scopes: [[0, 0, 0, 99, 0]] };
+	const stale = { version: 1, names: ["stale"], scopes: "AAmGA" };
 	const dir = tempDir({ "a.js": "x()\n", "a.js.map": { ...SIMPLE_MAP, [SCOPES_KEY]: stale } });
 	await uploadDir(dir, { ...quiet, release: "r1", endpoint: ingester.url, key: SERVER_KEY });
-	assert.deepEqual(JSON.parse(ingester.rows[0].map)[SCOPES_KEY], { version: 1, names: [], scopes: [] });
+	assert.deepEqual(JSON.parse(ingester.rows[0].map)[SCOPES_KEY], { version: 1, names: [], scopes: "" });
 });
 
-test("a map that only fits the 5 MB limit without scopes is uploaded without them", async (t) => {
+test("a map that only fits the 32 MB limit without scopes is uploaded without them", async (t) => {
 	const ingester = await startIngester();
 	t.after(ingester.close);
 	const functions = Array.from({ length: 2000 }, (_, i) => `function handler${i}() {}`).join("\n");
-	const padding = 5 * 1024 * 1024 - 40_000;
+	const { sourcesContent: _content, ...stored } = SIMPLE_MAP;
+	// 1000 characters short of the limit without scopes; 2000 scopes don't fit.
+	const padding = MAX_MAP_CHARS - JSON.stringify({ ...stored, names: [""] }).length - 1000;
 	const dir = tempDir({ "big.js": `${functions}\n`, "big.js.map": { ...SIMPLE_MAP, names: ["n".repeat(padding)] } });
 	const warnings = [];
 	const summary = await uploadDir(dir, { release: "r1", endpoint: ingester.url, key: SERVER_KEY, log: (line) => warnings.push(line) });
 	assert.equal(summary.uploaded.length, 1);
-	assert.match(warnings.join("\n"), /big\.js: its map is over 5 MB with function scopes, so it is uploaded without them/);
+	assert.match(warnings.join("\n"), /big\.js: its map is over 32 MB with function scopes, so it is uploaded without them/);
 	assert.equal(SCOPES_KEY in JSON.parse(ingester.rows[0].map), false);
 });
 
@@ -403,4 +394,53 @@ test("end to end: minified bundle, inject, upload, real V8 stacks — frames are
 			.map(([key, { before: b, after: a }]) => `${key}: ${JSON.stringify(names(b))} -> ${JSON.stringify(names(a))}`)
 			.join("; "),
 	);
+});
+
+test("end to end: a vendor-sized map over 5 MB uploads gzipped and symbolicates, cached or not", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	// 60 000 handlers called through `const fn = handlers[i]`: ~5 MB of
+	// minified code with a ~6.6 MB map.
+	const count = 60_000;
+	const source =
+		Array.from({ length: count }, (_, i) => `function handler${i}(value) {\n  if (value === ${i}) throw new Error("handler failed");\n  return value + ${i};\n}`).join("\n") +
+		`\nexport const handlers = [${Array.from({ length: count }, (_, i) => `handler${i}`).join(", ")}];\n` +
+		"export function call(i) {\n  const fn = handlers[i];\n  return fn(i);\n}\n";
+	const out = await bundle({ "src/main.js": source }, { format: "iife", globalName: "app", outfile: "assets/vendor-5f3a9c1e.js" });
+	await injectDir(out.dir);
+	const summary = await uploadDir(out.dir, { ...quiet, release: SCOPE.release, endpoint: ingester.url, key: SERVER_KEY });
+	assert.deepEqual(summary.failed, []);
+	const [row] = ingester.rows;
+	assert.ok(row.map.length > 5 * 1024 * 1024, `stored map is ${row.map.length} characters`);
+	const [request] = ingester.uploads();
+	assert.equal(request.encoding, "gzip");
+	assert.ok(request.bytes < row.map.length / 3, `${request.bytes} bytes on the wire`);
+
+	const context = vm.createContext({});
+	const url = "https://app.example.com/assets/vendor-5f3a9c1e.js";
+	vm.runInContext(read(out.dir, out.js), context, { filename: url });
+	let stack = "";
+	try {
+		vm.runInContext("app.call(54321)", context, { filename: "https://app.example.com/index.html" });
+	} catch (err) {
+		stack = err.stack;
+	}
+	const resolve = async (cache) => {
+		const symbolicator = new Symbolicator(async (key) => (key.filename === "/assets/vendor-5f3a9c1e.js" ? row.map : null), cache);
+		const frames = await symbolicator.symbolicate(parseStackFrames(stack), SCOPE);
+		return frames.filter((frame) => frame.resolved).map((frame) => `${frame.function} ${frame.filename.split("/").pop()}:${frame.lineno}`);
+	};
+	// handler54321 throws on line 54321 × 4 + 2; `return fn(i)` is line 240 004.
+	const expected = ["handler54321 main.js:217286", "call main.js:240004"];
+	// Default 64 MiB cache: decoded and kept (~20 MB).
+	const cached = new SourceMapCache();
+	assert.deepEqual(await resolve(cached), expected);
+	assert.equal(cached.bypassed, 0);
+	assert.ok(cached.bytes > 5 * 1024 * 1024 && cached.bytes < 4 * row.map.length, `${cached.bytes} bytes cached`);
+	// A cache too small to keep it: read in one pass, same frames, not kept.
+	// (The test runner's own .mjs frames are remembered as misses, at 0 bytes.)
+	const small = new SourceMapCache({ maxBytes: 4 * 1024 * 1024 });
+	assert.deepEqual(await resolve(small), expected);
+	assert.equal(small.bypassed, 1);
+	assert.equal(small.bytes, 0);
 });

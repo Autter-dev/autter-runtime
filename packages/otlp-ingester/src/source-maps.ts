@@ -1,8 +1,18 @@
 import { createHash } from "node:crypto";
 import { scrubText } from "./redact.js";
 
-/** Largest stored map (after `sourcesContent` is removed), in characters. */
-export const SOURCE_MAP_MAX_CHARS = 5 * 1024 * 1024;
+/**
+ * Largest stored map (after `sourcesContent` is removed), in characters:
+ * 32 MiB, room for vendor chunks of about 20 MB of minified code. Storage
+ * is a ZSTD-compressed String column, so size only costs disk; a map this
+ * big is still symbolicated, without being kept in the parse cache unless
+ * SOURCE_MAP_CACHE_MB allows it (symbolicate.ts). Was 5 MiB up to 1.6.0.
+ */
+export const SOURCE_MAP_MAX_CHARS = 32 * 1024 * 1024;
+
+/** `/v1/sourcemaps` body limit, counted after a gzip or deflate body is
+ * inflated: the largest map plus room for the rest of the request. */
+export const SOURCE_MAP_MAX_BODY_BYTES = SOURCE_MAP_MAX_CHARS + 1024 * 1024;
 
 /** Bundles a map can be uploaded for: `.js`, `.mjs` and `.cjs` (1.6.0+). */
 const BUNDLE_PATH_RE = /\.[cm]?js$/;

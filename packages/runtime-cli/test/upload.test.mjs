@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
 	FatalUploadError,
 	injectDir,
+	MAX_MAP_CHARS,
 	resolveEndpoint,
 	resolveRelease,
 	servedFilename,
@@ -112,7 +113,7 @@ test("maps over the ingester's limit and invalid maps are reported as failures",
 	t.after(ingester.close);
 	const dir = tempDir({
 		"big.js": "x\n",
-		"big.js.map": { ...SIMPLE_MAP, names: ["n".repeat(5 * 1024 * 1024)] },
+		"big.js.map": { ...SIMPLE_MAP, names: ["n".repeat(MAX_MAP_CHARS)] },
 		"bad.js": "y\n",
 		"bad.js.map": { version: 2 },
 		"ok.js": "z\n",
@@ -121,7 +122,31 @@ test("maps over the ingester's limit and invalid maps are reported as failures",
 	const summary = await uploadDir(dir, { ...quiet, release: "abc123", endpoint: ingester.url, key: SERVER_KEY });
 	assert.deepEqual(summary.uploaded.map((u) => u.path), ["ok.js"]);
 	assert.deepEqual(summary.failed.map((f) => f.path).sort(), ["bad.js", "big.js"]);
-	assert.match(summary.failed.find((f) => f.path === "big.js").error, /5 MB/);
+	assert.match(summary.failed.find((f) => f.path === "big.js").error, /32\.0 MB without sourcesContent; the ingester accepts up to 32 MB/);
+	assert.equal(ingester.uploads().length, 1, "only ok.js is sent");
+});
+
+test("uploads are gzipped, and the real ingester route inflates them", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const names = Array.from({ length: 3000 }, (_, i) => `originalName${i}`);
+	const dir = tempDir({ "app.js": "x()\n", "app.js.map": { ...SIMPLE_MAP, names } });
+	const summary = await uploadDir(dir, { ...quiet, release: "abc123", endpoint: ingester.url, key: SERVER_KEY });
+	assert.deepEqual(summary.failed, []);
+	const [request] = ingester.uploads();
+	assert.equal(request.encoding, "gzip");
+	assert.ok(request.bytes > 0 && request.bytes < summary.uploaded[0].bytes / 3, `${request.bytes} gzipped of ${summary.uploaded[0].bytes}`);
+	assert.deepEqual(JSON.parse(ingester.rows[0].map).names, names);
+	assert.equal(summary.uploaded[0].hash, ingester.rows[0].contentHash);
+});
+
+test("an ingester that refuses a big map (1.6.0 and older take 5 MB) gets a clear error", async (t) => {
+	const ingester = await startIngester({ rejectUploads: 413 });
+	t.after(ingester.close);
+	const dir = tempDir({ "big.js": "x\n", "big.js.map": { ...SIMPLE_MAP, names: ["n".repeat(6 * 1024 * 1024)] } });
+	const summary = await uploadDir(dir, { ...quiet, release: "abc123", endpoint: ingester.url, key: SERVER_KEY });
+	assert.equal(ingester.uploads().length, 1, "a 413 is not retried");
+	assert.match(summary.failed[0].error, /^HTTP 413: .*this map is 6\.0 MB; ingester 1\.6\.0 and older accept up to 5 MB, newer ones 32 MB/);
 });
 
 test("--delete-after-upload removes uploaded maps and their sourceMappingURL comments", async (t) => {

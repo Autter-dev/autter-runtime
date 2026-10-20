@@ -74,9 +74,9 @@ autter-runtime sourcemaps upload <dir> [--release <r>] [--url-prefix <prefix>]
   `globalThis._autterDebugIds[new Error().stack] = "<id>"`, and `"debugId"` in
   the `.map`, for each `.js`/`.mjs`/`.cjs` with a map. The id is derived from
   sha256 of the bundle bytes; running it again changes nothing.
-- **upload** posts each map (without `sourcesContent`) to
-  `<endpoint>/v1/sourcemaps`, in parallel, skipping maps the ingester already
-  has. Each map carries the bundle's function scopes (`x_autter_scopes`),
+- **upload** posts each map (without `sourcesContent`, gzipped, up to 32 MB)
+  to `<endpoint>/v1/sourcemaps`, in parallel, skipping maps the ingester
+  already has. Each map carries the bundle's function scopes (`x_autter_scopes`),
   parsed from the file as served, so frames are named after the function they
   are in rather than their call site; a bundle that does not parse is uploaded
   without them, with a warning. Release: `--release`, else `GITHUB_SHA`,

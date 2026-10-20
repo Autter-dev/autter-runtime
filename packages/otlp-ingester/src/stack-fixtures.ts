@@ -12,8 +12,10 @@
  *     parsing, Go/Rust frames were dropped and these collided into one issue).
  *   - `redeploy` — the primary defect after a rebuild that shifted every line
  *     number (and, for Go, pointer offsets/addresses/goroutine ids). It must
- *     fingerprint IDENTICALLY to `primary`, proving grouping is stable across
- *     re-deploys and repeated ingestion.
+ *     fingerprint IDENTICALLY to `primary` under frames-v3, proving grouping
+ *     is stable across re-deploys and repeated ingestion — and under the
+ *     legacy message-v1 too, except where `legacyKeepsLineNumbers` says the
+ *     frozen legacy normaliser hashes line numbers (Python).
  */
 
 export interface StackFixture {
@@ -22,6 +24,12 @@ export interface StackFixture {
 	redeploy: string;
 	/** Golden normalised top frames for `primary` (locks the parser output). */
 	primaryFrames: string[];
+	/**
+	 * message-v1 keeps this language's line numbers (Python `File "…", line
+	 * N` lines are hashed verbatim, and must stay so for existing issues), so
+	 * only frames-v3 survives `redeploy`.
+	 */
+	legacyKeepsLineNumbers?: boolean;
 }
 
 // ── Go ──────────────────────────────────────────────────────────────────────
@@ -185,6 +193,14 @@ const PYTHON_PRIMARY = `Traceback (most recent call last):
     raise ValueError(f"order {order_id} is invalid")
 ValueError: order 4821 is invalid`;
 
+// Same defect after a deploy that shifted both functions down the file.
+const PYTHON_REDEPLOY = `Traceback (most recent call last):
+  File "/app/web/handler.py", line 47, in handle
+    return self.service.process(order)
+  File "/app/orders/service.py", line 95, in process
+    raise ValueError(f"order {order_id} is invalid")
+ValueError: order 9113 is invalid`;
+
 const PYTHON_SIBLING = `Traceback (most recent call last):
   File "/app/web/handler.py", line 42, in handle
     return self.service.process(order)
@@ -254,10 +270,11 @@ export const STACK_FIXTURES: Record<string, StackFixture> = {
 	python: {
 		primary: PYTHON_PRIMARY,
 		sibling: PYTHON_SIBLING,
-		redeploy: PYTHON_PRIMARY,
+		redeploy: PYTHON_REDEPLOY,
 		primaryFrames: [
 			'File "/app/web/handler.py", line 42, in handle',
 			'File "/app/orders/service.py", line 88, in process',
 		],
+		legacyKeepsLineNumbers: true,
 	},
 };

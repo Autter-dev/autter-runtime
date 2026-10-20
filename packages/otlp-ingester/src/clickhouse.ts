@@ -9,6 +9,7 @@ import { profileTableDDL, type ProfileSample } from "./profiles.js";
 import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
 import { sourceMapTableDDL } from "./source-maps.js";
 import { attributesWithBreadcrumbs } from "./breadcrumbs.js";
+import { lookupSourceMap, type SourceMapKey } from "./source-maps-lookup.js";
 import {
 	logTableDDL,
 	requestRollupTableDDL,
@@ -23,6 +24,7 @@ import type { SchemaStatus } from "./compat.js";
 import {
 	MIGRATIONS,
 	OCCURRENCE_CODE_COLUMNS,
+	OCCURRENCE_GROUPING_COLUMNS,
 	OCCURRENCE_REQUEST_ID_INDEX,
 	migrationsTableDDL,
 	type Migration,
@@ -130,6 +132,7 @@ export class ClickHouseStore {
 				occurred_at        DateTime64(3, 'UTC'),
 				ingested_at        DateTime64(3, 'UTC') DEFAULT now64(3),
 				${OCCURRENCE_CODE_COLUMNS.join(",\n\t\t\t\t")},
+				${OCCURRENCE_GROUPING_COLUMNS.join(",\n\t\t\t\t")},
 				${OCCURRENCE_REQUEST_ID_INDEX}
 			)
 			ENGINE = MergeTree
@@ -427,6 +430,8 @@ export class ClickHouseStore {
 				expected: o.expected ? 1 : 0,
 				request_id: o.requestId ?? "",
 				fingerprint_scheme: o.fingerprintScheme,
+				frames: o.frames?.length ? JSON.stringify(o.frames) : "",
+				fingerprints: (o.fingerprints ?? []).map((candidate) => candidate.fingerprint),
 			})),
 		});
 	}
@@ -521,6 +526,13 @@ export class ClickHouseStore {
 			clickhouse_settings: INSERT_SETTINGS,
 			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, ...sourceMap }],
 		});
+	}
+
+	/** The uploaded source map for a minified file, or null (source-maps-lookup.ts). */
+	async lookupSourceMap(key: SourceMapKey): Promise<string | null> {
+		if (!this.configured) return null;
+		await this.ensureSchema();
+		return lookupSourceMap(this.getClient(), this.config.clickhouseDatabase, key);
 	}
 
 	async insertLlmCalls(

@@ -415,7 +415,11 @@ export class SinkForwarder {
  * requestId, traceId, route, method, statusCode, fingerprintScheme. The
  * request-context four were previously spread as `null` when unknown and
  * are now simply left out, matching the documented optional-string shape.
- * Older consumers ignore unknown keys, so the version stays 1.
+ * 1.6.0 adds `frames` (innermost first, ≤ 50), `fingerprints` (every
+ * identity candidate, highest precedence first, ending with the legacy
+ * `fingerprint`) and `fingerprintRecord`; `fingerprint`/`fingerprintScheme`
+ * keep their legacy meaning. Older consumers ignore unknown keys, so the
+ * version stays 1.
  */
 export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 	const {
@@ -430,6 +434,11 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		expected,
 		requestId,
 		breadcrumbs,
+		frames,
+		fingerprints,
+		fingerprintRecord,
+		// Input-only: locates source maps, never leaves the ingester.
+		debugIds: _debugIds,
 		...rest
 	} = o;
 	return {
@@ -447,6 +456,9 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		...(requestId ? { requestId } : {}),
 		// 1.6.0: steps before the error, oldest first, ≤ 30.
 		...(breadcrumbs?.length ? { breadcrumbs } : {}),
+		...(frames?.length ? { frames } : {}),
+		...(fingerprints?.length ? { fingerprints } : {}),
+		...(fingerprintRecord ? { fingerprintRecord } : {}),
 	};
 }
 

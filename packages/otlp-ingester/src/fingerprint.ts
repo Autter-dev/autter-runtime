@@ -81,7 +81,7 @@ const FRAME_LOCATION_RE = /:\d+(:\d+)?\)?$/;
  * their historical normalisation byte-for-byte (parseScriptFrames) so existing
  * issues never regroup.
  */
-type StackLanguage = "go" | "rust" | "jvm" | "dotnet" | "script";
+export type StackLanguage = "go" | "rust" | "jvm" | "dotnet" | "script";
 
 // A Go location line: "\t<file>.go:<line> +0x<off>" (offset optional).
 const GO_LOCATION_RE = /^\s*(.+\.go):\d+(?:\s+\+0x[0-9a-f]+)?\s*$/;
@@ -101,7 +101,7 @@ const RUST_AT_RS_RE = /^\s*at\s+\S+\.rs:\d+/;
  * Classify a whole stack by language. Signatures are chosen to be unique to
  * each runtime so a JS or Python stack always falls through to "script".
  */
-function detectStackLanguage(lines: string[]): StackLanguage {
+export function detectStackLanguage(lines: string[]): StackLanguage {
 	let hasDotnet = false;
 	let hasJvm = false;
 	let hasRust = false;

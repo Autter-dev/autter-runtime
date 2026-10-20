@@ -17,9 +17,11 @@ server app ──OTLP/HTTP──────────────────
 ```
 
 The ingester is **stateless**: auth key → `{orgId, repositoryId}` resolution,
-normalisation, fingerprinting, ClickHouse writes, optional forward. Anything
-stateful (issue lifecycle, incidents, correlation, symbolication) belongs to
-the consumer of the sink webhook (Autter cloud, or your own backend).
+normalisation, stack parsing and browser symbolication (against source maps
+uploaded to its own ClickHouse, cached in memory), fingerprinting, ClickHouse
+writes, optional forward. Anything stateful (issue lifecycle, which identity
+an issue is keyed by, incidents, correlation) belongs to the consumer of the
+sink webhook (Autter cloud, or your own backend).
 
 ## Tenancy & key scopes
 
@@ -149,6 +151,8 @@ stacks or routes in SQL:
 | `error_why` / `error_fix` / `error_link` | `autter.error.why` / `.fix` / `.link` (scrubbed; ≤1000 / ≤1000 / ≤500 chars, http(s) links only) | declared cause/remedy for triage and RCA |
 | `expected` (UInt8) | `autter.error.expected` | expected business failures — recorded, never paged |
 | `request_id` | `autter.request.id` (exception spans inherit it from their server span; browser failures read `x-request-id`) | join to the request summary; bloom index `idx_occ_request_id` |
+| `frames` | structured frames as JSON, innermost first, ≤ 50 (`''` when the stack had none); browser JS frames resolved through source maps (migration 0016) | stack view, RCA without re-symbolicating |
+| `fingerprints` (Array) | every identity candidate, highest precedence first: `manual-v1`, `code-v1`, `frames-v3`, `message-v1` (migration 0016) | find an issue's rows whatever scheme keys it: `(fingerprint = X OR has(fingerprints, X))` |
 
 Severity is deliberately **not** part of the fingerprint: the same defect
 reported as a warning in one code path and an error in another stays one
@@ -167,7 +171,60 @@ backend) should treat columns as additive-only within a major version.
 
 ## Fingerprinting
 
-Two schemes; `fingerprint_scheme` records which one produced a row.
+Every occurrence carries the **legacy** identity in `fingerprint` /
+`fingerprint_scheme` (`code-v1` or `message-v1`, unchanged byte-for-byte) and,
+from 1.6.0, **every** applicable identity in `fingerprints`, highest
+precedence first:
+
+| Scheme | When | Hash |
+| --- | --- | --- |
+| `manual-v1` | the SDK sent a fingerprint override | `sha256("manual-v1\0" + service + "\0" + values.join("\u0001"))` |
+| `code-v1` | a valid `autter.error.code` (then the list stops here — it is the legacy identity) | below |
+| `frames-v3` | every uncoded error | below |
+| `message-v1` | every uncoded error (legacy) | below |
+
+The consumer picks the issue: an explicit scheme (`manual-v1`, a platform
+grouping rule, `code-v1`) wins outright; among the auto schemes the first one
+that already has an issue wins, else a new issue is keyed by the highest one.
+Existing `message-v1` issues therefore never regroup, and new bugs group by
+`frames-v3`.
+
+**`frames-v3`** — structural, over the parsed (and, in the browser,
+symbolicated) frames, innermost first:
+
+1. Take the in-app frames in order (none → only the first frame), at most 5.
+2. Token per frame: `fn + "@" + file`. `fn` drops a leading `async `/`new `,
+   one leading `Object.`/`Module.`, maps `<anonymous>`/`anonymous` to `""`,
+   and drops unresolved names of ≤ 2 characters (minifier output). `file` is
+   the lowercased basename of the path (query/hash stripped) with every run
+   of 8+ alphanumerics that contains a digit or is all uppercase replaced by
+   `*` — `index-5f3a9c1e.js` → `index-*.js`.
+3. The normalised message is hashed only when no frame was picked.
+4. `sha256(["frames-v3", service, errorType, tokens.join("\u0001"), message].join("\0"))[:32]`.
+
+Line and column numbers, route, source (browser vs server) and release are
+never part of it: one bug stays one issue across deploys, chunk hashes,
+preview domains, pages and tiers. Shared vectors:
+`packages/otlp-ingester/src/fingerprint-v3-vectors.json` (and
+`stack-parse-vectors.json` for the parser).
+
+**In-app frames.** Not in-app: paths containing `node_modules/`,
+`/site-packages/`, `/dist-packages/`, `/vendor/` or `/.pnpm/`; `node:` and
+`internal/` paths; browser extension URLs; sources a source map lists in
+`ignoreList`/`x_google_ignoreList`; Go `runtime.` and `/usr/local/go/` frames;
+JVM `java.`/`javax.`/`kotlin.`/`jdk.` frames; .NET `System.`/`Microsoft.`
+frames. Everything else is in-app.
+
+**Symbolication at ingest.** Browser frames in `.js`/`.mjs`/`.cjs` files are
+resolved through the map uploaded for the event's release and the script's
+path (or its debug id) before fingerprinting. Function names come from the
+map's `names` (the name mapped at the caller's position); a resolved frame
+without one keeps its parsed name unless that is an obviously mangled one.
+Parsed maps are cached per (org, repository, release, file) in an LRU bounded
+by `SOURCE_MAP_CACHE_MB`; misses are remembered for 5 minutes. A failed lookup
+or a bad map leaves the frames as parsed — it never fails ingest.
+
+The two legacy schemes; `fingerprint_scheme` records which one produced a row.
 
 **`code-v1`** — when the occurrence carries a valid `autter.error.code`
 (`^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$`, ≤80 chars):
@@ -372,6 +429,15 @@ from browser events' `breadcrumbs` or the server exception event's
 `autter.breadcrumbs` attribute, are validated, bounded (500-character
 messages, 10 primitive data keys, 16 KB) and scrubbed, and are stored under
 `autter.breadcrumbs` in the occurrence's `attributes` JSON.
+
+1.6.0 additions, optional and omitted when empty: `frames` (structured
+frames, innermost first, ≤ 50: `function`, `module`, `filename`, `lineno`,
+`colno`, `inApp`, `resolved`, and context lines only when a map carried
+`sourcesContent`), `fingerprints` (`[{ scheme, fingerprint }]`, every
+candidate, highest precedence first, always ending with the legacy one) and
+`fingerprintRecord` (`{ scheme: "frames-v3", parts }`: what went into the
+frames-v3 fingerprint). `fingerprint` and `fingerprintScheme` keep their
+legacy meaning, so an older consumer groups exactly as before.
 
 Batches also carry `metrics` (1-minute usage rollup points) and `llmCalls`
 (per-call LLM usage — provider, model, tokens, `costUsd`, `costSource`,

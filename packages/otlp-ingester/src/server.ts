@@ -7,11 +7,10 @@ import { KeyResolver, RateLimiter } from "./auth.js";
 import { ClickHouseStore } from "./clickhouse.js";
 import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
-import {
-	deriveFields,
-	occurrenceFingerprint,
-	occurrenceIdFor,
-} from "./fingerprint.js";
+import { deriveFields, occurrenceIdFor } from "./fingerprint.js";
+import { occurrenceIdentity } from "./fingerprint-v3.js";
+import { parseStackFrames } from "./stack-frames.js";
+import { SourceMapCache, Symbolicator } from "./symbolicate.js";
 import {
 	logPromotionCandidates,
 	promotionLookups,
@@ -51,6 +50,7 @@ import type {
 	IngestContext,
 	RuntimeOccurrence,
 	RuntimeOccurrenceInput,
+	StackFrame,
 } from "./types.js";
 
 export interface IngesterApp {
@@ -70,6 +70,12 @@ const INGESTER_INFO_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	configureRedaction(config);
 	const store = new ClickHouseStore(config);
+	// Browser JS frames are resolved through uploaded source maps before they
+	// are fingerprinted (frames-v3), with parsed maps cached per release+file.
+	const symbolicator = new Symbolicator(
+		(key) => store.lookupSourceMap(key),
+		new SourceMapCache({ maxBytes: (config.sourceMapCacheMb ?? 64) * 1024 * 1024 }),
+	);
 	// Fingerprinted occurrences feed the consumer's issue grouping, metric
 	// points feed the request/error-rate rollups, LLM calls feed spend
 	// watching. Delivery is at-least-once with bounded retries — see sink.ts.
@@ -270,31 +276,71 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		return ctx;
 	}
 
+	/**
+	 * Structured frames for the frames-v3 identity and the platform's stack
+	 * view: parsed innermost-first, then — browser only, where bundles are
+	 * minified — resolved through the release's source maps. Symbolication
+	 * never fails ingest (it falls back to the parsed frames).
+	 */
+	async function framesFor(
+		ctx: IngestContext,
+		input: RuntimeOccurrenceInput,
+	): Promise<StackFrame[]> {
+		let frames: StackFrame[];
+		try {
+			frames = parseStackFrames(input.stack);
+		} catch (err) {
+			console.warn("stack parse failed — no frames:", err instanceof Error ? err.message : err);
+			return [];
+		}
+		if (input.source !== "browser" || frames.length === 0) return frames;
+		return symbolicator.symbolicate(frames, {
+			orgId: ctx.orgId,
+			repositoryId: ctx.repositoryId,
+			release: input.release,
+			debugIds: input.debugIds ?? null,
+		});
+	}
+
 	/** Ids are content-derived (occurrenceIdFor), NOT random: an exporter
 	 * that retries a batch — after a 503 from a partially-failed ClickHouse
 	 * write, or when only our 2xx got lost — must produce the same ids, so
 	 * the sink consumer's per-occurrence dedupe holds across transport
-	 * retries and duplicated ClickHouse rows stay identifiable. */
-	function fingerprintAll(
+	 * retries and duplicated ClickHouse rows stay identifiable.
+	 *
+	 * `fingerprint` / `fingerprintScheme` stay the legacy identity
+	 * (message-v1 or code-v1) byte-for-byte; `fingerprints` carries every
+	 * candidate (manual-v1, code-v1, frames-v3, message-v1) for the platform
+	 * to resolve the issue from. */
+	async function fingerprintAll(
 		ctx: IngestContext,
 		inputs: RuntimeOccurrenceInput[],
-	): RuntimeOccurrence[] {
-		return inputs.map((raw, index) => {
-			// Second line of defence, before fingerprinting, storage, and the
-			// sink (which feeds LLM fix generation): scrub secrets from the
-			// free-text fields old SDKs and third-party OTLP senders pass
-			// through verbatim. Attributes were already sanitised by the
-			// normalisers (sanitizeRuntimeContext).
-			const input = scrubOccurrence(raw);
-			const { fingerprint, scheme } = occurrenceFingerprint(input);
-			return {
-				...input,
-				occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
-				fingerprint,
-				fingerprintScheme: scheme,
-				...deriveFields(input),
-			};
-		});
+	): Promise<RuntimeOccurrence[]> {
+		return Promise.all(
+			inputs.map(async (raw, index) => {
+				// Second line of defence, before fingerprinting, storage, and the
+				// sink (which feeds LLM fix generation): scrub secrets from the
+				// free-text fields old SDKs and third-party OTLP senders pass
+				// through verbatim. Attributes were already sanitised by the
+				// normalisers (sanitizeRuntimeContext).
+				const input = scrubOccurrence(raw);
+				const frames = await framesFor(ctx, input);
+				const identity = occurrenceIdentity(input, frames);
+				const { fingerprint, scheme } = identity.legacy;
+				// Debug ids only locate source maps; they are not stored or forwarded.
+				const { debugIds: _debugIds, ...stored } = input;
+				return {
+					...stored,
+					occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
+					fingerprint,
+					fingerprintScheme: scheme,
+					...deriveFields(input),
+					...(frames.length > 0 ? { frames } : {}),
+					fingerprints: identity.candidates,
+					...(identity.record ? { fingerprintRecord: identity.record } : {}),
+				};
+			}),
+		);
 	}
 
 	/** Fingerprint log-promotion candidates and drop the ones whose trace
@@ -307,7 +353,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	): Promise<RuntimeOccurrence[]> {
 		const candidates = logPromotionCandidates(logs);
 		if (candidates.length === 0) return [];
-		const fingerprinted = fingerprintAll(ctx, candidates);
+		const fingerprinted = await fingerprintAll(ctx, candidates);
 		const seen = new Set<string>();
 		const ownIds = fingerprinted.map((o) => o.occurrenceId);
 		for (const lookup of promotionLookups(candidates)) {
@@ -413,7 +459,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}
 		const { occurrences, spans, metricPoints, llmCalls } =
 			normalizeTraces(request);
-		const fingerprinted = fingerprintAll(ctx, occurrences);
+		const fingerprinted = await fingerprintAll(ctx, occurrences);
 		// ClickHouse has no cross-table transaction, so these four inserts can
 		// partially commit. Recovery boundary: any failure → 503 → the exporter
 		// retries the whole batch. Deterministic occurrence ids make the retry
@@ -518,7 +564,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			return;
 		}
 		const { occurrences, metricPoints } = normalizeBrowserPayload(parsed.data);
-		const fingerprinted = fingerprintAll(ctx, occurrences);
+		const fingerprinted = await fingerprintAll(ctx, occurrences);
 		try {
 			await Promise.all([
 				store.insertOccurrences(ctx, fingerprinted),

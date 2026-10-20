@@ -1,0 +1,1160 @@
+[
+	{
+		"name": "js v8 resolved: symbolicated in-app frames",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "computeTotal",
+					"module": null,
+					"filename": "webpack://shop/./src/checkout/total.ts",
+					"lineno": 12,
+					"colno": 9,
+					"inApp": true,
+					"resolved": true
+				},
+				{
+					"function": "onSubmit",
+					"module": null,
+					"filename": "webpack://shop/./src/checkout/Checkout.tsx",
+					"lineno": 88,
+					"colno": 5,
+					"inApp": true,
+					"resolved": true
+				},
+				{
+					"function": "callCallback",
+					"module": null,
+					"filename": "webpack://shop/./node_modules/react-dom/cjs/react-dom.development.js",
+					"lineno": 4164,
+					"colno": 14,
+					"inApp": false,
+					"resolved": true
+				}
+			]
+		},
+		"fingerprint": "8bdf92b78f224531997892807993c03e",
+		"parts": [
+			"TypeError",
+			"computeTotal@total.ts",
+			"onSubmit@checkout.tsx"
+		]
+	},
+	{
+		"name": "js v8 minified unresolved: short names dropped, chunk hash templated",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "Xe",
+					"module": null,
+					"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+					"lineno": 1,
+					"colno": 23456,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "HTMLButtonElement.onClick",
+					"module": null,
+					"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+					"lineno": 1,
+					"colno": 9876,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "ce39b123cb99e02e44bf9bdf0aa4e24c",
+		"parts": [
+			"TypeError",
+			"@index-*.js",
+			"HTMLButtonElement.onClick@index-*.js"
+		]
+	},
+	{
+		"name": "js v8 minified after a redeploy: new chunk hash, new offsets, same fingerprint",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "Qt",
+					"module": null,
+					"filename": "https://preview-42.example.dev/assets/index-0b9d7e21.js",
+					"lineno": 1,
+					"colno": 30111,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "HTMLButtonElement.onClick",
+					"module": null,
+					"filename": "https://preview-42.example.dev/assets/index-0b9d7e21.js",
+					"lineno": 1,
+					"colno": 10002,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "ce39b123cb99e02e44bf9bdf0aa4e24c",
+		"parts": [
+			"TypeError",
+			"@index-*.js",
+			"HTMLButtonElement.onClick@index-*.js"
+		]
+	},
+	{
+		"name": "js query string and hash stripped from the file",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "render",
+					"module": null,
+					"filename": "https://cdn.example.com/js/app.js?v=12&cache=no#L3",
+					"lineno": 3,
+					"colno": 1,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "8e0b6b70842f4eda0f3bf1ee84501a8d",
+		"parts": [
+			"TypeError",
+			"render@app.js"
+		]
+	},
+	{
+		"name": "js firefox frames (fn@url) with a nested closure",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "checkout",
+					"module": null,
+					"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+					"lineno": 1,
+					"colno": 23456,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "onClick/<",
+					"module": null,
+					"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+					"lineno": 1,
+					"colno": 9876,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": null,
+					"module": null,
+					"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+					"lineno": 1,
+					"colno": 120,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "e0ad0bff12be9f0820e0280297d2d68d",
+		"parts": [
+			"TypeError",
+			"checkout@index-*.js",
+			"onClick/<@index-*.js",
+			"@index-*.js"
+		]
+	},
+	{
+		"name": "js prefixes: async, new, Object. and Module. stripped",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "async CheckoutController.submit",
+					"module": null,
+					"filename": "/app/src/web/checkout.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "new OrderService",
+					"module": null,
+					"filename": "/app/src/orders/service.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "Object.loadCart",
+					"module": null,
+					"filename": "/app/src/cart.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "Module.bootstrap",
+					"module": null,
+					"filename": "/app/src/main.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "async new Widget",
+					"module": null,
+					"filename": "/app/src/widget.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "0662bf98e00b66f399cb84c25c2f2a16",
+		"parts": [
+			"TypeError",
+			"CheckoutController.submit@checkout.js",
+			"OrderService@service.js",
+			"loadCart@cart.js",
+			"bootstrap@main.js",
+			"Widget@widget.js"
+		]
+	},
+	{
+		"name": "js only one leading Object. is stripped",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "Object.Object.keys",
+					"module": null,
+					"filename": "/app/src/util.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "18d632912adede163dd7da72b3e0ae18",
+		"parts": [
+			"TypeError",
+			"Object.keys@util.js"
+		]
+	},
+	{
+		"name": "js anonymous frames map to an empty function",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "Object.<anonymous>",
+					"module": null,
+					"filename": "/app/src/main.js",
+					"lineno": 3,
+					"colno": 1,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "anonymous",
+					"module": null,
+					"filename": "/app/src/eval-wrapper.js",
+					"lineno": 1,
+					"colno": 1,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": null,
+					"module": null,
+					"filename": "/app/src/router.js",
+					"lineno": 22,
+					"colno": 9,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "1ae5e4d2ebfcaad7377737f8712c1737",
+		"parts": [
+			"TypeError",
+			"@main.js",
+			"@eval-wrapper.js",
+			"@router.js"
+		]
+	},
+	{
+		"name": "js dependency frames skipped in favour of in-app frames",
+		"input": {
+			"service": "web-app",
+			"errorType": "Error",
+			"message": "connect ECONNREFUSED 127.0.0.1:5432",
+			"frames": [
+				{
+					"function": "TCPConnectWrap.afterConnect [as oncomplete]",
+					"module": null,
+					"filename": "node:net",
+					"lineno": 1555,
+					"colno": 16,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "Client._connect",
+					"module": null,
+					"filename": "/app/node_modules/pg/lib/client.js",
+					"lineno": 132,
+					"colno": 11,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "Repo.load",
+					"module": null,
+					"filename": "/app/src/repo.ts",
+					"lineno": 20,
+					"colno": 7,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "8ff0335ca863b9e7ddf19f7c9c7a0735",
+		"parts": [
+			"Error",
+			"Repo.load@repo.ts"
+		]
+	},
+	{
+		"name": "js no in-app frames: first frame only, message not hashed",
+		"input": {
+			"service": "web-app",
+			"errorType": "Error",
+			"message": "socket hang up",
+			"frames": [
+				{
+					"function": "connResetException",
+					"module": null,
+					"filename": "node:internal/errors",
+					"lineno": 720,
+					"colno": 14,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "TLSSocket.socketOnEnd",
+					"module": null,
+					"filename": "node:_http_client",
+					"lineno": 525,
+					"colno": 23,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": null,
+					"module": null,
+					"filename": "/app/node_modules/undici/lib/client.js",
+					"lineno": 10,
+					"colno": 2,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "e8b70432e2a57aac86841b0529da5dd5",
+		"parts": [
+			"Error",
+			"connResetException@errors"
+		]
+	},
+	{
+		"name": "js more than five in-app frames: the first five",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "stepa1",
+					"module": null,
+					"filename": "/app/src/pipeline/stage0.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "stepb2",
+					"module": null,
+					"filename": "/app/src/pipeline/stage1.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "stepc3",
+					"module": null,
+					"filename": "/app/src/pipeline/stage2.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "stepd4",
+					"module": null,
+					"filename": "/app/src/pipeline/stage3.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "stepe5",
+					"module": null,
+					"filename": "/app/src/pipeline/stage4.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "stepf6",
+					"module": null,
+					"filename": "/app/src/pipeline/stage5.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "stepg7",
+					"module": null,
+					"filename": "/app/src/pipeline/stage6.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "19fd33320c23775eb87c5052ccd7f06b",
+		"parts": [
+			"TypeError",
+			"stepa1@stage0.js",
+			"stepb2@stage1.js",
+			"stepc3@stage2.js",
+			"stepd4@stage3.js",
+			"stepe5@stage4.js"
+		]
+	},
+	{
+		"name": "unresolved two-character name dropped, resolved one kept",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "fn",
+					"module": null,
+					"filename": "/app/src/a.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "fn",
+					"module": null,
+					"filename": "src/b.ts",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": true
+				}
+			]
+		},
+		"fingerprint": "396446d52c13851478206ed13b97ee07",
+		"parts": [
+			"TypeError",
+			"@a.js",
+			"fn@b.ts"
+		]
+	},
+	{
+		"name": "file runs: 8+ alphanumerics with a digit or all uppercase become *",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "render",
+					"module": null,
+					"filename": "/static/js/main.8c1f2a3b.chunk.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "load",
+					"module": null,
+					"filename": "/static/js/vendors-node_modules_ABCDEFGH_x.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "keep",
+					"module": null,
+					"filename": "/src/CheckoutSummary.tsx",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "mixed",
+					"module": null,
+					"filename": "/src/README2024notes.md",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "d341e89ff8bfeaf79ea83538f7ed822b",
+		"parts": [
+			"TypeError",
+			"render@main.*.chunk.js",
+			"load@vendors-node_modules_*_x.js",
+			"keep@checkoutsummary.tsx",
+			"mixed@*.md"
+		]
+	},
+	{
+		"name": "python traceback (innermost first after parsing)",
+		"input": {
+			"service": "orders-api",
+			"errorType": "ValueError",
+			"message": "order 4821 is invalid",
+			"frames": [
+				{
+					"function": "process",
+					"module": null,
+					"filename": "/app/orders/service.py",
+					"lineno": 88,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "handle",
+					"module": null,
+					"filename": "/app/web/handler.py",
+					"lineno": 42,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "569a0bfda72bbff8298fb17e3fd9f55f",
+		"parts": [
+			"ValueError",
+			"process@service.py",
+			"handle@handler.py"
+		]
+	},
+	{
+		"name": "python after a deploy shifted every line: same fingerprint",
+		"input": {
+			"service": "orders-api",
+			"errorType": "ValueError",
+			"message": "order 9113 is invalid",
+			"frames": [
+				{
+					"function": "process",
+					"module": null,
+					"filename": "/app/orders/service.py",
+					"lineno": 95,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "handle",
+					"module": null,
+					"filename": "/app/web/handler.py",
+					"lineno": 47,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "569a0bfda72bbff8298fb17e3fd9f55f",
+		"parts": [
+			"ValueError",
+			"process@service.py",
+			"handle@handler.py"
+		]
+	},
+	{
+		"name": "python site-packages frames skipped",
+		"input": {
+			"service": "shop",
+			"errorType": "InvalidOperation",
+			"message": "",
+			"frames": [
+				{
+					"function": "quantize",
+					"module": null,
+					"filename": "/usr/lib/python3/dist-packages/decimal_ext.py",
+					"lineno": 4,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "cart",
+					"module": null,
+					"filename": "/app/shop/views.py",
+					"lineno": 18,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "_get_response",
+					"module": null,
+					"filename": "/usr/local/lib/python3.12/site-packages/django/core/handlers/base.py",
+					"lineno": 197,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "7346f9187e4f005d1f57c3c0cc6314c6",
+		"parts": [
+			"InvalidOperation",
+			"cart@views.py"
+		]
+	},
+	{
+		"name": "go panic: runtime frames excluded",
+		"input": {
+			"service": "payments",
+			"errorType": "panic",
+			"message": "runtime error: invalid memory address or nil pointer dereference",
+			"frames": [
+				{
+					"function": "(*OrderService).Process",
+					"module": "main",
+					"filename": "/app/orders/service.go",
+					"lineno": 128,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "(*Handler).ServeHTTP",
+					"module": "main",
+					"filename": "/app/web/handler.go",
+					"lineno": 64,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "(*conn).serve",
+					"module": "net/http",
+					"filename": "/usr/local/go/src/net/http/server.go",
+					"lineno": 2092,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "(*Server).Serve",
+					"module": "net/http",
+					"filename": "/usr/local/go/src/net/http/server.go",
+					"lineno": 3285,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "a5b0f73c30adf16677ba643bf38c6318",
+		"parts": [
+			"panic",
+			"(*OrderService).Process@service.go",
+			"(*Handler).ServeHTTP@handler.go"
+		]
+	},
+	{
+		"name": "go after a redeploy: offsets, addresses and lines changed",
+		"input": {
+			"service": "payments",
+			"errorType": "panic",
+			"message": "runtime error: invalid memory address or nil pointer dereference",
+			"frames": [
+				{
+					"function": "(*OrderService).Process",
+					"module": "main",
+					"filename": "/app/orders/service.go",
+					"lineno": 140,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "(*Handler).ServeHTTP",
+					"module": "main",
+					"filename": "/app/web/handler.go",
+					"lineno": 71,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "(*conn).serve",
+					"module": "net/http",
+					"filename": "/usr/local/go/src/net/http/server.go",
+					"lineno": 2092,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "(*Server).Serve",
+					"module": "net/http",
+					"filename": "/usr/local/go/src/net/http/server.go",
+					"lineno": 3285,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "a5b0f73c30adf16677ba643bf38c6318",
+		"parts": [
+			"panic",
+			"(*OrderService).Process@service.go",
+			"(*Handler).ServeHTTP@handler.go"
+		]
+	},
+	{
+		"name": "jvm: java./javax./kotlin./jdk. frames excluded",
+		"input": {
+			"service": "billing",
+			"errorType": "java.lang.NullPointerException",
+			"message": "Cannot invoke \"Order.total()\"",
+			"frames": [
+				{
+					"function": "process",
+					"module": "com.example.orders.OrderService",
+					"filename": "OrderService.java",
+					"lineno": 88,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "handle",
+					"module": "com.example.web.RequestHandler",
+					"filename": "RequestHandler.java",
+					"lineno": 42,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "doGet",
+					"module": "com.example.web.RequestHandler",
+					"filename": "RequestHandler.java",
+					"lineno": 31,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "service",
+					"module": "jakarta.servlet.http.HttpServlet",
+					"filename": "HttpServlet.java",
+					"lineno": 687,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "run",
+					"module": "java.lang.Thread",
+					"filename": "Thread.java",
+					"lineno": 1583,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "a41f68e60b9a0105197eca931614371f",
+		"parts": [
+			"java.lang.NullPointerException",
+			"process@orderservice.java",
+			"handle@requesthandler.java",
+			"doGet@requesthandler.java",
+			"service@httpservlet.java"
+		]
+	},
+	{
+		"name": "jvm native method: module used when there is no file",
+		"input": {
+			"service": "billing",
+			"errorType": "java.lang.UnsatisfiedLinkError",
+			"message": "no native lib",
+			"frames": [
+				{
+					"function": "load0",
+					"module": "com.acme.NativeBridge",
+					"filename": null,
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "84d3600519bae1b3b37e8a9832b9178e",
+		"parts": [
+			"java.lang.UnsatisfiedLinkError",
+			"load0@com.acme.nativebridge"
+		]
+	},
+	{
+		"name": ".NET: System./Microsoft. frames excluded, Windows paths",
+		"input": {
+			"service": "storefront",
+			"errorType": "System.NullReferenceException",
+			"message": "Object reference not set to an instance of an object.",
+			"frames": [
+				{
+					"function": "Process",
+					"module": "MyApp.Orders.OrderService",
+					"filename": "C:\\src\\MyApp\\Orders\\OrderService.cs",
+					"lineno": 88,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "HandleAsync",
+					"module": "MyApp.Web.RequestHandler",
+					"filename": "C:\\src\\MyApp\\Web\\RequestHandler.cs",
+					"lineno": 42,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "MoveNext",
+					"module": "MyApp.Web.RequestHandler.<HandleAsync>d__4",
+					"filename": "C:\\src\\MyApp\\Web\\RequestHandler.cs",
+					"lineno": 39,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "Start[TStateMachine]",
+					"module": "System.Runtime.CompilerServices.AsyncMethodBuilderCore",
+					"filename": null,
+					"lineno": null,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "ExecuteWithThreadLocal",
+					"module": "System.Threading.Tasks.Task",
+					"filename": null,
+					"lineno": null,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "e907434184270b4528174870d225fafd",
+		"parts": [
+			"System.NullReferenceException",
+			"Process@orderservice.cs",
+			"HandleAsync@requesthandler.cs",
+			"MoveNext@requesthandler.cs"
+		]
+	},
+	{
+		"name": "rust backtrace",
+		"input": {
+			"service": "inventory",
+			"errorType": "panic",
+			"message": "called `Result::unwrap()` on an `Err` value: PoolTimedOut",
+			"frames": [
+				{
+					"function": "rust_begin_unwind",
+					"module": null,
+					"filename": "/rustc/abc123/library/std/src/panicking.rs",
+					"lineno": 665,
+					"colno": 5,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "core::panicking::panic_fmt",
+					"module": null,
+					"filename": "/rustc/abc123/library/core/src/panicking.rs",
+					"lineno": 74,
+					"colno": 14,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "core::result::unwrap_failed",
+					"module": null,
+					"filename": "/rustc/abc123/library/core/src/result.rs",
+					"lineno": 1679,
+					"colno": 5,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "myapp::orders::service::OrderService::process",
+					"module": null,
+					"filename": "./src/orders/service.rs",
+					"lineno": 88,
+					"colno": 21,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "myapp::web::handler::handle_request",
+					"module": null,
+					"filename": "./src/web/handler.rs",
+					"lineno": 42,
+					"colno": 9,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "e538d0c1df6167cbc72d6ab9d1236c3d",
+		"parts": [
+			"panic",
+			"rust_begin_unwind@panicking.rs",
+			"core::panicking::panic_fmt@panicking.rs",
+			"core::result::unwrap_failed@result.rs",
+			"myapp::orders::service::OrderService::process@service.rs",
+			"myapp::web::handler::handle_request@handler.rs"
+		]
+	},
+	{
+		"name": "no file and no module: function@",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "JSON.parse",
+					"module": null,
+					"filename": null,
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "8c78f6c9c04524bdaea99e1c09d9999a",
+		"parts": [
+			"TypeError",
+			"JSON.parse@"
+		]
+	},
+	{
+		"name": "empty stack: the normalised message is hashed",
+		"input": {
+			"service": "web-app",
+			"errorType": "Error",
+			"message": "user 42 not found (id 9f8e7d6c-1234-4abc-8def-0123456789ab)",
+			"frames": []
+		},
+		"fingerprint": "4e246f0a12530c6d8d026a3e9fdc23fb",
+		"parts": [
+			"Error",
+			"user <n> not found (id <uuid>)"
+		]
+	},
+	{
+		"name": "empty stack: per-value message variant groups with the one above",
+		"input": {
+			"service": "web-app",
+			"errorType": "Error",
+			"message": "user 7 not found (id 00000000-1111-4222-8333-444444444444)",
+			"frames": []
+		},
+		"fingerprint": "4e246f0a12530c6d8d026a3e9fdc23fb",
+		"parts": [
+			"Error",
+			"user <n> not found (id <uuid>)"
+		]
+	},
+	{
+		"name": "empty stack and empty message",
+		"input": {
+			"service": "web-app",
+			"errorType": "Error",
+			"message": "",
+			"frames": []
+		},
+		"fingerprint": "94b4b247678bd8a930d0fd2a6a7c759f",
+		"parts": [
+			"Error"
+		]
+	},
+	{
+		"name": "browser and server report of the same frames share a fingerprint (no source in the hash)",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "different message text here",
+			"frames": [
+				{
+					"function": "computeTotal",
+					"module": null,
+					"filename": "webpack://shop/./src/checkout/total.ts",
+					"lineno": 99,
+					"colno": 1,
+					"inApp": true,
+					"resolved": true
+				},
+				{
+					"function": "onSubmit",
+					"module": null,
+					"filename": "webpack://shop/./src/checkout/Checkout.tsx",
+					"lineno": 1,
+					"colno": 1,
+					"inApp": true,
+					"resolved": true
+				}
+			]
+		},
+		"fingerprint": "8bdf92b78f224531997892807993c03e",
+		"parts": [
+			"TypeError",
+			"computeTotal@total.ts",
+			"onSubmit@checkout.tsx"
+		]
+	},
+	{
+		"name": "a different service changes the fingerprint",
+		"input": {
+			"service": "admin-app",
+			"errorType": "TypeError",
+			"message": "x",
+			"frames": [
+				{
+					"function": "computeTotal",
+					"module": null,
+					"filename": "webpack://shop/./src/checkout/total.ts",
+					"lineno": 12,
+					"colno": 9,
+					"inApp": true,
+					"resolved": true
+				},
+				{
+					"function": "onSubmit",
+					"module": null,
+					"filename": "webpack://shop/./src/checkout/Checkout.tsx",
+					"lineno": 88,
+					"colno": 5,
+					"inApp": true,
+					"resolved": true
+				}
+			]
+		},
+		"fingerprint": "968a8f6e12dcb1f9ecc197081cc328be",
+		"parts": [
+			"TypeError",
+			"computeTotal@total.ts",
+			"onSubmit@checkout.tsx"
+		]
+	},
+	{
+		"name": "a source-map ignore-listed frame is not in-app",
+		"input": {
+			"service": "web-app",
+			"errorType": "TypeError",
+			"message": "Cannot read properties of undefined (reading 'total')",
+			"frames": [
+				{
+					"function": "invariant",
+					"module": null,
+					"filename": "webpack://shop/./src/vendor-shim/invariant.js",
+					"lineno": null,
+					"colno": null,
+					"inApp": false,
+					"resolved": true
+				},
+				{
+					"function": "Cart",
+					"module": null,
+					"filename": "webpack://shop/./src/cart/Cart.tsx",
+					"lineno": null,
+					"colno": null,
+					"inApp": true,
+					"resolved": true
+				}
+			]
+		},
+		"fingerprint": "7b86221c4d1e3bb39e50c97399278a92",
+		"parts": [
+			"TypeError",
+			"Cart@cart.tsx"
+		]
+	}
+]

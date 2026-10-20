@@ -214,7 +214,9 @@ function parseV8(lines: string[]): StackFrame[] {
 		if (withFn) {
 			frames.push(frame("javascript", { function: withFn[1], ...jsLocation(withFn[2]!) }));
 		} else {
-			frames.push(frame("javascript", jsLocation(body)));
+			// "at async file:1:2" is an anonymous async function: the location
+			// is what follows "async " (the platform parser mirrors this).
+			frames.push(frame("javascript", jsLocation(body.replace(/^async /, ""))));
 		}
 		if (frames.length >= MAX_FRAMES) break;
 	}

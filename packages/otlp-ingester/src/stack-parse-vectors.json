@@ -857,5 +857,841 @@
 		"name": "no frames: empty stack",
 		"stack": "",
 		"frames": []
+	},
+	{
+		"name": "v8 node server error with async, library and node internals",
+		"stack": "TypeError: Cannot read properties of undefined (reading 'total')\n    at OrderService.process (/app/dist/orders/service.js:88:21)\n    at async Handler.handle (/app/dist/web/handler.js:42:9)\n    at async /app/dist/web/router.js:12:5\n    at Layer.handle [as handle_request] (/app/node_modules/express/lib/router/layer.js:95:5)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)",
+		"frames": [
+			{
+				"function": "OrderService.process",
+				"module": null,
+				"filename": "/app/dist/orders/service.js",
+				"lineno": 88,
+				"colno": 21,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "async Handler.handle",
+				"module": null,
+				"filename": "/app/dist/web/handler.js",
+				"lineno": 42,
+				"colno": 9,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "/app/dist/web/router.js",
+				"lineno": 12,
+				"colno": 5,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Layer.handle [as handle_request]",
+				"module": null,
+				"filename": "/app/node_modules/express/lib/router/layer.js",
+				"lineno": 95,
+				"colno": 5,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "process.processTicksAndRejections",
+				"module": null,
+				"filename": "node:internal/process/task_queues",
+				"lineno": 95,
+				"colno": 5,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 anonymous async frames keep async out of the filename",
+		"stack": "Error: closed\n    at async node:internal/streams/end-of-stream:12:3\n    at async /app/src/jobs/drain.js:30:7",
+		"frames": [
+			{
+				"function": null,
+				"module": null,
+				"filename": "node:internal/streams/end-of-stream",
+				"lineno": 12,
+				"colno": 3,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "/app/src/jobs/drain.js",
+				"lineno": 30,
+				"colno": 7,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 browser minified bundle with chunk hashes and query strings",
+		"stack": "TypeError: Cannot read properties of null (reading 'id')\n    at a (https://cdn.example.com/assets/main.3f9a1c2b.js?v=42:1:4567)\n    at Xe (https://cdn.example.com/assets/vendor-ABCDEFGH.js:2:100)\n    at https://cdn.example.com/assets/main.3f9a1c2b.js#frag:1:9000",
+		"frames": [
+			{
+				"function": "a",
+				"module": null,
+				"filename": "https://cdn.example.com/assets/main.3f9a1c2b.js",
+				"lineno": 1,
+				"colno": 4567,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Xe",
+				"module": null,
+				"filename": "https://cdn.example.com/assets/vendor-ABCDEFGH.js",
+				"lineno": 2,
+				"colno": 100,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "https://cdn.example.com/assets/main.3f9a1c2b.js",
+				"lineno": 1,
+				"colno": 9000,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 anonymous, native and index locations",
+		"stack": "Error: boom\n    at new Promise (<anonymous>)\n    at Array.map (native)\n    at async Promise.all (index 0)\n    at Object.<anonymous> (/app/src/index.js:3:1)\n    at Module._compile (node:internal/modules/cjs/loader:1256:14)",
+		"frames": [
+			{
+				"function": "new Promise",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Array.map",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "async Promise.all",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Object.<anonymous>",
+				"module": null,
+				"filename": "/app/src/index.js",
+				"lineno": 3,
+				"colno": 1,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Module._compile",
+				"module": null,
+				"filename": "node:internal/modules/cjs/loader",
+				"lineno": 1256,
+				"colno": 14,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 eval frame uses the inner location",
+		"stack": "ReferenceError: x is not defined\n    at eval (eval at <anonymous> (/app/src/sandbox.js:10:3), <anonymous>:1:1)\n    at run (/app/src/sandbox.js:10:3)",
+		"frames": [
+			{
+				"function": "eval",
+				"module": null,
+				"filename": "/app/src/sandbox.js",
+				"lineno": 10,
+				"colno": 3,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "run",
+				"module": null,
+				"filename": "/app/src/sandbox.js",
+				"lineno": 10,
+				"colno": 3,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 next.js webpack-internal paths with parentheses",
+		"stack": "Error: fetch failed\n    at Page (webpack-internal:///(rsc)/./app/orders/page.tsx:12:9)\n    at renderToString (webpack-internal:///(ssr)/./node_modules/react-dom/cjs/react-dom-server.js:1:1)",
+		"frames": [
+			{
+				"function": "Page",
+				"module": null,
+				"filename": "webpack-internal:///(rsc)/./app/orders/page.tsx",
+				"lineno": 12,
+				"colno": 9,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "renderToString",
+				"module": null,
+				"filename": "webpack-internal:///(ssr)/./node_modules/react-dom/cjs/react-dom-server.js",
+				"lineno": 1,
+				"colno": 1,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 windows paths",
+		"stack": "Error: ENOENT\n    at readConfig (C:\\app\\src\\config.js:14:11)\n    at C:\\app\\node_modules\\loader\\index.js:2:3",
+		"frames": [
+			{
+				"function": "readConfig",
+				"module": null,
+				"filename": "C:\\app\\src\\config.js",
+				"lineno": 14,
+				"colno": 11,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "C:\\app\\node_modules\\loader\\index.js",
+				"lineno": 2,
+				"colno": 3,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 chrome extension frames are not in-app",
+		"stack": "TypeError: Failed to fetch\n    at inject (chrome-extension://abcdefghijklmnop/content.js:5:7)\n    at checkout (https://shop.example.com/static/js/checkout.js:20:15)",
+		"frames": [
+			{
+				"function": "inject",
+				"module": null,
+				"filename": "chrome-extension://abcdefghijklmnop/content.js",
+				"lineno": 5,
+				"colno": 7,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "checkout",
+				"module": null,
+				"filename": "https://shop.example.com/static/js/checkout.js",
+				"lineno": 20,
+				"colno": 15,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "firefox frames with an async marker, an anonymous function and a cdn path",
+		"stack": "handle@https://example.com/static/js/main.3f9a1c2b.js:1:4567\nasync*load@https://example.com/static/js/main.3f9a1c2b.js?x=1:2:10\n@https://example.com/static/js/main.3f9a1c2b.js:3:1\nFoo/<.bar@https://cdn.jsdelivr.net/npm/pkg@1.2.3/dist/index.js:7:2",
+		"frames": [
+			{
+				"function": "handle",
+				"module": null,
+				"filename": "https://example.com/static/js/main.3f9a1c2b.js",
+				"lineno": 1,
+				"colno": 4567,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "async*load",
+				"module": null,
+				"filename": "https://example.com/static/js/main.3f9a1c2b.js",
+				"lineno": 2,
+				"colno": 10,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "https://example.com/static/js/main.3f9a1c2b.js",
+				"lineno": 3,
+				"colno": 1,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Foo/<.bar",
+				"module": null,
+				"filename": "https://cdn.jsdelivr.net/npm/pkg@1.2.3/dist/index.js",
+				"lineno": 7,
+				"colno": 2,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "safari global code, native code and masked url frames",
+		"stack": "render@https://example.com/app.js:10:20\nforEach@[native code]\nglobal code@https://example.com/app.js:1:1\nmodule code@webkit-masked-url://hidden/:1:1",
+		"frames": [
+			{
+				"function": "render",
+				"module": null,
+				"filename": "https://example.com/app.js",
+				"lineno": 10,
+				"colno": 20,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "forEach",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "global code",
+				"module": null,
+				"filename": "https://example.com/app.js",
+				"lineno": 1,
+				"colno": 1,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "module code",
+				"module": null,
+				"filename": "webkit-masked-url://hidden/",
+				"lineno": 1,
+				"colno": 1,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "firefox moz-extension frames are not in-app",
+		"stack": "listener@moz-extension://1234-5678/content.js:3:9\nsubmit@https://shop.example.com/js/form.js:44:5",
+		"frames": [
+			{
+				"function": "listener",
+				"module": null,
+				"filename": "moz-extension://1234-5678/content.js",
+				"lineno": 3,
+				"colno": 9,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "submit",
+				"module": null,
+				"filename": "https://shop.example.com/js/form.js",
+				"lineno": 44,
+				"colno": 5,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python traceback reversed to innermost first",
+		"stack": "Traceback (most recent call last):\n  File \"/srv/app/web/views.py\", line 41, in checkout\n    order = service.process(cart)\n  File \"/srv/app/orders/service.py\", line 88, in process\n    total = order.total()\n  File \"/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/attributes.py\", line 482, in __get__\n    return self.impl.get(state, dict_)\nAttributeError: 'NoneType' object has no attribute 'total'",
+		"frames": [
+			{
+				"function": "__get__",
+				"module": null,
+				"filename": "/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/attributes.py",
+				"lineno": 482,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "process",
+				"module": null,
+				"filename": "/srv/app/orders/service.py",
+				"lineno": 88,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "checkout",
+				"module": null,
+				"filename": "/srv/app/web/views.py",
+				"lineno": 41,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python chained exception uses the last traceback",
+		"stack": "Traceback (most recent call last):\n  File \"/srv/app/orders/loader.py\", line 12, in load\n    return db.fetch(order_id)\nKeyError: 'order-42'\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/srv/app/web/views.py\", line 41, in checkout\n    order = loader.load(order_id)\n  File \"/srv/app/orders/loader.py\", line 14, in load\n    raise OrderMissing(order_id)\napp.errors.OrderMissing: order-42",
+		"frames": [
+			{
+				"function": "load",
+				"module": null,
+				"filename": "/srv/app/orders/loader.py",
+				"lineno": 14,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "checkout",
+				"module": null,
+				"filename": "/srv/app/web/views.py",
+				"lineno": 41,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python module-level frame and dist-packages",
+		"stack": "Traceback (most recent call last):\n  File \"/opt/app/main.py\", line 3, in <module>\n    run()\n  File \"/usr/lib/python3/dist-packages/click/core.py\", line 1157, in __call__\n    return self.main(*args, **kwargs)\nRuntimeError: failed",
+		"frames": [
+			{
+				"function": "__call__",
+				"module": null,
+				"filename": "/usr/lib/python3/dist-packages/click/core.py",
+				"lineno": 1157,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "<module>",
+				"module": null,
+				"filename": "/opt/app/main.py",
+				"lineno": 3,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "go panic with runtime frames, module path and a second goroutine",
+		"stack": "panic: order missing [recovered]\n\tpanic: order missing\n\ngoroutine 7 [running]:\npanic({0x6a1b20?, 0x8f3c40?})\n\t/usr/local/go/src/runtime/panic.go:770 +0x132\ngithub.com/acme/shop/orders.(*Service).Load(0xc000120000, {0xc00001c0a0, 0x8})\n\t/home/ci/shop/orders/service.go:51 +0x8e\ngithub.com/acme/shop/web.Checkout({0x8f2b20, 0xc0000c2000}, 0xc000168000)\n\t/home/ci/shop/web/checkout.go:22 +0x45\n\ngoroutine 1 [chan receive]:\nmain.main()\n\t/home/ci/shop/main.go:30 +0x1c",
+		"frames": [
+			{
+				"function": "panic",
+				"module": null,
+				"filename": "/usr/local/go/src/runtime/panic.go",
+				"lineno": 770,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "(*Service).Load",
+				"module": "github.com/acme/shop/orders",
+				"filename": "/home/ci/shop/orders/service.go",
+				"lineno": 51,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Checkout",
+				"module": "github.com/acme/shop/web",
+				"filename": "/home/ci/shop/web/checkout.go",
+				"lineno": 22,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "jvm java drops the module prefix and stops at caused by",
+		"stack": "java.lang.NullPointerException: Cannot invoke \"com.example.model.Order.total()\" because \"order\" is null\n\tat com.example.orders.OrderService.process(OrderService.java:88)\n\tat com.example.web.RequestHandler.handle(RequestHandler.java:42)\n\tat jakarta.servlet.http.HttpServlet.service(HttpServlet.java:687)\n\tat java.base/java.lang.Thread.run(Thread.java:1583)\nCaused by: java.lang.IllegalStateException: order not loaded\n\tat com.example.orders.OrderLoader.require(OrderLoader.java:55)\n\t... 4 more",
+		"frames": [
+			{
+				"function": "process",
+				"module": "com.example.orders.OrderService",
+				"filename": "OrderService.java",
+				"lineno": 88,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "handle",
+				"module": "com.example.web.RequestHandler",
+				"filename": "RequestHandler.java",
+				"lineno": 42,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "service",
+				"module": "jakarta.servlet.http.HttpServlet",
+				"filename": "HttpServlet.java",
+				"lineno": 687,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "run",
+				"module": "java.lang.Thread",
+				"filename": "Thread.java",
+				"lineno": 1583,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "jvm kotlin with native method, unknown source and lambdas",
+		"stack": "kotlin.KotlinNullPointerException\n\tat com.example.billing.InvoiceKt.render(Invoice.kt:14)\n\tat com.example.billing.InvoiceService.lambda$send$0(InvoiceService.kt:30)\n\tat jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)\n\tat com.example.legacy.Bridge.call(Unknown Source)\n\tat kotlin.collections.CollectionsKt.forEach(Collections.kt:10)",
+		"frames": [
+			{
+				"function": "render",
+				"module": "com.example.billing.InvoiceKt",
+				"filename": "Invoice.kt",
+				"lineno": 14,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "lambda$send$0",
+				"module": "com.example.billing.InvoiceService",
+				"filename": "InvoiceService.kt",
+				"lineno": 30,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "invoke0",
+				"module": "jdk.internal.reflect.NativeMethodAccessorImpl",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "call",
+				"module": "com.example.legacy.Bridge",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "forEach",
+				"module": "kotlin.collections.CollectionsKt",
+				"filename": "Collections.kt",
+				"lineno": 10,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "dotnet with file locations and framework frames",
+		"stack": "System.NullReferenceException: Object reference not set to an instance of an object.\n   at MyApp.Orders.OrderService.Process(Order order) in C:\\src\\MyApp\\Orders\\OrderService.cs:line 88\n   at MyApp.Web.RequestHandler.HandleAsync(HttpContext context) in C:\\src\\MyApp\\Web\\RequestHandler.cs:line 42\n   at MyApp.Web.RequestHandler.<HandleAsync>d__4.MoveNext() in C:\\src\\MyApp\\Web\\RequestHandler.cs:line 39\n--- End of stack trace from previous location ---\n   at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)\n   at Microsoft.AspNetCore.Routing.EndpointMiddleware.Invoke(HttpContext httpContext)",
+		"frames": [
+			{
+				"function": "Process",
+				"module": "MyApp.Orders.OrderService",
+				"filename": "C:\\src\\MyApp\\Orders\\OrderService.cs",
+				"lineno": 88,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "HandleAsync",
+				"module": "MyApp.Web.RequestHandler",
+				"filename": "C:\\src\\MyApp\\Web\\RequestHandler.cs",
+				"lineno": 42,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "MoveNext",
+				"module": "MyApp.Web.RequestHandler.<HandleAsync>d__4",
+				"filename": "C:\\src\\MyApp\\Web\\RequestHandler.cs",
+				"lineno": 39,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Start[TStateMachine]",
+				"module": "System.Runtime.CompilerServices.AsyncMethodBuilderCore",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "Invoke",
+				"module": "Microsoft.AspNetCore.Routing.EndpointMiddleware",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "dotnet linux paths and frames without files",
+		"stack": "System.InvalidOperationException: Sequence contains no elements\n   at System.Linq.ThrowHelper.ThrowNoElementsException()\n   at Shop.Billing.InvoiceService.Render(Invoice invoice) in /src/Shop/Billing/InvoiceService.cs:line 205\n   at Shop.Billing.InvoiceService.<>c__DisplayClass3_0.<Send>b__0() in /src/Shop/Billing/InvoiceService.cs:line 31",
+		"frames": [
+			{
+				"function": "ThrowNoElementsException",
+				"module": "System.Linq.ThrowHelper",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "Render",
+				"module": "Shop.Billing.InvoiceService",
+				"filename": "/src/Shop/Billing/InvoiceService.cs",
+				"lineno": 205,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "<Send>b__0",
+				"module": "Shop.Billing.InvoiceService.<>c__DisplayClass3_0",
+				"filename": "/src/Shop/Billing/InvoiceService.cs",
+				"lineno": 31,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "dotnet wrapped exception keeps the outer exception's frames",
+		"stack": "System.InvalidOperationException: Checkout failed\n ---> System.ArgumentNullException: Value cannot be null. (Parameter 'cart')\n   at Shop.Cart.Total(Cart cart) in /src/Shop/Cart.cs:line 14\n   --- End of inner exception stack trace ---\n   at Shop.Checkout.Submit(Order order) in /src/Shop/Checkout.cs:line 61\n   at Shop.Checkout..ctor(Store store) in /src/Shop/Checkout.cs:line 12",
+		"frames": [
+			{
+				"function": "Submit",
+				"module": "Shop.Checkout",
+				"filename": "/src/Shop/Checkout.cs",
+				"lineno": 61,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": ".ctor",
+				"module": "Shop.Checkout",
+				"filename": "/src/Shop/Checkout.cs",
+				"lineno": 12,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "dotnet frames without source locations",
+		"stack": "System.Collections.Generic.KeyNotFoundException: The given key was not present.\n   at System.Collections.Generic.Dictionary`2.get_Item(TKey key)\n   at Shop.Catalog.Find(String sku)\n   at Shop.Program.Main(String[] args)",
+		"frames": [
+			{
+				"function": "get_Item",
+				"module": "System.Collections.Generic.Dictionary`2",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "Find",
+				"module": "Shop.Catalog",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Main",
+				"module": "Shop.Program",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 react native address and unknown locations",
+		"stack": "Error: render failed\n    at render (address at index.android.bundle:1:2345)\n    at callTimer (unknown location)",
+		"frames": [
+			{
+				"function": "render",
+				"module": null,
+				"filename": "address at index.android.bundle",
+				"lineno": 1,
+				"colno": 2345,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "callTimer",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "ruby backtrace (best effort)",
+		"stack": "app/models/order.rb:42:in `total': undefined method `+' for nil (NoMethodError)\n\tfrom /app/app/controllers/orders_controller.rb:9:in `create'\n\tfrom /usr/local/bundle/gems/actionpack-7.1.0/lib/action_controller/metal/basic_implicit_render.rb:6:in `send_action'",
+		"frames": [
+			{
+				"function": "create",
+				"module": null,
+				"filename": "/app/app/controllers/orders_controller.rb",
+				"lineno": 9,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "send_action",
+				"module": null,
+				"filename": "/usr/local/bundle/gems/actionpack-7.1.0/lib/action_controller/metal/basic_implicit_render.rb",
+				"lineno": 6,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "php backtrace (best effort)",
+		"stack": "#0 /var/www/src/Billing/Invoice.php(77): App\\Billing\\Invoice->render(Array)\n#1 /var/www/vendor/laravel/framework/src/Routing/Controller.php(54): App\\Http\\InvoiceController->show(Object(Illuminate\\Http\\Request))\n#2 {main}",
+		"frames": [
+			{
+				"function": "App\\Billing\\Invoice->render",
+				"module": null,
+				"filename": "/var/www/src/Billing/Invoice.php",
+				"lineno": 77,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "App\\Http\\InvoiceController->show",
+				"module": null,
+				"filename": "/var/www/vendor/laravel/framework/src/Routing/Controller.php",
+				"lineno": 54,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "rust legacy backtrace with addresses and symbol hashes",
+		"stack": "stack backtrace:\n   0:     0x55d0b2c1a2b3 - std::backtrace_rs::backtrace::libunwind::trace::h1a2b3c4d5e6f7a8b\n                               at /rustc/abc123/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5\n   1:     0x55d0b2c1a2c4 - myapp::payments::charge::h0123456789abcdef\n                               at /home/ci/myapp/src/payments.rs:143:10\n   2:     0x55d0b2c1a2d5 - <myapp::Worker as core::ops::FnOnce<()>>::call_once::hfedcba9876543210",
+		"frames": [
+			{
+				"function": "std::backtrace_rs::backtrace::libunwind::trace",
+				"module": null,
+				"filename": "/rustc/abc123/library/std/src/../../backtrace/src/backtrace/libunwind.rs",
+				"lineno": 93,
+				"colno": 5,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "myapp::payments::charge",
+				"module": null,
+				"filename": "/home/ci/myapp/src/payments.rs",
+				"lineno": 143,
+				"colno": 10,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "<myapp::Worker as core::ops::FnOnce<()>>::call_once",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "unknown format yields no frames",
+		"stack": "Something went wrong while processing order 42\nplease retry later",
+		"frames": []
+	},
+	{
+		"name": "message line starting with at is not a frame",
+		"stack": "Error: at least one item is required\n    at validate (/app/src/cart.ts:9:11)",
+		"frames": [
+			{
+				"function": "validate",
+				"module": null,
+				"filename": "/app/src/cart.ts",
+				"lineno": 9,
+				"colno": 11,
+				"inApp": true,
+				"resolved": false
+			}
+		]
 	}
 ]

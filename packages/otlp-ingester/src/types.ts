@@ -233,11 +233,16 @@ export interface RuntimeMetricPoint {
  * - `client` — PUBLISHABLE key shipped in frontend bundles: `/v1/browser`
  *   only, origin allow-list enforced, stricter rate limit. Leaking it can
  *   at worst send fake browser errors for one repo — never read anything.
+ * - `upload` — CI key (`autter_rtu_…`, 1.7.0+): `/v1/sourcemaps` and
+ *   `/v1/sourcemaps/check` only; every telemetry route answers 403. Leaking
+ *   it can at worst upload source maps for one repo.
  */
+export type IngestKeyScope = "client" | "server" | "upload";
+
 export interface IngestContext {
 	orgId: string;
 	repositoryId: string;
-	scope: "client" | "server";
+	scope: IngestKeyScope;
 	/** client keys only: exact origins allowed to send (empty = any). */
 	allowedOrigins: string[];
 }

@@ -1,5 +1,7 @@
 import type { Request } from "express";
-import type { IngesterConfig } from "./config.js";
+import { INGESTER_VERSION_HEADER } from "./compat.js";
+import { defaultScopeFor, isIngestKeyScope, type IngesterConfig } from "./config.js";
+import { ingesterVersion } from "./sdk-versions.js";
 import type { IngestContext } from "./types.js";
 
 /**
@@ -7,6 +9,11 @@ import type { IngestContext } from "./types.js";
  * or `x-autter-key: <key>` and resolve to a tenant {orgId, repositoryId}
  * via a static env mapping (self-host) or a validator webhook (cloud),
  * with a short in-process cache in front of the webhook.
+ *
+ * Scopes: "server", "client" or "upload" (see IngestContext). A key whose
+ * entry or validator answer names no scope gets defaultScopeFor(key); one
+ * that names a scope this ingester doesn't know is refused, never treated
+ * as a server key.
  */
 
 interface CacheEntry {
@@ -22,10 +29,12 @@ export class KeyResolver {
 
 	constructor(private readonly config: IngesterConfig) {
 		for (const entry of config.ingestKeys) {
+			const scope = entry.scope ?? defaultScopeFor(entry.key);
+			if (!isIngestKeyScope(scope)) continue;
 			this.staticKeys.set(entry.key, {
 				orgId: entry.orgId,
 				repositoryId: entry.repositoryId,
-				scope: entry.scope ?? "server",
+				scope,
 				allowedOrigins: entry.allowedOrigins ?? [],
 			});
 		}
@@ -59,6 +68,11 @@ export class KeyResolver {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
+					// Lets the validator tell which scopes this ingester enforces:
+					// before 1.7.0 any scope but "client" meant a server key, so an
+					// upload key must not be answered as "upload" to an ingester
+					// that doesn't send this header (or sends an older version).
+					[INGESTER_VERSION_HEADER]: ingesterVersion(),
 					...(this.config.keyValidatorToken
 						? { authorization: `Bearer ${this.config.keyValidatorToken}` }
 						: {}),
@@ -70,14 +84,15 @@ export class KeyResolver {
 				const body = (await response.json()) as {
 					orgId?: string;
 					repositoryId?: string;
-					scope?: "client" | "server";
+					scope?: unknown;
 					allowedOrigins?: string[];
 				};
-				if (body.orgId && body.repositoryId) {
+				const scope = body.scope === undefined || body.scope === null ? defaultScopeFor(key) : body.scope;
+				if (body.orgId && body.repositoryId && isIngestKeyScope(scope)) {
 					ctx = {
 						orgId: body.orgId,
 						repositoryId: body.repositoryId,
-						scope: body.scope ?? "server",
+						scope,
 						allowedOrigins: body.allowedOrigins ?? [],
 					};
 				}

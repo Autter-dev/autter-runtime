@@ -29,7 +29,7 @@ Every ClickHouse row is keyed by `(org_id, repository_id)` and every query
 must filter on both. One repository = one unit of analysis; the ingest key
 carries the mapping, so a key is scoped to exactly one repo.
 
-Two key scopes separate frontend and backend credentials:
+Three key scopes separate frontend, backend and CI credentials:
 
 - **Server keys** (`autter_rt_…`, secret): backends only — OTLP endpoints
   and as the relay's forwarding key. Sent as a bearer header.
@@ -39,6 +39,10 @@ Two key scopes separate frontend and backend credentials:
   a `?key=` query param because `sendBeacon` cannot set headers. A leaked
   client key can at worst submit fake browser events for one repo — it can
   never read data or send OTLP.
+- **Upload keys** (`autter_rtu_…`, secret, ingester 1.7.0+): CI only —
+  `/v1/sourcemaps` and `/v1/sourcemaps/check`; every telemetry route answers
+  `403 upload_key_not_allowed`. A leaked upload key can at worst upload source
+  maps for one repo.
 
 ## ClickHouse tables
 

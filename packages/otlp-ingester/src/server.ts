@@ -63,6 +63,21 @@ export interface IngesterApp {
 	reportIngesterInfo: () => Promise<void>;
 }
 
+/** The only routes an upload key (`autter_rtu_…`, scope "upload") may call. */
+export const UPLOAD_KEY_ROUTES = ["/v1/sourcemaps", "/v1/sourcemaps/check"] as const;
+
+/** The 403 an upload key gets on every other authenticated route. */
+export const UPLOAD_KEY_NOT_ALLOWED = {
+	error: "upload_key_not_allowed",
+	detail:
+		"autter_rtu_ keys can only upload source maps (POST /v1/sourcemaps and /v1/sourcemaps/check); " +
+		"telemetry needs a server key (autter_rt_…), or a client key (autter_rtc_…) for /v1/browser",
+} as const;
+
+/** What an authenticated route accepts: "otlp" (server keys), "browser"
+ * (server and client keys), "sourcemaps" (server and upload keys). */
+type Surface = "otlp" | "browser" | "sourcemaps";
+
 /** Re-report the ingester version at most this often (keeps the row inside
  * its TTL for long-running ingesters). */
 const INGESTER_INFO_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -140,7 +155,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	const sourceMapBody = express.json({ limit: SOURCE_MAP_MAX_BODY_BYTES });
 	app.post("/v1/sourcemaps", async (req, res, next) => {
 		// On failure the body is never read (Node discards it).
-		const ctx = await authenticate(req, res, "otlp");
+		const ctx = await authenticate(req, res, "sourcemaps");
 		if (!ctx) return;
 		sourceMapBody(req, res, async (err?: unknown) => {
 			if (err) {
@@ -248,11 +263,16 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		res.status(200).json(body);
 	});
 
-	/** Auth + scope + rate limit; returns null (response sent) on failure. */
+	/**
+	 * Auth + scope + rate limit; returns null (response sent) on failure.
+	 * Server keys pass everywhere; client keys only on "browser"; upload
+	 * keys only on "sourcemaps". A new route that passes "otlp" is closed to
+	 * client and upload keys without further changes.
+	 */
 	async function authenticate(
 		req: Request,
 		res: Response,
-		surface: "otlp" | "browser",
+		surface: Surface,
 	): Promise<IngestContext | null> {
 		// A storage-less ingester must refuse, not accept-and-drop: exporters
 		// retry on 503, so telemetry survives a misconfigured deploy.
@@ -270,12 +290,22 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			res.status(401).json({ error: "invalid ingest key" });
 			return null;
 		}
-		if (ctx.scope === "client") {
+		if (ctx.scope === "upload") {
+			// CI keys: source map upload and check only. Server rate window
+			// (each key has its own).
+			if (surface !== "sourcemaps") {
+				res.status(403).json(UPLOAD_KEY_NOT_ALLOWED);
+				return null;
+			}
+		} else if (ctx.scope === "client") {
 			// Publishable keys: browser surface only, origin allow-list, and
 			// the tighter rate window.
 			if (surface !== "browser") {
 				res.status(403).json({
-					error: "client keys cannot send OTLP — use a server key",
+					error:
+						surface === "sourcemaps"
+							? "client keys cannot upload source maps — use an upload key (autter_rtu_…) or a server key"
+							: "client keys cannot send OTLP — use a server key",
 				});
 				return null;
 			}
@@ -292,6 +322,11 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				return null;
 			}
 			return ctx;
+		} else if (ctx.scope !== "server") {
+			// KeyResolver never yields another scope; refuse rather than
+			// treat an unknown one as a server key.
+			res.status(403).json({ error: "key scope not allowed" });
+			return null;
 		}
 		if (!serverRateLimiter.allow(key)) {
 			res.status(429).json({ error: "rate limit exceeded" });
@@ -455,7 +490,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	/** Which of these maps does this tenant already have? Lets
 	 * `autter-runtime sourcemaps upload` skip unchanged maps (1.6.0+). */
 	app.post("/v1/sourcemaps/check", async (req, res) => {
-		const ctx = await authenticate(req, res, "otlp");
+		const ctx = await authenticate(req, res, "sourcemaps");
 		if (!ctx) return;
 		const check = validateSourceMapCheck(req.body);
 		if (!check) { res.status(400).json({ error: "invalid source map check" }); return; }

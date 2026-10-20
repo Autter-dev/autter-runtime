@@ -5,24 +5,85 @@ content-addressed **debug id** and uploads its **source map** to the ingester,
 so minified browser frames resolve to your original source, even when the
 release your SDK reports doesn't match the upload.
 
+- `autter-runtime sourcemaps setup` wires it into a project; `verify` checks a build
 - `autter-runtime sourcemaps inject <dir>` / `upload <dir>` CLI
 - Vite/Rollup plugin: `@autter/runtime-cli/vite`
 - webpack 5 plugin: `@autter/runtime-cli/webpack`
 - Next.js wrapper: `withAutterSourceMaps` from `@autter/runtime-cli/next`
 
-No runtime dependencies; bundlers are optional peer dependencies. Debug ids
-need ingester 1.6.0+ and `@autter/runtime-browser` 1.6.0+ (older ingesters
-still match `.js` maps by release + path). Full guide:
-[docs/SOURCE-MAPS.md](../../docs/SOURCE-MAPS.md).
+Bundlers are optional peer dependencies. Debug ids need ingester 1.6.0+ and
+`@autter/runtime-browser` 1.6.0+ (older ingesters still match `.js` maps by
+release + path). Full guide: [docs/SOURCE-MAPS.md](../../docs/SOURCE-MAPS.md).
 
-## Install
+## Quick start (people and coding agents)
+
+```bash
+npx @autter/runtime-cli@latest sourcemaps setup          # in the app's directory
+npm run build                                             # with AUTTER_RUNTIME_KEY set
+npx autter-runtime sourcemaps verify dist                 # before deploying
+```
+
+**`setup [dir]`** is non-interactive and safe to re-run. It detects the build
+tool (Vite and the frameworks built on it: SvelteKit, Nuxt, Astro, Remix,
+React Router, Solid, Qwik; Next.js; webpack and Vue CLI; Rollup; Create React
+App; Angular CLI; Parcel; esbuild), the package manager, the CI (GitHub
+Actions, Vercel, Netlify, Cloudflare Pages, GitLab CI), the output directory,
+existing source map settings, the installed browser SDK, and whether
+`initAutterBrowser` gets a `release`. Then it:
+
+- adds `@autter/runtime-cli` to `devDependencies` and prints the install
+  command (`--install` runs it);
+- adds the Vite/Rollup or webpack plugin, or wraps the Next.js config in
+  `withAutterSourceMaps` (outermost), when the config has a shape it can edit
+  safely: `export default defineConfig({...})`, `module.exports = {...}`, a
+  config variable, a function returning an object, `withX(nextConfig)`
+  wrappers. It parses the file (JavaScript or TypeScript) and changes only
+  what it adds; anything else becomes a `manual` action with the exact snippet;
+- for builds without a plugin (CRA, Angular, Parcel, esbuild), adds a
+  `postbuild` step (appended to `build` for pnpm, Yarn 2+ and Bun, which skip
+  `postbuild`) that runs `inject`, then `upload --delete-after-upload
+  --best-effort`, and turns on hidden maps where the tool can
+  (`GENERATE_SOURCEMAP=true`, Angular `"sourceMap": { "scripts": true, "hidden": true }`);
+- reports, never edits, app code: a missing `release` gets a `manual` action
+  showing how to pass the commit SHA through the tool's public env or define
+  mechanism;
+- never writes a key. It says where to store `AUTTER_RUNTIME_KEY` for each CI
+  it found, with commands that read the value from a prompt or stdin, never
+  from argv: `gh secret set AUTTER_RUNTIME_KEY --repo <owner/repo>`,
+  `vercel env add AUTTER_RUNTIME_KEY production`, `netlify env:set …
+  "$(cat)"`, and dashboard notes for Cloudflare Pages and GitLab.
+
+`--dry-run` writes nothing; `--json` prints `{ detected, actions: [{ type:
+"edit"|"add-dependency"|"add-script"|"manual"|"set-secret", file?,
+description, snippet?, command? }], secret: { name, key, where }, next }`.
+Exit codes: `0` everything applied, `2` manual actions remain, `1` error.
+
+**`verify <dir>`** checks a production build before deploy: every JS bundle
+has a debug id (the comment and the registration snippet), no `.map` file is
+left and no `sourceMappingURL` points at a missing map (both deploy risks),
+and, when `AUTTER_RUNTIME_KEY` is set, every bundle's map is on the ingester
+(`/v1/sourcemaps/check` by debug id, ingester 1.7.0+). Without a key the
+local checks still run and the upload is reported as unverified. Files copied
+unchanged from `public/`, Next.js build manifests and polyfills, and service workers are
+skipped; `--ignore <glob>` skips more. `--allow-maps` reports leftover maps
+without failing. `--json` for machines; exit `1` on any failure, with the
+reason per file.
+
+## Keys
+
+Set `AUTTER_RUNTIME_KEY` where your build runs. The recommended key for CI is
+an **upload-only key** (`autter_rtu_…`): it can upload and check source maps
+and nothing else, so a leaked CI secret can't send telemetry. The full server
+key (`autter_rt_…`) also works. A publishable client key (`autter_rtc_…`) is
+refused. Upload keys need ingester 1.7.0+. Without a key, the plugins turn no
+source maps on and change nothing, and `upload --best-effort` uploads nothing
+and exits 0.
+
+## By hand
 
 ```bash
 npm install -D @autter/runtime-cli
 ```
-
-Set `AUTTER_RUNTIME_KEY` to a **server** ingest key (`autter_rt_…`) where your
-build runs. Without it, the plugins turn no source maps on and change nothing.
 
 ## Vite / Rollup
 
@@ -67,9 +128,13 @@ npx autter-runtime sourcemaps upload dist --dry-run
 ```
 
 ```
-autter-runtime sourcemaps inject <dir> [--dry-run]
+autter-runtime sourcemaps setup [dir] [--dry-run] [--install] [--json]
+autter-runtime sourcemaps verify <dir> [--endpoint <url>] [--url-prefix <prefix>]
+              [--ignore <glob>]... [--allow-maps] [--json]
+autter-runtime sourcemaps inject <dir> [--dry-run] [--json]
 autter-runtime sourcemaps upload <dir> [--release <r>] [--url-prefix <prefix>]
-              [--endpoint <url>] [--concurrency <n>] [--delete-after-upload] [--dry-run] [--json]
+              [--endpoint <url>] [--concurrency <n>] [--delete-after-upload]
+              [--best-effort] [--dry-run] [--json]
 ```
 
 - **inject** writes `//# debugId=<id>`, a one-line snippet that registers
@@ -84,15 +149,22 @@ autter-runtime sourcemaps upload <dir> [--release <r>] [--url-prefix <prefix>]
   without them, with a warning. Release: `--release`, else `GITHUB_SHA`,
   `VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `GIT_SHA`, then
   `git rev-parse HEAD`.
+- **upload --best-effort** is for build scripts that also run locally and in
+  fork PRs: without a key, or when the upload fails, it says so and exits 0;
+  with `--delete-after-upload`, every `.map` under `<dir>` is then deleted
+  anyway, so the output is the same with or without a key and never ships
+  maps.
 
 Exit codes: `0` ok, `1` some maps failed, `2` no key / no release / key
-rejected, `64` usage error.
+rejected, `64` usage error (`--best-effort`: always `0`). `setup` and `verify`
+have their own, above.
 
 ## Programmatic API
 
 ```ts
-import { injectDir, uploadDir } from "@autter/runtime-cli";
+import { injectDir, uploadDir, verifyDir } from "@autter/runtime-cli";
 
 await injectDir("dist");
-const summary = await uploadDir("dist", { urlPrefix: "/", release: process.env.GIT_SHA });
+const summary = await uploadDir("dist", { urlPrefix: "/", release: process.env.GIT_SHA, deleteAfterUpload: true });
+const check = await verifyDir("dist"); // check.ok, check.failures, check.upload.status
 ```

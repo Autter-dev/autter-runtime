@@ -14,7 +14,8 @@ export interface AutterSourceMapsOptions {
 	/** Ingester base URL. Default: $AUTTER_ENDPOINT, $AUTTER_RUNTIME_ENDPOINT,
 	 * $OTEL_EXPORTER_OTLP_ENDPOINT, else https://otlp.autter.dev. */
 	endpoint?: string;
-	/** Server ingest key. Default: $AUTTER_RUNTIME_KEY. Without one (and
+	/** Upload-only key (`autter_rtu_…`, recommended for CI) or server key
+	 * (`autter_rt_…`). Default: $AUTTER_RUNTIME_KEY. Without one (and
 	 * without `upload: false` or `dryRun`), the plugin generates no source
 	 * maps it would have to delete again: the build is left as it was. */
 	key?: string;

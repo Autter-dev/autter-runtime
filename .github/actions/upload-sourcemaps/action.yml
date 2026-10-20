@@ -3,14 +3,17 @@ description: >
   Give every JS bundle in a build directory a content-addressed debug id and
   upload its source map to the Autter Runtime ingester, so browser stack
   traces resolve to your original source. Runs `autter-runtime sourcemaps
-  inject` then `upload` from @autter/runtime-cli.
+  inject`, `upload`, then `verify` from @autter/runtime-cli.
 
 inputs:
   directory:
     description: Build output directory (for example dist, build or .next/static).
     required: true
   key:
-    description: Server ingest key (autter_rt_…). Pass a secret, e.g. secrets.AUTTER_RUNTIME_KEY.
+    description: >
+      Upload-only key (autter_rtu_…, recommended: it can only upload source
+      maps) or the server ingest key (autter_rt_…). Pass a secret, e.g.
+      secrets.AUTTER_RUNTIME_KEY. Upload keys need ingester 1.7.0+.
     required: true
   release:
     description: "Release to upload under. Default: the commit being built (GITHUB_SHA)."
@@ -32,6 +35,18 @@ inputs:
     description: Delete each .map once uploaded so maps are never deployed.
     required: false
     default: "false"
+  verify:
+    description: >
+      Run `autter-runtime sourcemaps verify` after the upload: every bundle
+      has a debug id, its map is on the ingester, and (with
+      delete-after-upload) no .map is left. Fails the step on a problem.
+      Needs runtime-cli 1.2.0+; skipped with a notice on older versions.
+    required: false
+    default: "true"
+  verify-ignore:
+    description: Space-separated globs of JS files in the directory that are not bundles (for verify).
+    required: false
+    default: ""
   cli-version:
     description: "@autter/runtime-cli version to run."
     required: false
@@ -61,4 +76,30 @@ runs:
         args=(sourcemaps upload "$AUTTER_DIR" --url-prefix "$AUTTER_URL_PREFIX" --endpoint "$AUTTER_ENDPOINT")
         if [ -n "$AUTTER_RELEASE" ]; then args+=(--release "$AUTTER_RELEASE"); fi
         if [ "$AUTTER_DELETE" = "true" ]; then args+=(--delete-after-upload); fi
+        npx --yes --package "$AUTTER_CLI" autter-runtime "${args[@]}"
+    - name: Verify the build
+      if: inputs.verify == 'true'
+      shell: bash
+      env:
+        AUTTER_DIR: ${{ inputs.directory }}
+        AUTTER_CLI: "@autter/runtime-cli@${{ inputs.cli-version }}"
+        AUTTER_RUNTIME_KEY: ${{ inputs.key }}
+        AUTTER_RELEASE: ${{ inputs.release }}
+        AUTTER_URL_PREFIX: ${{ inputs.url-prefix }}
+        AUTTER_ENDPOINT: ${{ inputs.endpoint }}
+        AUTTER_DELETE: ${{ inputs.delete-after-upload }}
+        AUTTER_IGNORE: ${{ inputs.verify-ignore }}
+      run: |
+        version=$(npx --yes --package "$AUTTER_CLI" autter-runtime --version)
+        if ! node -e 'const [a, b] = process.argv[1].split(".").map(Number); process.exit(a > 1 || (a === 1 && b >= 2) ? 0 : 1)' "$version"; then
+          echo "::notice::@autter/runtime-cli $version has no 'sourcemaps verify' (1.2.0+): skipped"
+          exit 0
+        fi
+        args=(sourcemaps verify "$AUTTER_DIR" --url-prefix "$AUTTER_URL_PREFIX" --endpoint "$AUTTER_ENDPOINT")
+        if [ -n "$AUTTER_RELEASE" ]; then args+=(--release "$AUTTER_RELEASE"); fi
+        # Maps kept on purpose (a later step removes or serves them) are reported, not failed.
+        if [ "$AUTTER_DELETE" != "true" ]; then args+=(--allow-maps); fi
+        set -f  # the globs are for verify, not for the shell
+        for glob in $AUTTER_IGNORE; do args+=(--ignore "$glob"); done
+        set +f
         npx --yes --package "$AUTTER_CLI" autter-runtime "${args[@]}"

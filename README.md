@@ -40,8 +40,8 @@ npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, B
 | `@autter/runtime-node` | 1.6.1 | Node servers: OTel tracing, request summaries, coded errors, operations |
 | `@autter/runtime-next` | 1.6.1 | Next.js: server + client + `/edge` for `middleware.ts` |
 | `@autter/runtime-edge` | 1.1.0 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
-| `@autter/otlp-ingester` | 1.6.1 | Self-hosted ingest — upgrade it **before** the SDKs |
-| `@autter/runtime-cli` | 1.1.0 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
+| `@autter/otlp-ingester` | 1.7.0 | Self-hosted ingest — upgrade it **before** the SDKs |
+| `@autter/runtime-cli` | 1.2.0 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
 
 Prefer to have an AI agent set it up for you? Install the companion agent
 skills — they inventory your repo and wire up Autter Runtime for whatever

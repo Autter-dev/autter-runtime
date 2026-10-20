@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 /** A JS bundle and the source map that belongs to it. */
@@ -60,7 +60,7 @@ export function mapPathFor(js: string, code: string): string | null {
 	return existsSync(sibling) ? sibling : null;
 }
 
-async function walk(dir: string, out: string[]): Promise<void> {
+async function walk(dir: string, out: string[], pattern: RegExp = BUNDLE_RE): Promise<void> {
 	let entries;
 	try {
 		entries = await readdir(dir, { withFileTypes: true });
@@ -70,9 +70,66 @@ async function walk(dir: string, out: string[]): Promise<void> {
 	for (const entry of entries) {
 		if (entry.name === "node_modules") continue;
 		const full = join(dir, entry.name);
-		if (entry.isDirectory()) await walk(full, out);
-		else if (entry.isFile() && BUNDLE_RE.test(entry.name)) out.push(full);
+		if (entry.isDirectory()) await walk(full, out, pattern);
+		else if (entry.isFile() && pattern.test(entry.name)) out.push(full);
 	}
+}
+
+/** Every `.map` file under `dir` (absolute paths, sorted). */
+export async function findMapFiles(dir: string): Promise<string[]> {
+	const out: string[] = [];
+	await walk(resolve(dir), out, /\.map$/);
+	return out.sort();
+}
+
+const CSS_SOURCE_MAPPING_URL_RE = /\/\*[#@] sourceMappingURL=([^\s*]+)\s*\*\/\s*$/;
+
+/** Whether a sourceMappingURL value, read from `file`, names `map`. */
+function pointsAt(file: string, url: string | null | undefined, map: string): boolean {
+	if (!url || /^[a-z][\w+.-]*:/i.test(url) || url.startsWith("/")) return false;
+	let path = url.split(/[?#]/)[0]!;
+	try {
+		path = decodeURIComponent(path);
+	} catch {
+		// keep the raw value
+	}
+	return resolve(dirname(file), path) === map;
+}
+
+/** Drop `file`'s trailing sourceMappingURL comment when it names `map`. */
+async function stripReference(file: string, map: string): Promise<void> {
+	let code: string;
+	try {
+		code = await readFile(file, "utf8");
+	} catch {
+		return;
+	}
+	let stripped = code;
+	if (BUNDLE_RE.test(file)) {
+		if (pointsAt(file, readSourceMappingUrl(code), map)) stripped = stripSourceMappingUrl(code);
+	} else if (file.endsWith(".css")) {
+		const match = CSS_SOURCE_MAPPING_URL_RE.exec(code);
+		if (match && pointsAt(file, match[1], map)) stripped = code.slice(0, match.index).replace(/\n?$/, "\n");
+	}
+	if (stripped !== code) await writeFile(file, stripped);
+}
+
+/**
+ * Delete source maps, and the sourceMappingURL comment of the file each one
+ * belongs to when it names the deleted map. `owners` maps a map to its file
+ * when that isn't the map's name without `.map` (a bundle whose comment
+ * points elsewhere). Returns the maps that existed and were deleted.
+ */
+export async function removeSourceMaps(maps: Iterable<string>, owners: ReadonlyMap<string, string> = new Map()): Promise<string[]> {
+	const removed: string[] = [];
+	for (const map of [...new Set(maps)].sort()) {
+		if (!existsSync(map)) continue;
+		await rm(map, { force: true });
+		removed.push(map);
+		const owner = owners.get(map) ?? map.replace(/\.map$/, "");
+		await stripReference(owner, map);
+	}
+	return removed;
 }
 
 /**

@@ -45,8 +45,24 @@ npm install -D @autter/runtime-cli
 
 Every integration reads the server key from `AUTTER_RUNTIME_KEY` (the same
 `autter_rt_…` key your backend uses; never a publishable `autter_rtc_…` key, and
-never in the browser bundle). Without a key, debug ids are still injected and
-nothing is uploaded, so local builds work unchanged.
+never in the browser bundle). Without a key, a plugin turns no source maps on
+and injects nothing, so local builds are exactly what they were; it prints one
+line saying so.
+
+**Maps a plugin turned on are never left behind.** When you haven't
+configured source maps, a plugin turns hidden ones on for the upload and
+deletes every one of them afterwards (JS and CSS maps, and any
+`sourceMappingURL` comment naming them), whatever happened to the upload:
+uploaded, rejected (a 413 from an older ingester, a bad key), the ingester
+unreachable, or a dry run. One line says how many it removed and why, for
+example `removed 12 source map(s) this plugin generated, so they are not
+deployed: 3 of 12 could not be uploaded (HTTP 413: …)`. Bundles keep their
+debug ids, so a later upload can still match them. Maps you configured
+yourself (`build.sourcemap`, `output.sourcemap`, a webpack `devtool`,
+`productionBrowserSourceMaps`) are never deleted unless you set
+`deleteAfterUpload: true`, and then only once uploaded. With `upload: false`
+(upload later with the CLI) or `deleteAfterUpload: false`, the generated maps
+are kept and the plugin warns that they must not be deployed.
 
 The release defaults to the commit being built: `GITHUB_SHA`,
 `VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `GIT_SHA`, then
@@ -67,8 +83,9 @@ export default defineConfig({
 The plugin sets `build.sourcemap: "hidden"` when you haven't configured maps
 (maps are written, but bundles don't reference them), injects debug ids into
 every chunk after the bundle is written, uploads under Vite's `base`, and then
-deletes the maps it created so they are not deployed. SSR builds and Vite 6
-server environments are skipped. With plain Rollup, use the same import (or
+deletes the maps it created so they are not deployed. SSR builds get no maps
+from it; Vite 6 server environments are not uploaded, and maps it turned on
+for them are deleted. With plain Rollup, use the same import (or
 `@autter/runtime-cli/rollup`); it sets `output.sourcemap: "hidden"` when unset.
 
 ### webpack
@@ -85,7 +102,8 @@ module.exports = {
 
 Production builds without a `devtool` get `hidden-source-map`. After emit, the
 plugin injects every emitted JS asset and uploads it under
-`output.publicPath` (`/` when it is `"auto"`). Development builds are left
+`output.publicPath` (`/` when it is `"auto"`), then deletes every map asset
+the build emitted when the devtool was its own. Development builds are left
 alone.
 
 ### Next.js
@@ -103,7 +121,8 @@ Client production builds get hidden source maps; chunks are uploaded as
 `<basePath or assetPrefix>/_next/static/…`. On Next.js 15.4.1 and later the work
 runs in `compiler.runAfterProductionCompile`, so it covers webpack and
 Turbopack builds alike (Turbopack needs `productionBrowserSourceMaps`, which the
-wrapper turns on and then hides by removing the `sourceMappingURL` comments).
+wrapper turns on, then deletes every map under `.next/static` with the
+`sourceMappingURL` comments that name them).
 Older versions use the webpack plugin. Server bundles are never touched. If
 you already set `productionBrowserSourceMaps: true`, your maps stay public and
 on disk. The wrapper lives in `@autter/runtime-cli` rather than

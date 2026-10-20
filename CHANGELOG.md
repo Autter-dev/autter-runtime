@@ -5,6 +5,11 @@
 ### Features
 
 - Source maps up to 32 MiB (was 5 MiB), so large vendor chunks are symbolicated too. The CLI and bundler plugins gzip each upload (`Content-Encoding: gzip`, about 3× smaller) and warn that ingester 1.6.0 and older answer 413 above 5 MB (`runtime-cli`). `/v1/sourcemaps` checks the key before reading the body, inflates gzip/deflate and counts its limit (32 MiB + 1 MiB) in inflated bytes; source map inserts run with `input_format_parallel_parsing = 0`, so one large JSON row is not split into 10 MiB parse chunks (no migration: the `map` column is already a ZSTD-compressed `String`). The parse cache decodes `mappings` into one `Int32Array` (about 3 bytes per byte of map JSON, against about 14 for the general-purpose decoder it replaces for lookups) and counts what maps actually take; a map that would need more than half of `SOURCE_MAP_CACHE_MB` is resolved in one pass over its encoded mappings for the whole stack and not kept, so it never flushes the cache (`otlp-ingester`).
+- `@autter/runtime-next/client` re-exports `enableTracePropagation`, `disableTracePropagation` and `TracePropagationOptions` from `@autter/runtime-browser/tracing`, as it does breadcrumbs, so a Next.js app can link browser errors to server traces without depending on `@autter/runtime-browser` directly (`runtime-next`).
+
+### Security
+
+- The Vite/Rollup, webpack and Next.js source map plugins no longer leave source maps they turned on in the build output, where they were deployed and exposed the original source. Every map a plugin generated itself (JS and CSS; for Next.js everything under `.next/static`) is now deleted after the upload step whatever its outcome — a rejected upload (413, bad or publishable key), an unreachable ingester, a dry run — with any `sourceMappingURL` comment naming it, and one line says how many were removed and why. Without `AUTTER_RUNTIME_KEY` (or `key`), a plugin turns no maps on and injects no debug ids at all, so the build is unchanged; with `upload: false` or `deleteAfterUpload: false` the generated maps are kept with a warning not to deploy them. Maps you configured yourself are never touched unless you set `deleteAfterUpload: true` (`runtime-cli`).
 
 ### Fixes
 

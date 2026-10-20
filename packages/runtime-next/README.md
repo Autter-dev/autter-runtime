@@ -141,6 +141,24 @@ export function Providers({ children }: { children: React.ReactNode }) {
 React render errors don't reach `window.onerror` — the boundary reports
 them via `captureException` and then renders your fallback.
 
+**Linking browser errors to server traces** (opt-in): call
+`enableTracePropagation` from `@autter/runtime-next/client`, next to
+`initAutterBrowser` and before the app sends requests. Same-origin `fetch`
+and XHR requests (your route handlers and server actions) then carry a W3C
+`traceparent`, which `registerAutter` continues, so a browser error links to
+the server trace of the request behind it. Cross-origin APIs get one only
+when listed in `tracePropagationTargets`, and must allow the header in CORS.
+`disableTracePropagation()` turns it off; the rules are in
+`@autter/runtime-browser`'s README ("Trace propagation").
+
+```tsx
+"use client";
+import { initAutterBrowser, enableTracePropagation } from "@autter/runtime-next/client";
+
+initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
+enableTracePropagation({ tracePropagationTargets: ["https://api.example.com/"] });
+```
+
 Also re-exported for convenience: `captureException`, `captureMessage`,
 `trackEvent`, `setUser`, `setContext`, `flush` (from
 `@autter/runtime-next/client`) and `captureServerException`,

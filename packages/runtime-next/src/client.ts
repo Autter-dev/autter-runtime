@@ -21,6 +21,15 @@ export {
 	autterErrorFromResponse,
 	type AutterSeverity,
 } from "@autter/runtime-browser";
+// Opt-in breadcrumbs (kept out of the main tracker's 5 KB bundle).
+export {
+	enableBreadcrumbs,
+	addBreadcrumb,
+	clearBreadcrumbs,
+	type Breadcrumb,
+	type BreadcrumbInput,
+	type BreadcrumbOptions,
+} from "@autter/runtime-browser/breadcrumbs";
 export {
 	AutterErrorBoundary,
 	type AutterErrorBoundaryProps,

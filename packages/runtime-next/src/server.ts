@@ -91,6 +91,7 @@ export {
 	consoleSink,
 	fileSink,
 	redactText,
+	addBreadcrumb,
 } from "@autter/runtime-node";
 
 export type {
@@ -129,6 +130,8 @@ export type {
 	OtlpSinkOptions,
 	ConsoleSinkOptions,
 	FileSinkOptions,
+	Breadcrumb,
+	BreadcrumbInput,
 } from "@autter/runtime-node";
 export type { AutterServer, AutterServerOptions, RelayOptions };
 

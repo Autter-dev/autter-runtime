@@ -1,4 +1,5 @@
 import { isSensitiveKey, scrubText } from "./redact.js";
+import { BREADCRUMBS_ATTRIBUTE } from "./breadcrumbs.js";
 
 /** Bounded, defensive privacy boundary for custom telemetry from any OTLP SDK. */
 export function sanitizeRuntimeContext(
@@ -115,7 +116,8 @@ export function decodeOtlpAttributes(
 				)
 				.slice(0, 128)
 				.filter(
-					(a) => a.key && !/^(?:__proto__|constructor|prototype)$/.test(a.key),
+					// Breadcrumbs are their own validated field (breadcrumbs.ts), never a plain attribute.
+					(a) => a.key && a.key !== BREADCRUMBS_ATTRIBUTE && !/^(?:__proto__|constructor|prototype)$/.test(a.key),
 				)
 				.map((a) => [a.key!, decode(a.value)]),
 		),

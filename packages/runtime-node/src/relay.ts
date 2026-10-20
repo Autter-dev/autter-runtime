@@ -8,6 +8,7 @@ import {
 	observeIngesterResponse,
 } from "./compat.js";
 import { featuresForBrowserEvents } from "../../otlp-ingester/src/compat.js";
+import { sanitizeBreadcrumbs } from "@autter/runtime-core";
 
 /**
  * Same-origin browser relay. The browser tracker posts to a route on the
@@ -243,6 +244,13 @@ function relayContext(raw: object, redactor: Redactor): { context?: Attributes }
 	return Array.isArray(bounded) ? {} : { context: redactor(bounded as Attributes) };
 }
 
+// runtime-browser `/breadcrumbs`: the newest 30, each re-validated (type,
+// level, time) and re-scrubbed with the relay's redactor.
+function relayBreadcrumbs(raw: unknown, redactor: Redactor): { breadcrumbs?: object[] } {
+	const breadcrumbs = sanitizeBreadcrumbs(raw, redactor);
+	return breadcrumbs ? { breadcrumbs } : {};
+}
+
 // Whitelist sanitiser — anything not listed here is dropped, so a
 // compromised or buggy client can't smuggle cookies/DOM/bodies through the
 // relay. Returns null when the payload is structurally invalid.
@@ -297,6 +305,7 @@ export function sanitizeBrowserPayload(
 			...(typeof e.context === "object" && e.context !== null
 				? relayContext(e.context, redactor)
 				: {}),
+			...relayBreadcrumbs(e.breadcrumbs, redactor),
 		});
 	}
 

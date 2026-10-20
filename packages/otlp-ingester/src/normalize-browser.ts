@@ -3,6 +3,7 @@ import { liftErrorFields } from "./error-fields.js";
 import { sanitizeRuntimeContext } from "./context.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { scrubText } from "./redact.js";
+import { breadcrumbsField } from "./breadcrumbs.js";
 import {
 	asSeverity,
 	type RuntimeMetricPoint,
@@ -53,6 +54,8 @@ const browserEventSchema = z.object({
 	 * instead of rejecting the whole beacon.
 	 */
 	context: z.record(z.unknown()).optional(),
+	/** runtime-browser `/breadcrumbs`: steps before a failure. Validated entry by entry in breadcrumbs.ts; a malformed list is dropped, never the beacon. */
+	breadcrumbs: z.array(z.unknown()).optional().catch(undefined),
 });
 
 export const browserPayloadSchema = z.object({
@@ -206,6 +209,7 @@ export function normalizeBrowserPayload(
 			},
 			occurredAt,
 			...liftErrorFields(event.context),
+			...breadcrumbsField(event.breadcrumbs),
 		});
 	}
 

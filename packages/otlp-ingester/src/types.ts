@@ -1,3 +1,5 @@
+import type { Breadcrumb } from "./breadcrumbs.js";
+
 export type RuntimeSource = "browser" | "server";
 
 /**
@@ -60,6 +62,8 @@ export interface RuntimeOccurrenceInput {
 	expected?: boolean;
 	/** `autter.request.id` — joins the occurrence to its request summary. */
 	requestId?: string;
+	/** Steps before the error, oldest first, ≤ 30 (validated by breadcrumbs.ts). */
+	breadcrumbs?: Breadcrumb[];
 }
 
 /**

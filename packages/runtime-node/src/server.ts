@@ -77,6 +77,7 @@ import {
 } from "./requests.js";
 import { errorAttributes, errorInternal } from "@autter/runtime-core";
 import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
+import { breadcrumbEventAttributes } from "./breadcrumbs.js";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -728,6 +729,7 @@ export function recordError(span: Span, err: unknown): void {
 			...(err.stack
 				? { "exception.stacktrace": activeRedactor.text(err.stack) }
 				: {}),
+			...breadcrumbEventAttributes(activeRedactor.text, err),
 		});
 	}
 	span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -986,6 +988,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
 					: {}),
 				...declared,
+				...breadcrumbEventAttributes(activeRedactor.text, error),
 			});
 		} else {
 			// No usable stack — an Error thrown without one, or a non-Error
@@ -1004,6 +1007,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
 					: {}),
 				...declared,
+				...breadcrumbEventAttributes(activeRedactor.text, error),
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -1040,6 +1044,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			"exception.message": safeMessage,
 			...(stack ? { "exception.stacktrace": activeRedactor.text(stack) } : {}),
 			"autter.severity": severity,
+			...breadcrumbEventAttributes(activeRedactor.text),
 		});
 		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 		span.end();
@@ -1245,6 +1250,7 @@ export function captureMessage(
 		"exception.type": "Message",
 		"exception.message": safeMessage,
 		"autter.severity": severity,
+		...breadcrumbEventAttributes(activeRedactor.text),
 	});
 	span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 	span.end();

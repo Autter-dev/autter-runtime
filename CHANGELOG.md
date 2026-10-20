@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Breadcrumbs (compat feature `breadcrumbs`): the last 30 steps before an error, oldest first, attached to the error and shown on the issue page. Browser: opt-in `@autter/runtime-browser/breadcrumbs` (`enableBreadcrumbs()`, `addBreadcrumb()`) records requests from the fetch/XHR wrappers (method, path without query, status including 4xx, duration), navigations, clicks (the existing action label) and `console.warn`/`console.error` (opt out with `{ console: false }`), scrubbed like the rest of the event, and attaches them to exceptions, unhandled rejections, request failures, error messages and outcomes; kept out of the main bundle so it stays under 5 KB, and the 1.4 `autter.trail` is still sent. Node: `addBreadcrumb()` scoped to the current request (AsyncLocalStorage), `runtimeLogger` entries recorded as `log` breadcrumbs, attached to exception span events as the `autter.breadcrumbs` JSON attribute; the browser relay forwards `breadcrumbs`. Ingester: validates, bounds (30, 500-char messages, 10 data keys, 16 KB) and scrubs them, stores them under `autter.breadcrumbs` in the occurrence's `attributes` JSON (no migration) and forwards them on the sink as the optional `breadcrumbs` field (`runtime-browser`, `runtime-node`, `runtime-next`, `otlp-ingester`).
+
 ## [1.5.0] - 2026-10-08
 
 Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `runtime-browser` 1.4.0, new `runtime-edge` 1.0.0. Additive: 1.4.0 code keeps working unchanged (golden-tested).

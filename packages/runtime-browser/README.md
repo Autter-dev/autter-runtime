@@ -111,6 +111,45 @@ the server's request summary without browser tracing. Cross-origin APIs must
 expose the header (`Access-Control-Expose-Headers: x-request-id`) for the
 page to read it.
 
+## Breadcrumbs: the steps before an error (opt-in)
+
+```ts
+import { initAutterBrowser } from "@autter/runtime-browser";
+import { enableBreadcrumbs, addBreadcrumb } from "@autter/runtime-browser/breadcrumbs";
+
+initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
+enableBreadcrumbs();                 // or enableBreadcrumbs({ console: false })
+
+addBreadcrumb({ message: "Opened checkout", data: { items: 3 } });
+```
+
+The last 30 steps are kept and sent, oldest first, as `breadcrumbs` on
+exceptions, unhandled rejections, request failures, error messages and
+outcomes. The issue page shows them as "Steps before the error", and the root
+cause analysis reads them.
+
+| Type | Recorded from | Message, data |
+| --- | --- | --- |
+| `request` | every fetch/XHR the tracker sees (not its own) | `POST /api/cart 404`; `method`, `path` (no query), `status` (`0` = network error), `durationMs`; level `error` for 5xx/network, `warning` for 4xx |
+| `navigation` | `pushState` / `replaceState` / `popstate` | the new path; `from`, `to` |
+| `click` | the recent-action listener | `click:checkout` (`data-autter-action`, else the element type) |
+| `console` | `console.warn` / `console.error` (opt out with `{ console: false }`) | the arguments joined; level `warning` / `error` |
+| `custom` (or any type) | `addBreadcrumb({ type?, message, level?, data? })` | at most 10 data keys of strings, numbers, booleans or null |
+
+Messages (≤ 500 characters) and data values (≤ 200) are scrubbed with
+`scrubText` / `redactContext` like the rest of the event. The console
+wrappers keep and call the originals, and a call made while a breadcrumb is
+being recorded is never recorded again. Breadcrumbs never crowd out the
+errors they explain: each event carries at most 8 KB of them and a burst of
+errors at most 24 KB per 5 seconds, so a batch stays under the 64 KB beacon
+limit. `clearBreadcrumbs()` forgets them (e.g. on logout).
+
+They live in their own import because console patching and the buffer
+(~1 KB brotlied) don't fit the main tracker's 5 KB budget, and the main
+bundle promises no console patching. The 1.4 `autter.trail` context is still
+sent. Needs ingester 1.6.0 (older ingesters ignore the field); through a
+relay, `@autter/runtime-node` 1.6.0 forwards it.
+
 ## API
 
 | Function | Notes |
@@ -125,6 +164,7 @@ page to read it.
 | `flush()` | Force-send the queue (also runs on page hide/unload) |
 | `redactContext(ctx)` | Mask secrets/PII in a context bag, nested (applied to every event automatically) |
 | `scrubText(text)` | Mask secrets/PII inside a string (applied to every message, stack and name automatically) |
+| `enableBreadcrumbs(options?)`, `addBreadcrumb(crumb)`, `clearBreadcrumbs()` | From `@autter/runtime-browser/breadcrumbs` — see above |
 
 ## Batching & delivery
 

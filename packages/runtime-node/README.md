@@ -48,6 +48,38 @@ expectOperation(runtime, "POST /checkout").toHaveOutcome("degraded").toHaveError
 
 Full guide: [Requests, coded errors and background work](../../docs/REQUESTS-AND-ERRORS.md).
 
+# Breadcrumbs (1.6.0)
+
+The steps before an error, scoped to the current request:
+
+```ts
+import { addBreadcrumb, runtimeLogger } from "@autter/runtime-node";
+
+app.post("/checkout", async (req, res) => {
+  addBreadcrumb({ message: "Loaded cart", data: { items: 3 } });  // type "custom"
+  runtimeLogger.info("Charging card", { provider: "stripe" });     // recorded as a "log" breadcrumb
+  await charge();                                                  // a throw here carries both
+});
+```
+
+- Scope: inside `autterRequests()` / `withRuntimeRequest()` /
+  `withRuntimeOperation()` the trail belongs to the request and is shared with
+  its child operations and forks (AsyncLocalStorage). Inside a traced request
+  without the middleware it belongs to the trace; outside both, to the process
+  (so a crash outside any request carries what happened before it).
+- The last 30 are kept. `captureException`, `captureMessage` and errors thrown
+  out of operations attach them to the exception span event as
+  `autter.breadcrumbs` (a JSON string, at most 16 KB, or less when
+  `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` is lower).
+- Every `runtimeLogger` / `runtimeContext.debug|info|warn|error` entry is
+  recorded as a `log` breadcrumb with its level and up to 10 primitive
+  attributes.
+- Messages (≤ 500 characters) and data (≤ 10 keys of strings, numbers,
+  booleans or null) are scrubbed with your `redact` settings.
+- The browser relay forwards browser breadcrumbs, re-validated and re-scrubbed.
+- Needs ingester 1.6.0. Logger-only mode (`initAutterLogging`) and
+  `@autter/runtime-edge` don't attach them yet.
+
 # @autter/runtime-node
 
 The server tracker exports per-instance RSS, heap, memory limit, and GC

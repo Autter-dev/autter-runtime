@@ -14,6 +14,7 @@
  */
 
 import { version as SDK_VERSION } from "../package.json";
+import type { Breadcrumb } from "./breadcrumbs";
 
 export interface AutterBrowserOptions {
 	/**
@@ -78,6 +79,8 @@ export interface BrowserEvent {
 	route?: string;
 	context?: Record<string, unknown>;
 	durationMs?: number;
+	/** Steps before a failure, oldest first (`@autter/runtime-browser/breadcrumbs`). */
+	breadcrumbs?: Breadcrumb[];
 }
 
 const MAX_QUEUE = 10;
@@ -101,6 +104,14 @@ const TRAIL_MAX = 8;
 let trail: string[] = [];
 let clientCache: { browser: string; os: string } | undefined;
 let seenCspPolicyHash = "";
+// Breadcrumbs live in the opt-in `@autter/runtime-browser/breadcrumbs`
+// module (they don't fit this bundle's 5 KB budget); it installs these
+// hooks, and the request wrappers, history patch and click listener report to them.
+let crumbs: { add(kind: string, a?: unknown, b?: unknown, status?: number, ms?: number): void; list(type: string): Breadcrumb[] | undefined } | undefined;
+/** @internal Installed by `@autter/runtime-browser/breadcrumbs`. */
+export function _useBreadcrumbs(hooks: typeof crumbs): void {
+	crumbs = hooks;
+}
 
 function uid(): string {
 	try {
@@ -425,6 +436,7 @@ function watchRoutes(): void {
 	const record = () => {
 		const path = route();
 		if (path) pushTrail(`nav:${path}`);
+		crumbs?.add("navigation", path);
 	};
 	record();
 	try {
@@ -461,6 +473,7 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 		}
 	}
 	attachClient(event);
+	if (crumbs) event.breadcrumbs = crumbs.list(event.type);
 	// Scrub before beforeSend so the last-chance hook sees the final form.
 	// Fields arrive cut with 512 chars of slack; scrub, then cut, so a secret
 	// straddling the limit is masked whole instead of half-exported.
@@ -652,7 +665,8 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			const label = explicit && /^[a-zA-Z0-9_.:-]{1,80}$/.test(explicit)
 				? explicit : element.tagName.toLowerCase();
 			lastAction = { name: `${event.type}:${label}`, at: Date.now(), route: route() };
-			pushTrail(`${event.type}:${label}`);
+			pushTrail(lastAction.name);
+			crumbs?.add("click", lastAction.name);
 		};
 		document.addEventListener("click", rememberAction, true);
 		document.addEventListener("submit", rememberAction, true);
@@ -664,7 +678,9 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			const target = input instanceof Request ? input.url : String(input);
 			const isTelemetry = target.includes(options.endpoint);
 			const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
+			const method = init?.method || (input as Request).method;
 			return originalFetch(input, init).then((response) => {
+				if (!isTelemetry) crumbs?.add("request", method, path, response.status, performance.now() - started);
 				if (!isTelemetry && response.status >= 500) {
 					const event = baseEvent("request_failure", `Request returned ${response.status}`);
 					event.name = path;
@@ -676,6 +692,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				return response;
 			}, (error: unknown) => {
 				if (!isTelemetry) {
+					crumbs?.add("request", method, path, 0, performance.now() - started);
 					const event = baseEvent("request_failure", "Request failed");
 					event.name = path;
 					event.errorType = "NetworkError";
@@ -687,15 +704,16 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 		}) as typeof fetch;
 	}
 	if (options.captureNetworkFailures !== false && typeof XMLHttpRequest !== "undefined") {
-		const xhrUrls = new WeakMap<XMLHttpRequest, string>();
+		const xhrUrls = new WeakMap<XMLHttpRequest, unknown[]>();
 		const originalOpen = XMLHttpRequest.prototype.open;
 		const originalSend = XMLHttpRequest.prototype.send;
 		XMLHttpRequest.prototype.open = (function (this: XMLHttpRequest, ...args: unknown[]) {
-			xhrUrls.set(this, String(args[1] ?? ""));
+			xhrUrls.set(this, args);
 			return Reflect.apply(originalOpen, this, args);
 		}) as typeof XMLHttpRequest.prototype.open;
 		XMLHttpRequest.prototype.send = function (...args: Parameters<XMLHttpRequest["send"]>) {
-			const target = xhrUrls.get(this) ?? "";
+			const [method, url] = xhrUrls.get(this) ?? [];
+			const target = String(url ?? "");
 			if (!target.includes(options.endpoint)) {
 				const started = performance.now();
 				const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
@@ -703,6 +721,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				const record = (message: string, errorType: string, requestId?: string | null) => {
 					if (recorded) return;
 					recorded = true;
+					crumbs?.add("request", method, path, this.status, performance.now() - started);
 					const event = baseEvent("request_failure", message);
 					event.name = path;
 					event.errorType = errorType;
@@ -713,6 +732,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				const onError = () => record("Request failed", "NetworkError");
 				const onTimeout = () => record("Request timed out", "NetworkError");
 				this.addEventListener("loadend", () => {
+					if (this.status < 500 && !recorded) crumbs?.add("request", method, path, this.status, performance.now() - started);
 					if (this.status >= 500) {
 						let requestId: string | null = null;
 						try { requestId = this.getResponseHeader("x-request-id"); } catch { /* Not exposed. */ }

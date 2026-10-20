@@ -8,6 +8,7 @@ import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
 import { profileTableDDL, type ProfileSample } from "./profiles.js";
 import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
 import { sourceMapTableDDL } from "./source-maps.js";
+import { attributesWithBreadcrumbs } from "./breadcrumbs.js";
 import {
 	logTableDDL,
 	requestRollupTableDDL,
@@ -417,7 +418,7 @@ export class ClickHouseStore {
 				status_code: o.statusCode ?? 0,
 				trace_id: o.traceId ?? "",
 				session_id: o.sessionId ?? "",
-				attributes: JSON.stringify(o.attributes ?? {}),
+				attributes: JSON.stringify(attributesWithBreadcrumbs(o.attributes, o.breadcrumbs)),
 				occurred_at: o.occurredAt.toISOString(),
 				error_code: o.errorCode ?? "",
 				error_why: o.why ?? "",

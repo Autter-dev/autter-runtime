@@ -24,6 +24,7 @@ import {
 	LEVEL_SEVERITY,
 	type AiRollup,
 	type AiUsageInput,
+	BreadcrumbTrail,
 	type InlineLogState,
 	type RuntimeCarrier,
 	type RuntimeEvent,
@@ -33,6 +34,7 @@ import {
 	type RuntimeOutcome,
 } from "@autter/runtime-core";
 import { redactAttributes } from "./redact.js";
+import { recordLogBreadcrumb, rememberThrownBreadcrumbs } from "./breadcrumbs.js";
 import {
 	consoleSink,
 	fileSink,
@@ -139,6 +141,8 @@ export interface OperationState {
 	errorThrown?: boolean;
 	req?: unknown;
 	res?: unknown;
+	/** Breadcrumbs (breadcrumbs.ts): the request's trail, shared with child operations. */
+	breadcrumbs?: BreadcrumbTrail;
 }
 
 /** @internal */
@@ -247,6 +251,7 @@ function emit(
 		options.state !== undefined ? (options.state ?? undefined) : local.getStore();
 	if (state?.sealed) return; // work continuing after completion cannot mutate the emitted operation
 	const summary = extra["autter.event.type"] === "operation";
+	if (!summary) recordLogBreadcrumb(level, message, attributes, state);
 	if (
 		!summary &&
 		LEVEL_SEVERITY[level] < LEVEL_SEVERITY[config?.options?.minLevel ?? "debug"]
@@ -637,6 +642,8 @@ function startOperation<T>(
 					...(parent?.requestId ? { requestId: parent.requestId } : {}),
 				},
 	);
+	// Child operations and forks add to (and read) the request's breadcrumbs.
+	if (linked && parent) state.breadcrumbs = parent.breadcrumbs ??= new BreadcrumbTrail();
 	const operation = operationHandle(state);
 	const run = () =>
 		local.run(state, async () => {
@@ -647,6 +654,7 @@ function startOperation<T>(
 				state.outcome = "failed";
 				thrown = error;
 				noteOperationError(error, true, state);
+				rememberThrownBreadcrumbs(error, state);
 				config?.captureThrown?.(error);
 				throw error;
 			} finally {

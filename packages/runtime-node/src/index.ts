@@ -103,3 +103,10 @@ export {
 	type SdkIdentity,
 } from "./compat.js";
 export { runDoctor, type DoctorOptions, type DoctorReport } from "./doctor.js";
+export { addBreadcrumb } from "./breadcrumbs.js";
+export type {
+	Breadcrumb,
+	BreadcrumbInput,
+	BreadcrumbLevel,
+	BreadcrumbType,
+} from "@autter/runtime-core";

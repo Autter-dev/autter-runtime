@@ -3,6 +3,7 @@ import { liftErrorFields, validRequestId } from "./error-fields.js";
 import { scrubText } from "./redact.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
+import { BREADCRUMBS_ATTRIBUTE, breadcrumbsField } from "./breadcrumbs.js";
 import {
 	asSeverity,
 	type RuntimeLlmCall,
@@ -299,6 +300,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						// Event attributes first: one span can carry several
 						// exceptions, each with its own code.
 						...liftErrorFields(eventAttrs, attrs),
+						...breadcrumbsField(eventAttrs.get(BREADCRUMBS_ATTRIBUTE), attrs.get(BREADCRUMBS_ATTRIBUTE)),
 					});
 				}
 				const failedOutcomes = (span.events ?? []).filter((event) => {

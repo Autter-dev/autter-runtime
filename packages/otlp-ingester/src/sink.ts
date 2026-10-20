@@ -429,6 +429,7 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		link,
 		expected,
 		requestId,
+		breadcrumbs,
 		...rest
 	} = o;
 	return {
@@ -444,6 +445,8 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		...(link ? { link } : {}),
 		...(expected ? { expected: true } : {}),
 		...(requestId ? { requestId } : {}),
+		// 1.6.0: steps before the error, oldest first, ≤ 30.
+		...(breadcrumbs?.length ? { breadcrumbs } : {}),
 	};
 }
 

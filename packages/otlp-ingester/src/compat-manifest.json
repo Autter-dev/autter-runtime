@@ -118,6 +118,22 @@
 			"ingester": "1.6.0",
 			"migrations": [],
 			"sdks": { "@autter/runtime-browser": "1.6.0", "@autter/runtime-next": "1.6.0", "@autter/runtime-node": "1.6.0" }
+		},
+		{
+			"id": "sourcemap_upload_keys",
+			"title": "Upload-only keys for source maps (autter_rtu_)",
+			"ingester": "1.7.0",
+			"migrations": [],
+			"route": "/v1/sourcemaps",
+			"sdks": {}
+		},
+		{
+			"id": "source_map_verify",
+			"title": "Source map check by debug id (autter-runtime sourcemaps verify)",
+			"ingester": "1.7.0",
+			"migrations": ["0017-source-maps-debug-id"],
+			"route": "/v1/sourcemaps/check",
+			"sdks": {}
 		}
 	]
 }

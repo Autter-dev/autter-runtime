@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-cli",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"description": "Readable stack traces for Autter Runtime: inject debug ids into JS bundles and upload their source maps (CLI, Vite/Rollup, webpack and Next.js plugins)",
 	"license": "MIT",
 	"type": "module",
@@ -51,6 +51,7 @@
 		"test": "npm run build -w @autter/otlp-ingester && npm run build && node --test test/*.test.mjs"
 	},
 	"dependencies": {
+		"@sveltejs/acorn-typescript": "^1.0.13",
 		"acorn": "^8.17.0"
 	},
 	"peerDependencies": {

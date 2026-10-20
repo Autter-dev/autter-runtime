@@ -17,6 +17,14 @@ export const MAX_UPLOAD_BYTES = MAX_MAP_CHARS + 1024 * 1024;
 /** What ingester 1.6.0 and older accept (the CLI can't tell which it talks to). */
 const LEGACY_MAX_BYTES = 5 * 1024 * 1024;
 
+/** Keys `upload` accepts, and the one it refuses before sending anything. */
+export const UPLOAD_KEY_PREFIX = "autter_rtu_";
+export const SERVER_KEY_PREFIX = "autter_rt_";
+export const CLIENT_KEY_PREFIX = "autter_rtc_";
+export const KEY_ADVICE =
+	"set AUTTER_RUNTIME_KEY to an upload-only key (autter_rtu_…, recommended for CI: it can only upload source maps) " +
+	"or the full server key (autter_rt_…, also works)";
+
 const gzip = promisify(gzipCallback);
 const CHECK_BATCH = 500;
 const MAX_ATTEMPTS = 3;
@@ -32,7 +40,8 @@ export interface UploadOptions {
 	/** Ingester base URL. Default: $AUTTER_ENDPOINT, $AUTTER_RUNTIME_ENDPOINT,
 	 * $OTEL_EXPORTER_OTLP_ENDPOINT, else https://otlp.autter.dev. */
 	endpoint?: string;
-	/** Server ingest key. Default: $AUTTER_RUNTIME_KEY. */
+	/** Upload key (`autter_rtu_…`, recommended for CI) or server key
+	 * (`autter_rt_…`). Default: $AUTTER_RUNTIME_KEY. */
 	key?: string;
 	/** List what would be uploaded; no network, no key needed. */
 	dryRun?: boolean;
@@ -209,10 +218,15 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 	}
 
 	const key = (options.key ?? env.AUTTER_RUNTIME_KEY ?? "").trim();
-	if (!key) throw new FatalUploadError("no ingest key: set AUTTER_RUNTIME_KEY to a server key (autter_rt_…)");
-	if (key.startsWith("autter_rtc_")) {
-		throw new FatalUploadError("AUTTER_RUNTIME_KEY is a publishable client key (autter_rtc_…); uploads need a server key (autter_rt_…)");
+	if (!key) throw new FatalUploadError(`no ingest key: ${KEY_ADVICE}`);
+	if (key.startsWith(CLIENT_KEY_PREFIX)) {
+		throw new FatalUploadError(`AUTTER_RUNTIME_KEY is a publishable client key (autter_rtc_…), which cannot upload source maps: ${KEY_ADVICE}`);
 	}
+	const rejected = (status: number, detail: string) =>
+		new FatalUploadError(
+			`the ingester rejected the key (${status}): ${detail}` +
+				(key.startsWith(UPLOAD_KEY_PREFIX) ? " (upload keys, autter_rtu_…, need ingester 1.7.0 or later; the server key works with any)" : ""),
+		);
 	const headers = { "content-type": "application/json", authorization: `Bearer ${key}` };
 	const uploadHeaders = { ...headers, "content-encoding": "gzip" };
 
@@ -238,9 +252,7 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 				);
 				break;
 			}
-			if (res.status === 401 || res.status === 403) {
-				throw new FatalUploadError(`the ingester rejected the key (${res.status}): ${(await res.text()).slice(0, 300)}`);
-			}
+			if (res.status === 401 || res.status === 403) throw rejected(res.status, (await res.text()).slice(0, 300));
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as { present?: unknown };
 			const present = new Set(Array.isArray(body.present) ? body.present : []);
@@ -272,7 +284,7 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 				detail = (err as Error).message;
 			}
 			if (status === 401 || status === 403) {
-				fatal = new FatalUploadError(`the ingester rejected the key (${status}): ${detail}`);
+				fatal = rejected(status, detail);
 				return;
 			}
 			const retryable = status === 0 || status === 429 || status >= 500;

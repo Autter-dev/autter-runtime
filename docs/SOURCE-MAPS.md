@@ -13,7 +13,7 @@ the error and prepares a fix.
    `//# debugId=<id>` comment, adds a one-line snippet that registers the id
    with the browser SDK, and writes `"debugId"` into the `.map`.
 2. **Upload.** Every map goes to the ingester's `POST /v1/sourcemaps`,
-   gzipped, with a server key, its debug id, the release, the path the
+   gzipped, with an upload or server key, its debug id, the release, the path the
    bundle is served from and the bundle's function scopes (see **Function
    names** under [How the pieces fit](#how-the-pieces-fit)). Maps the
    ingester already has are skipped.
@@ -26,6 +26,101 @@ the error and prepares a fix.
 Debug ids need ingester 1.6.0+ (compat feature `source_map_debug_ids`,
 migration `0017-source-maps-debug-id`). Older ingesters still accept `.js`
 maps by release + path; the CLI warns and uploads everything.
+
+## The quick path: `setup`, then `verify`
+
+Two commands do the whole job, and both are built for coding agents as much
+as for people: non-interactive, `--json` output, meaningful exit codes.
+
+```bash
+npx @autter/runtime-cli@latest sourcemaps setup            # once, in the app's directory
+# store AUTTER_RUNTIME_KEY where the production build runs (setup says how)
+npm run build                                               # the production build
+npx autter-runtime sourcemaps verify dist                   # before every deploy
+```
+
+`autter-runtime sourcemaps setup [dir]` detects the project and wires in the
+right integration from the table below. Safe to re-run: a second run changes
+nothing and lists only what is left.
+
+- **Detects** the build tool (Vite and the frameworks that build with it:
+  SvelteKit, Nuxt, Astro, Remix, React Router, Solid, SolidStart, Qwik;
+  Next.js; webpack, Vue CLI; Rollup; Create React App; Angular CLI; Parcel;
+  esbuild scripts), the package manager (`packageManager` field, then the
+  lockfile), the CI (`.github/workflows`, `vercel.json`/`.vercel` or `VERCEL`,
+  `netlify.toml`, Cloudflare Pages through wrangler, `.gitlab-ci.yml`), the
+  output directory and URL prefix, the source map settings already there, the
+  installed `@autter/runtime-browser` or `@autter/runtime-next` (debug ids
+  need 1.6.0+), and whether `initAutterBrowser` gets a `release`.
+- **Edits** what it can edit confidently: `@autter/runtime-cli` in
+  `devDependencies` (`--install` also runs the package manager); the plugin in
+  `vite.config.*` (under `vite` for Nuxt and Astro), `rollup.config.*`,
+  `webpack.config.*` (under `configureWebpack` for Vue CLI), or
+  `withAutterSourceMaps(...)` around the exported Next.js config, outermost
+  around any `withX(...)` wrappers. Config files are parsed (JavaScript or
+  TypeScript, with acorn) and only the import and the plugin are spliced in,
+  in the file's own quote and semicolon style. Recognised shapes:
+  `export default` / `module.exports =` an object literal, a
+  `define…Config({...})` call, a top-level variable holding one, or a
+  function that returns one. Anything else (`mergeConfig(...)`, `plugins:
+  getPlugins()`, a spread that may already set `plugins`, a file that does not
+  parse) is left untouched and reported as a `manual` action with the snippet.
+- **Builds without a plugin** (Create React App, Angular, Parcel, esbuild,
+  unrecognised tools with a known output directory) get a `postbuild` script,
+  or the same commands appended to `build` for pnpm, Yarn 2+ and Bun, which
+  don't run `postbuild`:
+
+  ```bash
+  autter-runtime sourcemaps inject build && autter-runtime sourcemaps upload build --delete-after-upload --best-effort
+  ```
+
+  `--best-effort` keeps local builds and fork PRs (no key) green, and with
+  `--delete-after-upload` it deletes every map in the output whatever
+  happened, so maps are never deployed. Setup also turns on maps where the
+  tool supports hidden ones: `GENERATE_SOURCEMAP=true` when a `.env` file
+  turned them off (CRA), `"sourceMap": { "scripts": true, "styles": false,
+  "hidden": true, "vendor": false }` in Angular's production configuration;
+  for esbuild and Parcel it says which flag to change.
+- **Reports, never edits, app code.** When `initAutterBrowser` has no
+  `release`, a `manual` action shows how to pass the commit SHA through the
+  tool's public env or define mechanism (`define` with
+  `import.meta.env.VITE_AUTTER_RELEASE`, `env.NEXT_PUBLIC_AUTTER_RELEASE`,
+  `REACT_APP_AUTTER_RELEASE`, `DefinePlugin`, Angular `--define`), reading
+  the detected CI's commit variable.
+- **Never writes a key.** `secret.where` lists, per detected CI, where
+  `AUTTER_RUNTIME_KEY` goes, with commands that read the value from a prompt
+  or stdin so it stays out of shell history: `gh secret set
+  AUTTER_RUNTIME_KEY --repo <owner/repo>` (from the git remote), `vercel env
+  add AUTTER_RUNTIME_KEY production`, `netlify env:set AUTTER_RUNTIME_KEY
+  "$(cat)" --context production --scope builds --secret`, and dashboard notes
+  for Cloudflare Pages build variables and GitLab masked CI variables. For
+  GitHub Actions it also asks you to pass the secret to the build step.
+
+`--dry-run` writes nothing and reports the same plan. `--json` prints
+`{ detected, actions, secret, next }`, where each action is `{ type:
+"edit" | "add-dependency" | "add-script" | "manual" | "set-secret", file?,
+description, snippet?, command? }`. Exit codes: `0` everything was applied,
+`2` manual actions remain, `1` error (for example no `package.json`).
+
+`autter-runtime sourcemaps verify <dir>` checks the output that is about to
+be deployed:
+
+- every `.js`/`.mjs`/`.cjs` bundle has a debug id: the `//# debugId=` comment
+  and the registration snippet, with the same id;
+- no `.map` file is left in `<dir>`, and no `sourceMappingURL` points at a
+  map that is not there (or inlines one as a `data:` URL): both are deploy
+  risks;
+- with `AUTTER_RUNTIME_KEY` set, every bundle's map is on the ingester. It
+  asks `POST /v1/sourcemaps/check` by debug id alone (ingester 1.7.0+), which
+  works after the maps were deleted and finds exactly what symbolication
+  would. Without a key, the local checks pass or fail on their own and the
+  upload state is reported as unverified.
+
+Files copied unchanged from `public/` (or `static/`, `src/`), Next.js build
+manifests and polyfills, and service workers are skipped; `--ignore <glob>` skips more.
+`--allow-maps` reports leftover maps without failing, for a step that runs
+before they are removed. It exits `1` on any failure, with the reason per
+file, and `--json` prints `{ ok, bundles, maps, upload, failures }`.
 
 ## Pick an integration
 
@@ -43,9 +138,12 @@ Install the package as a dev dependency:
 npm install -D @autter/runtime-cli
 ```
 
-Every integration reads the server key from `AUTTER_RUNTIME_KEY` (the same
-`autter_rt_…` key your backend uses; never a publishable `autter_rtc_…` key, and
-never in the browser bundle). Without a key, a plugin turns no source maps on
+Every integration reads the key from `AUTTER_RUNTIME_KEY`, and only where the
+build runs (never in the browser bundle). Use an **upload-only key**
+(`autter_rtu_…`, ingester 1.7.0+) in CI: it can upload and check source maps
+and nothing else, so a leaked CI secret can't send or forge telemetry. The
+full server key your backend uses (`autter_rt_…`) also works. A publishable
+`autter_rtc_…` key is refused. Without a key, a plugin turns no source maps on
 and injects nothing, so local builds are exactly what they were; it prints one
 line saying so.
 
@@ -133,8 +231,9 @@ your app.
 
 ```bash
 npx autter-runtime sourcemaps inject dist
-AUTTER_RUNTIME_KEY=autter_rt_… npx autter-runtime sourcemaps upload dist \
+AUTTER_RUNTIME_KEY=autter_rtu_… npx autter-runtime sourcemaps upload dist \
   --url-prefix / --release "$GIT_SHA"
+npx autter-runtime sourcemaps verify dist
 ```
 
 | Option | Meaning |
@@ -144,13 +243,15 @@ AUTTER_RUNTIME_KEY=autter_rt_… npx autter-runtime sourcemaps upload dist \
 | `--endpoint <url>` | Ingester base URL (default `$AUTTER_ENDPOINT`, `$AUTTER_RUNTIME_ENDPOINT`, `$OTEL_EXPORTER_OTLP_ENDPOINT`, then `https://otlp.autter.dev`) |
 | `--concurrency <n>` | Parallel uploads (default 8) |
 | `--delete-after-upload` | Delete each `.map` (and its `sourceMappingURL` comment) once uploaded |
+| `--best-effort` | Never fail (for build scripts): no key or a failed upload is reported and exits `0`; with `--delete-after-upload`, every `.map` under the directory is then deleted anyway |
 | `--dry-run` | Show what would change or be uploaded; write and send nothing |
 | `--json` | Machine-readable output |
 
 `inject` is idempotent: run it twice and the second run changes nothing.
 Run it **before** you upload and **before** you deploy, on the exact files you
 deploy. Exit codes: `0` success, `1` some maps failed, `2` no key / no
-release / key rejected, `64` usage error.
+release / key rejected, `64` usage error (`0` whatever happened with
+`--best-effort`).
 
 `@autter/runtime-node` also installs an `autter-runtime` bin (for `doctor`).
 Each package hands the other's commands over, so `autter-runtime doctor` and
@@ -169,9 +270,14 @@ Each package hands the other's commands over, so `autter-runtime doctor` and
 - run: ./deploy.sh dist
 ```
 
-Inputs: `directory`, `key` (required), `release` (default `GITHUB_SHA`),
-`url-prefix`, `endpoint`, `inject` (`"false"` if a bundler plugin already
-injected), `delete-after-upload`, `cli-version`.
+Inputs: `directory`, `key` (required: an upload-only `autter_rtu_…` key, or
+the server key), `release` (default `GITHUB_SHA`), `url-prefix`, `endpoint`,
+`inject` (`"false"` if a bundler plugin already injected),
+`delete-after-upload`, `verify` (default `"true"`: runs `sourcemaps verify`
+after the upload and fails the step on a problem; leftover maps only fail it
+with `delete-after-upload: "true"`; skipped with a notice for runtime-cli
+before 1.2.0), `verify-ignore` (space-separated globs of JS files that are not
+bundles), `cli-version`.
 
 ## How the pieces fit
 
@@ -270,6 +376,16 @@ the other maps, at the cost of fetching it again for the next event.
 by release + path (origin, query and hash removed).
 
 ## Troubleshooting
+
+- **`403 upload_key_not_allowed`.** An upload-only key (`autter_rtu_…`) was
+  used for telemetry. It only works on `/v1/sourcemaps` and
+  `/v1/sourcemaps/check`; backends and the browser relay need the server key.
+- **`the ingester rejected the key (401) … upload keys … need ingester
+  1.7.0`.** The ingester predates upload keys (or the key is wrong). Upgrade
+  the ingester, or use the server key.
+- **`verify`: `upload: unverified … predates 1.7.0`.** The ingester can't
+  check maps by debug id; the local checks still ran. Upgrade it to verify
+  uploads too.
 
 - **Frames stay minified.** Check that you deployed the files you injected
   (inject after any later minification or copying step), that the browser SDK

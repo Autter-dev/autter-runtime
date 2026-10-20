@@ -9,6 +9,7 @@ import { loadConfig } from "../../otlp-ingester/dist/config.js";
 import { createIngesterApp } from "../../otlp-ingester/dist/server.js";
 
 export const SERVER_KEY = "autter_rt_test_server_key";
+export const UPLOAD_KEY = "autter_rtu_test_upload_key";
 
 /** A fresh temp directory with `files` ({ "a/b.js": "content" }) written into it. */
 export function tempDir(files = {}) {
@@ -48,13 +49,15 @@ export const SIMPLE_MAP = { version: 3, file: "app.js", sources: ["../src/app.ts
  * The real ingester (built dist) with its ClickHouse store replaced by an
  * in-memory one: uploads go through the real routes, auth and validation.
  */
-export async function startIngester({ legacy = false, failFirst = 0, rejectUploads = 0 } = {}) {
+export async function startIngester({ legacy = false, failFirst = 0, rejectUploads = 0, checkStatus = 0 } = {}) {
 	const config = {
 		...loadConfig(),
 		clickhouseUrl: "http://127.0.0.1:8123",
 		ingestKeys: [
 			{ key: SERVER_KEY, orgId: "org-a", repositoryId: "repo-a", scope: "server" },
 			{ key: "autter_rtc_client", orgId: "org-a", repositoryId: "repo-a", scope: "client" },
+			// No scope: the autter_rtu_ prefix makes it an upload key.
+			{ key: UPLOAD_KEY, orgId: "org-a", repositoryId: "repo-a" },
 		],
 	};
 	const { app, store } = createIngesterApp(config);
@@ -64,10 +67,14 @@ export async function startIngester({ legacy = false, failFirst = 0, rejectUploa
 	store.insertSourceMap = async (ctx, sourceMap) => {
 		rows.push({ tenant: `${ctx.orgId}/${ctx.repositoryId}`, ...sourceMap });
 	};
+	// Same rules as presentSourceMaps: a hashed entry needs the same release,
+	// path, debug id and content; a debug-id-only entry any map with that id.
 	store.sourceMapsPresent = async (_ctx, check) =>
 		check.entries
 			.map((entry, index) =>
-				rows.some((r) => r.release === check.release && r.filename === entry.filename && r.debugId === entry.debugId && r.contentHash === entry.hash) ? index : -1)
+				rows.some((r) => entry.hash
+					? r.release === check.release && r.filename === entry.filename && r.debugId === entry.debugId && r.contentHash === entry.hash
+					: r.debugId === entry.debugId) ? index : -1)
 			.filter((index) => index >= 0);
 	// Record every request; optionally emulate an old ingester (no check
 	// route) or a flaky one, before the real app sees it.
@@ -76,6 +83,11 @@ export async function startIngester({ legacy = false, failFirst = 0, rejectUploa
 		if (legacy && req.url.startsWith("/v1/sourcemaps/check")) {
 			req.resume();
 			res.writeHead(404).end("not found");
+			return;
+		}
+		if (checkStatus && req.url.startsWith("/v1/sourcemaps/check")) {
+			req.resume();
+			res.writeHead(checkStatus).end(JSON.stringify({ error: "invalid source map check" }));
 			return;
 		}
 		if (rejectUploads && req.url === "/v1/sourcemaps") {

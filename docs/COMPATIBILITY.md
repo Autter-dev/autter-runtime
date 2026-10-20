@@ -104,6 +104,8 @@ copy that a test keeps identical.
 | Source map debug ids (`source_map_debug_ids`) | 1.6.0 | `0017-source-maps-debug-id` | `/v1/sourcemaps/check` | browser/next 1.6.0 |
 | Fingerprint override (`fingerprint_override`) | 1.6.0 | | | browser/node/next 1.6.0, edge 1.1.0 |
 | Browser trace propagation (`browser_trace_propagation`) | 1.6.0 | | | browser/next/node 1.6.0 |
+| Upload-only keys for source maps (`sourcemap_upload_keys`) | 1.7.0 | | `/v1/sourcemaps` | |
+| Source map check by debug id (`source_map_verify`) | 1.7.0 | `0017-source-maps-debug-id` | `/v1/sourcemaps/check` | |
 
 Notes:
 
@@ -116,6 +118,10 @@ Notes:
 - Ingesters older than 1.6.0 accept a browser event's `traceId` but drop it
   (the event itself is stored), so browser errors are not linked to server
   traces until the ingester is upgraded. The relay warns once.
+- `sourcemap_upload_keys` and `source_map_verify` list no SDK: they are used
+  by `@autter/runtime-cli` (1.2.0: `sourcemaps setup` and `verify`), a build
+  tool that reports no SDK version to the ingester. Older CLIs already send
+  `autter_rtu_…` keys; only the ingester decides whether they work.
 - Upgrade order: ingester first (its migrations run at boot), then SDKs.
 
 ## Adding a feature

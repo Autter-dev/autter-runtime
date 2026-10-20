@@ -117,6 +117,7 @@ export function validateSourceMap(body: unknown): ValidSourceMap | null {
 export interface SourceMapCheckEntry {
 	filename: string;
 	debugId: string;
+	/** sha256 of the stored map, or "" for a check by debug id alone (1.7.0+). */
 	hash: string;
 }
 
@@ -130,9 +131,12 @@ export const SOURCE_MAP_CHECK_MAX = 500;
 
 /**
  * Validate a `/v1/sourcemaps/check` request:
- * `{ release, files: [{ filename, debugId?, hash }] }` (≤ 500 files). The
+ * `{ release, files: [{ filename, debugId?, hash? }] }` (≤ 500 files). The
  * filenames and debug ids are normalised exactly as an upload would store
- * them. Null when invalid.
+ * them. Each file needs a hash (is this exact map stored? — what `upload`
+ * asks to skip maps) or, from 1.7.0, a debug id alone (is any map stored
+ * for this bundle? — what `sourcemaps verify` asks after the maps were
+ * deleted). Null when invalid.
  */
 export function validateSourceMapCheck(body: unknown): SourceMapCheck | null {
 	if (!body || typeof body !== "object") return null;
@@ -143,12 +147,15 @@ export function validateSourceMapCheck(body: unknown): SourceMapCheck | null {
 	for (const raw of input.files) {
 		if (!raw || typeof raw !== "object") return null;
 		const file = raw as Record<string, unknown>;
-		if (typeof file.filename !== "string" || typeof file.hash !== "string" || !/^[0-9a-f]{64}$/.test(file.hash)) return null;
+		if (typeof file.filename !== "string") return null;
+		const hash = file.hash === undefined || file.hash === null || file.hash === "" ? "" : file.hash;
+		if (typeof hash !== "string" || (hash !== "" && !/^[0-9a-f]{64}$/.test(hash))) return null;
 		const filename = sourceMapPath(file.filename);
 		if (!filename) return null;
 		const debugId = file.debugId === undefined || file.debugId === null || file.debugId === "" ? "" : normalizeDebugId(file.debugId);
 		if (debugId === null) return null;
-		entries.push({ filename, debugId, hash: file.hash });
+		if (!hash && !debugId) return null;
+		entries.push({ filename, debugId, hash });
 	}
 	return { release: input.release, entries };
 }

@@ -69,9 +69,12 @@ export async function lookupSourceMap(
 export const SOURCE_MAP_FRESH_DAYS = 7;
 
 /**
- * Which check entries the tenant already has: same release, path, debug id
- * and content hash, uploaded in the last SOURCE_MAP_FRESH_DAYS. Returns the
- * indexes of `check.entries` that need no upload.
+ * Which check entries the tenant already has. An entry with a hash: same
+ * release, path, debug id and content hash, uploaded in the last
+ * SOURCE_MAP_FRESH_DAYS (the upload skips those). An entry with only a
+ * debug id: any stored map with that id, whatever its release and path —
+ * exactly what lookupSourceMap would find for a stack from that bundle.
+ * Returns the indexes of `check.entries` that are present.
  */
 export async function presentSourceMaps(
 	client: ClickHouseClient,
@@ -79,7 +82,44 @@ export async function presentSourceMaps(
 	tenant: { orgId: string; repositoryId: string },
 	check: SourceMapCheck,
 ): Promise<number[]> {
-	if (check.entries.length === 0) return [];
+	const hashed = check.entries.some((entry) => entry.hash);
+	const byId = check.entries.filter((entry) => !entry.hash).map((entry) => entry.debugId);
+	const [withHash, ids] = await Promise.all([
+		hashed ? presentByHash(client, database, tenant, check) : new Set<string>(),
+		byId.length ? presentDebugIds(client, database, tenant, byId) : new Set<string>(),
+	]);
+	const present: number[] = [];
+	check.entries.forEach((entry, index) => {
+		const found = entry.hash
+			? withHash.has(`${entry.filename}\u0000${entry.debugId}\u0000${entry.hash}`)
+			: ids.has(entry.debugId);
+		if (found) present.push(index);
+	});
+	return present;
+}
+
+async function presentDebugIds(
+	client: ClickHouseClient,
+	database: string,
+	tenant: { orgId: string; repositoryId: string },
+	debugIds: string[],
+): Promise<Set<string>> {
+	const rows = await client.query({
+		query: `SELECT DISTINCT debug_id FROM ${database}.runtime_source_maps
+			WHERE org_id = {org:String} AND repository_id = {repo:String}
+				AND has({debugIds:Array(String)}, debug_id)`,
+		query_params: { org: tenant.orgId, repo: tenant.repositoryId, debugIds: [...new Set(debugIds)] },
+		format: "JSONEachRow",
+	});
+	return new Set((await rows.json<{ debug_id: string }>()).map((row) => row.debug_id));
+}
+
+async function presentByHash(
+	client: ClickHouseClient,
+	database: string,
+	tenant: { orgId: string; repositoryId: string },
+	check: SourceMapCheck,
+): Promise<Set<string>> {
 	const rows = await client.query({
 		query: `SELECT DISTINCT filename, debug_id, content_hash FROM ${database}.runtime_source_maps
 			WHERE org_id = {org:String} AND repository_id = {repo:String} AND release = {release:String}
@@ -89,18 +129,13 @@ export async function presentSourceMaps(
 			org: tenant.orgId,
 			repo: tenant.repositoryId,
 			release: check.release,
-			hashes: [...new Set(check.entries.map((entry) => entry.hash))],
+			hashes: [...new Set(check.entries.filter((entry) => entry.hash).map((entry) => entry.hash))],
 		},
 		format: "JSONEachRow",
 	});
-	const stored = new Set(
+	return new Set(
 		(await rows.json<{ filename: string; debug_id: string; content_hash: string }>()).map(
 			(row) => `${row.filename}\u0000${row.debug_id}\u0000${row.content_hash}`,
 		),
 	);
-	const present: number[] = [];
-	check.entries.forEach((entry, index) => {
-		if (stored.has(`${entry.filename}\u0000${entry.debugId}\u0000${entry.hash}`)) present.push(index);
-	});
-	return present;
 }

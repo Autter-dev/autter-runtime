@@ -2,8 +2,10 @@
 /**
  * `autter-runtime` — readable stack traces for Autter Runtime.
  *
+ *   autter-runtime sourcemaps setup [dir]
  *   autter-runtime sourcemaps inject <dir>
  *   autter-runtime sourcemaps upload <dir> --release <r>
+ *   autter-runtime sourcemaps verify <dir>
  *
  * `@autter/runtime-node` ships a bin with the same name (`doctor`); each one
  * hands the other's commands over when both packages are installed, so it
@@ -12,20 +14,38 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { formatUploadSummary } from "./build.js";
+import { findBundles, findMapFiles, removeSourceMaps } from "./files.js";
 import { injectDir } from "./inject.js";
-import { uploadDir } from "./upload.js";
+import { formatSetup, runSetup } from "./setup.js";
+import { KEY_ADVICE, uploadDir, type UploadSummary } from "./upload.js";
+import { formatVerify, verifyDir } from "./verify.js";
 
 const USAGE = `autter-runtime — readable stack traces for Autter Runtime
 
 Usage:
-  autter-runtime sourcemaps inject <dir> [--dry-run]
+  autter-runtime sourcemaps setup [dir] [--dry-run] [--install] [--json]
+  autter-runtime sourcemaps verify <dir> [--endpoint <url>] [--url-prefix <prefix>]
+                [--ignore <glob>]... [--allow-maps] [--json]
+  autter-runtime sourcemaps inject <dir> [--dry-run] [--json]
   autter-runtime sourcemaps upload <dir> [--release <r>] [--url-prefix <prefix>]
-                [--endpoint <url>] [--concurrency <n>] [--delete-after-upload] [--dry-run]
+                [--endpoint <url>] [--concurrency <n>] [--delete-after-upload]
+                [--best-effort] [--dry-run] [--json]
   autter-runtime doctor ...      (provided by @autter/runtime-node)
 
+setup   Wires source map upload into the project in [dir] (default "."):
+        detects the build tool, package manager, CI and browser SDK, adds
+        @autter/runtime-cli to devDependencies, adds the Vite/Rollup, webpack
+        or Next.js plugin when the config is safe to edit (else a postbuild
+        step), turns on hidden maps, and prints what is left to do by hand,
+        including where to store AUTTER_RUNTIME_KEY. Never writes a key.
+        Safe to re-run. Exit 0: all applied; 2: manual actions remain; 1: error.
+verify  Checks a production build before deploy: every bundle has a debug
+        id, no .map file is left, no sourceMappingURL points at a missing
+        map, and (with AUTTER_RUNTIME_KEY) every bundle's map is on the
+        ingester. Exit 0: ok (upload unverified without a key); 1: problems.
 inject  Gives every .js/.mjs/.cjs bundle that has a source map a debug id
         derived from its bytes: a "//# debugId=" comment, a one-line snippet
         that registers it for @autter/runtime-browser, and "debugId" in the
@@ -45,13 +65,23 @@ Options:
                          then https://otlp.autter.dev
   --concurrency <n>      Parallel uploads (default 8)
   --delete-after-upload  Delete each .map once the ingester has it
+  --best-effort          For build scripts: never fail. Without a key, or when
+                         the upload fails, report it and exit 0; with
+                         --delete-after-upload, every .map under <dir> is then
+                         deleted anyway, so a build never ships maps
+  --install              setup: also run the package manager's install
+  --ignore <glob>        verify: JS files that are not bundles (repeatable)
+  --allow-maps           verify: report leftover .map files without failing
   --dry-run              Show what would change or be uploaded; write and send nothing
   --json                 Print the result as JSON
   -h, --help             Show this help
   -v, --version          Print the version
 
 Environment:
-  AUTTER_RUNTIME_KEY     Server ingest key (autter_rt_…), required by upload`;
+  AUTTER_RUNTIME_KEY     Upload-only key (autter_rtu_…, recommended for CI: it
+                         can only upload source maps) or the server key
+                         (autter_rt_…, also works). Required by upload; used by
+                         verify to check the ingester. Never a client key.`;
 
 function ownVersion(): string {
 	try {
@@ -84,10 +114,22 @@ const SOURCEMAPS_OPTIONS = {
 	endpoint: { type: "string" },
 	concurrency: { type: "string" },
 	"delete-after-upload": { type: "boolean" },
+	"best-effort": { type: "boolean" },
+	install: { type: "boolean" },
+	ignore: { type: "string", multiple: true },
+	"allow-maps": { type: "boolean" },
 	"dry-run": { type: "boolean" },
 	json: { type: "boolean" },
 	help: { type: "boolean", short: "h" },
 } as const;
+
+/** Which flags each action takes (json and help go everywhere). */
+const ACTION_FLAGS: Record<string, string[]> = {
+	setup: ["dry-run", "install"],
+	inject: ["dry-run"],
+	upload: ["release", "url-prefix", "endpoint", "concurrency", "delete-after-upload", "best-effort", "dry-run"],
+	verify: ["endpoint", "url-prefix", "release", "ignore", "allow-maps"],
+};
 
 async function sourcemaps(argv: string[]): Promise<number> {
 	let parsed;
@@ -98,20 +140,53 @@ async function sourcemaps(argv: string[]): Promise<number> {
 		return 64;
 	}
 	const { values, positionals } = parsed;
-	const [action, dir, ...extra] = positionals;
+	const [action, dirArg, ...extra] = positionals;
 	if (values.help) {
 		console.log(USAGE);
 		return 0;
 	}
-	if ((action !== "inject" && action !== "upload") || !dir || extra.length) {
-		console.error(`${action && action !== "inject" && action !== "upload" ? `unknown command: sourcemaps ${action}\n\n` : ""}${USAGE}`);
+	const known = action !== undefined && action in ACTION_FLAGS;
+	const dir = dirArg ?? (action === "setup" ? "." : undefined);
+	if (!known || !dir || extra.length) {
+		console.error(`${action && !known ? `unknown command: sourcemaps ${action}\n\n` : ""}${USAGE}`);
+		return 64;
+	}
+	const allowed = new Set([...ACTION_FLAGS[action]!, "json", "help"]);
+	const stray = Object.keys(values).filter((flag) => !allowed.has(flag));
+	if (stray.length) {
+		console.error(`autter-runtime: sourcemaps ${action} does not take --${stray.join(", --")}\n\n${USAGE}`);
 		return 64;
 	}
 	if (!existsSync(dir)) {
 		console.error(`autter-runtime: ${dir} does not exist`);
-		return 64;
+		return action === "setup" ? 1 : 64;
 	}
 	const dryRun = Boolean(values["dry-run"]);
+
+	if (action === "setup") {
+		try {
+			const result = runSetup(dir, { dryRun, install: Boolean(values.install), installOutput: values.json ? "stderr" : "inherit" });
+			if (values.json) console.log(JSON.stringify(result, null, 2));
+			else for (const line of formatSetup(result)) console.log(line);
+			return result.exitCode;
+		} catch (err) {
+			console.error(`autter-runtime: sourcemaps setup: ${err instanceof Error ? err.message : String(err)}`);
+			return 1;
+		}
+	}
+
+	if (action === "verify") {
+		const result = await verifyDir(dir, {
+			endpoint: values.endpoint,
+			urlPrefix: values["url-prefix"],
+			release: values.release,
+			ignore: values.ignore,
+			allowMaps: Boolean(values["allow-maps"]),
+		});
+		if (values.json) console.log(JSON.stringify(result, null, 2));
+		else for (const line of formatVerify(result)) console.log(line);
+		return result.ok ? 0 : 1;
+	}
 
 	if (action === "inject") {
 		const results = await injectDir(dir, { dryRun });
@@ -137,23 +212,52 @@ async function sourcemaps(argv: string[]): Promise<number> {
 		console.error("autter-runtime: --concurrency must be a positive integer");
 		return 64;
 	}
-	const summary = await uploadDir(dir, {
-		release: values.release,
-		urlPrefix: values["url-prefix"],
-		endpoint: values.endpoint,
-		concurrency,
-		dryRun,
-		deleteAfterUpload: Boolean(values["delete-after-upload"]),
-		log: (line) => console.error(line),
-	});
-	if (values.json) console.log(JSON.stringify(summary, null, 2));
+	const deleteAfterUpload = Boolean(values["delete-after-upload"]);
+	const bestEffort = Boolean(values["best-effort"]);
+	let summary: UploadSummary | null = null;
+	let error: string | null = null;
+	const run = () =>
+		uploadDir(dir, {
+			release: values.release,
+			urlPrefix: values["url-prefix"],
+			endpoint: values.endpoint,
+			concurrency,
+			dryRun,
+			deleteAfterUpload,
+			log: (line) => console.error(line),
+		});
+	if (!bestEffort) summary = await run();
+	else if (!dryRun && !(process.env.AUTTER_RUNTIME_KEY ?? "").trim()) error = `AUTTER_RUNTIME_KEY is not set, so nothing was uploaded (${KEY_ADVICE})`;
 	else {
-		if (!summary.uploaded.length && !summary.skipped.length && !summary.failed.length) {
-			console.log(`no .js/.mjs/.cjs bundles with source maps under ${dir}`);
+		try {
+			summary = await run();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
 		}
-		for (const line of formatUploadSummary(summary)) console.log(line);
 	}
-	return summary.failed.length ? 1 : 0;
+	let removedMaps: string[] = [];
+	if (bestEffort && deleteAfterUpload && !dryRun) {
+		// Whatever happened above, no map stays behind to be deployed.
+		const owners = new Map((await findBundles(dir)).map((bundle) => [bundle.map, bundle.js]));
+		removedMaps = (await removeSourceMaps(await findMapFiles(dir), owners)).map((map) => relative(resolve(dir), map).split(sep).join("/"));
+	}
+	if (values.json) {
+		console.log(JSON.stringify({ ...(summary ?? { uploaded: [], skipped: [], failed: [] }), ...(bestEffort ? { error, removedMaps } : {}) }, null, 2));
+	} else {
+		if (summary) {
+			if (!summary.uploaded.length && !summary.skipped.length && !summary.failed.length) {
+				console.log(`no .js/.mjs/.cjs bundles with source maps under ${dir}`);
+			}
+			for (const line of formatUploadSummary(summary)) console.log(line);
+		}
+		if (error) console.error(`autter-runtime: ${error}`);
+		if (removedMaps.length) {
+			const why = error ? "the upload did not run" : summary?.failed.length ? `${summary.failed.length} could not be uploaded` : "they were uploaded";
+			console.log(`removed ${removedMaps.length} source map(s) under ${dir}, so they are not deployed: ${why}`);
+		}
+		if (bestEffort && (error || summary?.failed.length)) console.error("autter-runtime: --best-effort: the build continues");
+	}
+	return bestEffort ? 0 : summary?.failed.length ? 1 : 0;
 }
 
 async function main(argv: string[]): Promise<number> {

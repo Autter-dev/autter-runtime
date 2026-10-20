@@ -74,6 +74,15 @@ test("check requests name files by path, debug id and hash", () => {
 	assert.equal(validateSourceMapCheck({ release: "abc", files: Array.from({ length: 501 }, () => ({ filename: "/a.js", hash })) }), null);
 });
 
+test("check entries may name a debug id without a hash (1.7.0, sourcemaps verify), never neither", () => {
+	assert.deepEqual(
+		validateSourceMapCheck({ release: "abc", files: [{ filename: "/a.js", debugId: ID.toUpperCase() }, { filename: "/b.js", debugId: ID, hash: "" }] }),
+		{ release: "abc", entries: [{ filename: "/a.js", debugId: ID, hash: "" }, { filename: "/b.js", debugId: ID, hash: "" }] },
+	);
+	assert.equal(validateSourceMapCheck({ release: "abc", files: [{ filename: "/a.js" }] }), null);
+	assert.equal(validateSourceMapCheck({ release: "abc", files: [{ filename: "/a.js", hash: 42 }] }), null);
+});
+
 test("migration 0016 adds debug_id, content_hash and its index idempotently, and the baseline matches", () => {
 	const migration = MIGRATIONS.find((m) => m.id === "0017-source-maps-debug-id");
 	assert.ok(migration);
@@ -104,6 +113,9 @@ function fakeClient(rows: Row[]): { client: ClickHouseClient; queries: Array<{ q
 			if (/filename = \{filename:String\}/.test(query)) found = found.filter((r) => r.filename === params.filename);
 			if (/has\(\{hashes:Array\(String\)\}, content_hash\)/.test(query)) {
 				found = found.filter((r) => (params.hashes as string[]).includes(r.content_hash));
+			}
+			if (/has\(\{debugIds:Array\(String\)\}, debug_id\)/.test(query)) {
+				found = found.filter((r) => (params.debugIds as string[]).includes(r.debug_id));
 			}
 			found.sort((a, b) => b.uploaded_at - a.uploaded_at);
 			return { json: async () => (/LIMIT 1/.test(query) ? found.slice(0, 1) : found) };
@@ -164,6 +176,28 @@ test("presentSourceMaps returns entries already stored with the same path, debug
 	assert.deepEqual(await presentSourceMaps(client, "db", { orgId: "org-a", repositoryId: "repo-a" }, check), [0, 2]);
 	assert.match(queries[0]!.query, /uploaded_at >= now64\(3\) - INTERVAL 7 DAY/);
 	assert.deepEqual(await presentSourceMaps(client, "db", { orgId: "org-a", repositoryId: "repo-a" }, { release: "r1", entries: [] }), []);
+});
+
+test("presentSourceMaps answers debug-id-only entries from any release or path, per tenant", async () => {
+	const hash = "b".repeat(64);
+	const { client, queries } = fakeClient([
+		row({ release: "build-7", filename: "/old/path.js", debug_id: ID, content_hash: hash }),
+		row({ org_id: "org-b", debug_id: OTHER_ID }),
+	]);
+	const tenant = { orgId: "org-a", repositoryId: "repo-a" };
+	const check: SourceMapCheck = { release: "r1", entries: [
+		{ filename: "/assets/app.js", debugId: ID, hash: "" },
+		{ filename: "/assets/app.js", debugId: OTHER_ID, hash: "" },
+		{ filename: "/old/path.js", debugId: ID, hash },
+	] };
+	// The hashed entry still needs its own release (r1 has none); the id-only one doesn't.
+	assert.deepEqual(await presentSourceMaps(client, "db", tenant, check), [0]);
+	const byId = queries.find((q) => /debug_id FROM db\.runtime_source_maps/.test(q.query))!;
+	assert.doesNotMatch(byId.query, /release|uploaded_at/);
+	assert.deepEqual(byId.params.debugIds, [ID, OTHER_ID]);
+	queries.length = 0;
+	assert.deepEqual(await presentSourceMaps(client, "db", tenant, { release: "r1", entries: [{ filename: "/a.js", debugId: ID, hash: "" }] }), [0]);
+	assert.equal(queries.length, 1, "no hash query without hashed entries");
 });
 
 test("browser events keep valid debugIds, query-stripped, and drop bad ones without rejecting the beacon", () => {

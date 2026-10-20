@@ -31,6 +31,16 @@ works with its default exporter settings.
 | --- | --- | --- | --- |
 | `server` (default) | `autter_rt_…` (secret) | all endpoints | 300 req/min |
 | `client` | `autter_rtc_…` (publishable, safe in frontend bundles) | `/v1/browser` only | origin allow-list, 120 req/min |
+| `upload` (1.7.0+) | `autter_rtu_…` (secret, for CI) | `/v1/sourcemaps` and `/v1/sourcemaps/check` only | 300 req/min |
+
+An upload key gets `403 {"error":"upload_key_not_allowed","detail":"autter_rtu_ keys can only upload source maps …"}`
+on every other route, so a CI secret that leaks can upload source maps for
+one repository and nothing else. A static entry without `scope` is an upload
+key when its key starts with `autter_rtu_`, else a server key; an entry (or a
+validator answer) with any other `scope` is ignored rather than treated as a
+server key. Ingesters before 1.7.0 treat every scope but `client` as
+`server`, so a validator must not answer `"scope": "upload"` to them: from
+1.7.0 every validator request carries `x-autter-ingester-version`.
 
 `/v1/browser` answers CORS preflights permissively; real enforcement (key +
 origin allow-list) happens on the POST. Cross-origin browsers send
@@ -41,12 +51,14 @@ route parses as JSON.
 AUTTER_INGEST_KEYS='[
   {"key":"autter_rt_…","orgId":"org1","repositoryId":"repo1"},
   {"key":"autter_rtc_…","orgId":"org1","repositoryId":"repo1",
-   "scope":"client","allowedOrigins":["https://app.example.com"]}
+   "scope":"client","allowedOrigins":["https://app.example.com"]},
+  {"key":"autter_rtu_…","orgId":"org1","repositoryId":"repo1","scope":"upload"}
 ]'
 ```
 
 The validator webhook may return the same extra fields:
-`{ orgId, repositoryId, scope?, allowedOrigins? }`.
+`{ orgId, repositoryId, scope?, allowedOrigins? }`, with `scope` one of
+`server`, `client`, `upload`.
 
 ### Version compatibility
 

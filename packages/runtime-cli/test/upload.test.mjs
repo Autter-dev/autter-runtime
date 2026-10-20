@@ -14,7 +14,7 @@ import {
 	servedFilename,
 	uploadDir,
 } from "../dist/index.js";
-import { read, readJson, SERVER_KEY, SIMPLE_MAP, startIngester, tempDir, writeFiles } from "./helpers.mjs";
+import { read, readJson, SERVER_KEY, SIMPLE_MAP, startIngester, tempDir, UPLOAD_KEY, writeFiles } from "./helpers.mjs";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const quiet = { log: () => {} };
@@ -104,7 +104,12 @@ test("transient failures are retried; bad keys stop the upload", async (t) => {
 	assert.equal(flaky.uploads().length, 5);
 
 	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rt_wrong" }), (err) => err instanceof FatalUploadError && /401/.test(err.message));
-	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rtc_client" }), /publishable client key/);
+	await assert.rejects(
+		uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rtc_client" }),
+		/publishable client key \(autter_rtc_…\), which cannot upload source maps: set AUTTER_RUNTIME_KEY to an upload-only key \(autter_rtu_…, recommended for CI.*or the full server key \(autter_rt_…, also works\)/,
+	);
+	// An upload key the ingester doesn't know: the error says which ingester upload keys need.
+	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rtu_unknown" }), /401.*upload keys, autter_rtu_…, need ingester 1\.7\.0 or later/);
 	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, env: {} }), /AUTTER_RUNTIME_KEY/);
 });
 
@@ -233,4 +238,62 @@ test("the CLI reports usage errors and missing keys with distinct exit codes", a
 	const dry = await cli(["sourcemaps", "upload", build(), "--release", "abc", "--dry-run"]);
 	assert.equal(dry.code, 0);
 	assert.match(dry.stdout, /would upload \/assets\/app\.js/);
+});
+
+test("upload-only keys (autter_rtu_) upload and check maps like server keys", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const dir = build();
+	await injectDir(dir);
+	const options = { ...quiet, release: "abc123", endpoint: ingester.url, key: UPLOAD_KEY };
+	const first = await uploadDir(dir, options);
+	assert.deepEqual(first.failed, []);
+	assert.equal(first.uploaded.length, 3);
+	assert.deepEqual(ingester.rows.map((r) => r.tenant), ["org-a/repo-a", "org-a/repo-a", "org-a/repo-a"]);
+	// The check route answers it too, so the second run skips everything.
+	const second = await uploadDir(dir, options);
+	assert.equal(second.skipped.length, 3);
+	assert.equal(ingester.uploads().length, 3);
+});
+
+test("--best-effort never fails a build script, and with --delete-after-upload leaves no map behind", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const files = { "app.js": "x()\n//# sourceMappingURL=app.js.map\n", "app.js.map": SIMPLE_MAP, "app.css": "a{}\n/*# sourceMappingURL=app.css.map */\n", "app.css.map": SIMPLE_MAP };
+
+	// No key: nothing uploaded, every map (CSS too) deleted, exit 0.
+	const noKey = tempDir(files);
+	const run = await cli(["sourcemaps", "upload", noKey, "--release", "abc", "--delete-after-upload", "--best-effort", "--endpoint", ingester.url]);
+	assert.equal(run.code, 0, run.stderr);
+	assert.match(run.stderr, /AUTTER_RUNTIME_KEY is not set, so nothing was uploaded/);
+	assert.match(run.stdout, /removed 2 source map\(s\) .*: the upload did not run/);
+	assert.equal(existsSync(join(noKey, "app.js.map")), false);
+	assert.equal(existsSync(join(noKey, "app.css.map")), false);
+	assert.doesNotMatch(read(noKey, "app.js"), /sourceMappingURL/);
+	assert.doesNotMatch(read(noKey, "app.css"), /sourceMappingURL/);
+	assert.equal(ingester.requests.length, 0);
+
+	// A rejected key: reported, maps still deleted, exit 0. Without --best-effort it is exit 2.
+	const rejected = tempDir(files);
+	const bad = await cli(["sourcemaps", "upload", rejected, "--release", "abc", "--delete-after-upload", "--best-effort", "--endpoint", ingester.url, "--json"], { AUTTER_RUNTIME_KEY: "autter_rt_wrong" });
+	assert.equal(bad.code, 0);
+	const json = JSON.parse(bad.stdout);
+	assert.match(json.error, /rejected the key \(401\)/);
+	assert.deepEqual(json.removedMaps.sort(), ["app.css.map", "app.js.map"]);
+	assert.equal((await cli(["sourcemaps", "upload", tempDir(files), "--release", "abc", "--endpoint", ingester.url], { AUTTER_RUNTIME_KEY: "autter_rt_wrong" })).code, 2);
+
+	// With a good key it uploads like a plain upload.
+	const ok = tempDir(files);
+	const good = await cli(["sourcemaps", "upload", ok, "--release", "abc", "--delete-after-upload", "--best-effort", "--endpoint", ingester.url], { AUTTER_RUNTIME_KEY: UPLOAD_KEY });
+	assert.equal(good.code, 0, good.stderr);
+	assert.match(good.stdout, /1 uploaded, 0 already uploaded, 0 failed/);
+	assert.equal(existsSync(join(ok, "app.css.map")), false);
+});
+
+test("each sourcemaps command takes only its own flags", async () => {
+	const usage = await cli(["sourcemaps", "inject", tempDir(), "--best-effort"]);
+	assert.equal(usage.code, 64);
+	assert.match(usage.stderr, /sourcemaps inject does not take --best-effort/);
+	assert.equal((await cli(["sourcemaps", "verify", tempDir(), "--install"])).code, 64);
+	assert.match((await cli(["--help"])).stdout, /sourcemaps setup \[dir\]/);
 });

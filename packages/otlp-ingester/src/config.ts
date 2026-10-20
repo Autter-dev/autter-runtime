@@ -1,9 +1,35 @@
+import type { IngestKeyScope } from "./types.js";
+
+export const INGEST_KEY_SCOPES: readonly IngestKeyScope[] = ["server", "client", "upload"];
+
+/** Prefix of upload-only keys (`autter_rtu_…`): source map uploads from CI. */
+export const UPLOAD_KEY_PREFIX = "autter_rtu_";
+
+export function isIngestKeyScope(value: unknown): value is IngestKeyScope {
+	return typeof value === "string" && (INGEST_KEY_SCOPES as readonly string[]).includes(value);
+}
+
+/**
+ * The scope of a key whose static entry or validator answer names none:
+ * "upload" for an `autter_rtu_…` key (its prefix promises no more than
+ * that), else "server" as before 1.7.0.
+ */
+export function defaultScopeFor(key: string): IngestKeyScope {
+	return key.startsWith(UPLOAD_KEY_PREFIX) ? "upload" : "server";
+}
+
 export interface StaticIngestKey {
 	key: string;
 	orgId: string;
 	repositoryId: string;
-	/** "server" (default) = secret backend key; "client" = publishable browser key. */
-	scope?: "client" | "server";
+	/**
+	 * "server" = secret backend key, every route; "client" = publishable
+	 * browser key, `/v1/browser` only; "upload" = CI key, `/v1/sourcemaps`
+	 * and `/v1/sourcemaps/check` only. Default: "upload" for an
+	 * `autter_rtu_…` key, else "server". An entry with any other value is
+	 * ignored (never treated as a server key).
+	 */
+	scope?: IngestKeyScope;
 	/** client keys: exact origins allowed to send (e.g. https://app.example.com). */
 	allowedOrigins?: string[];
 }
@@ -83,22 +109,31 @@ function patternListEnv(name: string): string[] {
 	return parsed as string[];
 }
 
-function parseIngestKeys(raw: string | undefined): StaticIngestKey[] {
+/** Parse AUTTER_INGEST_KEYS. Entries without a string key, orgId and
+ * repositoryId, or with an unknown scope, are dropped (a typo in `scope`
+ * must not turn a restricted key into a server key). */
+export function parseIngestKeys(raw: string | undefined): StaticIngestKey[] {
 	if (!raw) return [];
+	let parsed: unknown;
 	try {
-		const parsed = JSON.parse(raw);
-		if (!Array.isArray(parsed)) return [];
-		return parsed.filter(
-			(entry): entry is StaticIngestKey =>
-				entry &&
-				typeof entry.key === "string" &&
-				typeof entry.orgId === "string" &&
-				typeof entry.repositoryId === "string",
-		);
+		parsed = JSON.parse(raw);
 	} catch {
 		console.error("AUTTER_INGEST_KEYS is not valid JSON — ignoring");
 		return [];
 	}
+	if (!Array.isArray(parsed)) return [];
+	const keys: StaticIngestKey[] = [];
+	parsed.forEach((entry: Partial<StaticIngestKey> | null, index) => {
+		if (!entry || typeof entry.key !== "string" || typeof entry.orgId !== "string" || typeof entry.repositoryId !== "string") return;
+		if (entry.scope !== undefined && !isIngestKeyScope(entry.scope)) {
+			console.error(
+				`AUTTER_INGEST_KEYS[${index}] has scope ${JSON.stringify(entry.scope)}; expected one of ${INGEST_KEY_SCOPES.join(", ")} — ignoring this key`,
+			);
+			return;
+		}
+		keys.push({ ...entry, scope: entry.scope ?? defaultScopeFor(entry.key) } as StaticIngestKey);
+	});
+	return keys;
 }
 
 export function loadConfig(): IngesterConfig {

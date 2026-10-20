@@ -176,6 +176,12 @@ app.use(autterErrorResponse());          // Express error middleware, after rout
   if the handler already captured it). Pass `capture: false` or a predicate.
 - The error is recorded on the request summary either way.
 
+Keeping your own error responses? `autterErrorHandler()` (Express),
+`autterFastifyErrors` (Fastify) and `autterKoa()` (Koa) only report — the
+error, with its stack, on the request span — and leave the response to your
+handler; `captureRequestError(err)` does the same from any other error hook.
+See [Stack integrations](INTEGRATIONS.md#nodejs-express-fastify-koa-nestjs).
+
 Use `toClientError` directly in Fastify `setErrorHandler`, Next.js route
 handlers or anywhere else you build responses. runtime-browser's
 `autterErrorFromResponse(res)` turns such a body back into an `Error` with the

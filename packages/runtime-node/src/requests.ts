@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AsyncResource } from "node:async_hooks";
-import { context, trace, type SpanContext } from "@opentelemetry/api";
+import { context, trace, type Attributes, type SpanContext } from "@opentelemetry/api";
+import { getRPCMetadata, RPCType } from "@opentelemetry/core";
 import {
 	DEFAULT_REQUEST_ID_HEADER,
 	RuntimeError,
@@ -14,6 +15,7 @@ import {
 } from "@autter/runtime-core";
 import {
 	createRequestState,
+	currentOperation,
 	emitSummary,
 	flushRuntimeLogs,
 	local,
@@ -34,7 +36,7 @@ const REQUEST_STATE = Symbol.for("autter.runtime.request");
 const BOUND = Symbol.for("autter.runtime.bound");
 const CAPTURED = new WeakSet<object>();
 
-type ExceptionCapturer = (error: unknown) => void;
+type ExceptionCapturer = (error: unknown, attributes?: Attributes) => void;
 let capturer: ExceptionCapturer = () => {};
 /** @internal server.ts registers the module-level captureException here. */
 export function setRequestExceptionCapturer(fn: ExceptionCapturer): void {
@@ -107,26 +109,73 @@ function defaultShouldCapture(error: unknown): boolean {
 	);
 }
 
-function captureAtBoundary(
+/**
+ * Run `fn` with the request's HTTP server span active, when the HTTP
+ * instrumentation created one that is still recording. An error that reaches
+ * a framework boundary then lands on the request span itself — the span
+ * whose 5xx status would otherwise become a stackless `HttpServerError` —
+ * even when a child span (an Express/Fastify/Koa instrumentation layer, a
+ * Next.js render span) is the active one.
+ */
+function onRequestSpan(fn: () => void): void {
+	const active = context.active();
+	const metadata = getRPCMetadata(active);
+	const span = metadata?.type === RPCType.HTTP ? metadata.span : undefined;
+	if (!span || !span.isRecording() || trace.getSpan(active) === span) {
+		fn();
+		return;
+	}
+	context.with(trace.setSpan(active, span), fn);
+}
+
+/** @internal Report an error that reached a request boundary: once (errors
+ * already captured are skipped), on the request span, inside the request's
+ * summary. `rule` defaults to status ≥ 500, RuntimeErrors and coded errors. */
+export function captureAtBoundary(
 	error: unknown,
 	state: OperationState | undefined,
 	rule: boolean | ((error: unknown) => boolean) | undefined = undefined,
+	attributes?: Attributes,
 ): void {
-	const wanted =
-		typeof rule === "function"
-			? rule(error)
-			: rule === undefined
-				? defaultShouldCapture(error)
-				: rule;
+	let wanted: boolean;
+	try {
+		wanted =
+			typeof rule === "function"
+				? rule(error)
+				: rule === undefined
+					? defaultShouldCapture(error)
+					: rule;
+	} catch {
+		wanted = false;
+	}
 	if (!wanted) return;
 	if (error && typeof error === "object" && CAPTURED.has(error)) return;
 	markCaptured(error);
 	try {
-		if (state && !state.sealed) local.run(state, () => capturer(error));
-		else capturer(error);
+		const run = () => onRequestSpan(() => capturer(error, attributes));
+		if (state && !state.sealed) local.run(state, run);
+		else run();
 	} catch {
 		/* capture never breaks the response */
 	}
+}
+
+/** @internal The request summary state Autter attached to a Node request. */
+export function requestStateOf(req: unknown): OperationState | undefined {
+	if (!req || typeof req !== "object") return undefined;
+	return (req as Record<symbol, OperationState | undefined>)[REQUEST_STATE];
+}
+
+/**
+ * Report an error that reached a request boundary — a framework error hook,
+ * an exception filter, Next.js `onRequestError`. Unlike `captureException`
+ * it reports each error once (an error a handler or another hook already
+ * captured is skipped), and it records the exception, with its stack, on the
+ * request's HTTP server span even when a child span is active, so the failed
+ * request and its exception stay one issue.
+ */
+export function captureRequestError(error: unknown, attributes?: Attributes): void {
+	captureAtBoundary(error, currentOperation(), true, attributes);
 }
 
 /**

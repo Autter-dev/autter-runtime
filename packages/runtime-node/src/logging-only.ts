@@ -27,6 +27,10 @@ import {
 import { makeRedactor, type RedactOptions } from "./redact.js";
 import { markCaptured } from "./requests.js";
 import {
+	installUnhandledRejectionCapture,
+	recordedAsRejection,
+} from "./unhandled-rejections.js";
+import {
 	captureException as serverCaptureException,
 	serverActive,
 	setLoggerOnlyCapture,
@@ -57,8 +61,12 @@ export interface AutterLoggingOptions {
 	logging?: RuntimeLoggingOptions;
 	/** Same semantics as initAutterServer. Default true. */
 	redactAttributes?: boolean | RedactOptions;
-	/** Capture crashes via process.uncaughtExceptionMonitor. Default true. */
+	/** Capture crashes via process.uncaughtExceptionMonitor, and unhandled
+	 * rejections (`captureUnhandledRejections`). Default true. */
 	captureGlobalErrors?: boolean;
+	/** Same semantics as initAutterServer: record unhandled rejections as
+	 * errors without changing whether the process crashes. Default true. */
+	captureUnhandledRejections?: boolean;
 	/** Flush records on beforeExit/SIGINT/SIGTERM. Default true. */
 	autoFlush?: boolean;
 	debug?: boolean;
@@ -157,10 +165,18 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 	});
 	setLoggerOnlyCapture(captureException);
 
-	const onCrash = (error: unknown) =>
+	const onCrash = (error: unknown) => {
+		if (recordedAsRejection(error)) return;
 		captureException(error, { "autter.unhandled": true });
-	if (options.captureGlobalErrors !== false)
+	};
+	let uninstallRejections: (() => void) | null = null;
+	if (options.captureGlobalErrors !== false) {
 		process.on("uncaughtExceptionMonitor", onCrash);
+		if (options.captureUnhandledRejections !== false)
+			uninstallRejections = installUnhandledRejectionCapture((reason) =>
+				captureException(reason, { "autter.unhandled_rejection": true }),
+			);
+	}
 
 	registerFlushTarget("logging", { forceFlush: () => flushRuntimeLogs() });
 	let autoFlushHandle: AutoFlushHandle | null =
@@ -171,6 +187,8 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 		flush: flushRuntimeLogs,
 		shutdown: async () => {
 			process.off("uncaughtExceptionMonitor", onCrash);
+			uninstallRejections?.();
+			uninstallRejections = null;
 			setLoggerOnlyCapture(null);
 			autoFlushHandle?.dispose();
 			autoFlushHandle = null;

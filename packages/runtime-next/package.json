@@ -27,6 +27,19 @@
 			"types": "./dist/edge.d.ts",
 			"import": "./dist/edge.js",
 			"require": "./dist/edge.cjs"
+		},
+		"./instrumentation": {
+			"types": "./dist/instrumentation.d.ts",
+			"edge-light": {
+				"import": "./dist/instrumentation-edge.js",
+				"require": "./dist/instrumentation-edge.cjs"
+			},
+			"worker": {
+				"import": "./dist/instrumentation-edge.js",
+				"require": "./dist/instrumentation-edge.cjs"
+			},
+			"import": "./dist/instrumentation.js",
+			"require": "./dist/instrumentation.cjs"
 		}
 	},
 	"files": [

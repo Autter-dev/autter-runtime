@@ -205,6 +205,38 @@ function sameDestination(a: Destination, b: Destination): boolean {
 
 const encoder = new TextEncoder();
 
+/** POST one batch to `/v1/logs`: at most two attempts, no retry on 4xx. */
+async function postLogs(destination: Destination, batch: OtlpLogRecord[]): Promise<boolean> {
+	const body = JSON.stringify(
+		buildOtlpLogsRequest(
+			{
+				service: destination.service,
+				environment: destination.environment,
+				...(destination.release ? { release: destination.release } : {}),
+			},
+			batch,
+		),
+	);
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const response = await destination.fetch(`${destination.endpoint}/v1/logs`, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					authorization: `Bearer ${destination.apiKey}`,
+				},
+				body,
+			});
+			if (response.ok) return true;
+			// 4xx (bad key, payload rejected) will not improve on retry.
+			if (response.status < 500) return false;
+		} catch {
+			/* retry once */
+		}
+	}
+	return false;
+}
+
 function randomId(): string {
 	return globalThis.crypto.randomUUID();
 }
@@ -275,39 +307,10 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 				const entries = exporter.queue.splice(0, take);
 				for (const entry of entries) exporter.bytes -= entry.bytes;
 				const batch = entries.map((entry) => entry.record);
-				const { endpoint, apiKey, fetch: doFetch } = destination;
-				const body = JSON.stringify(
-					buildOtlpLogsRequest(
-						{
-							service: destination.service,
-							environment: destination.environment,
-							...(destination.release ? { release: destination.release } : {}),
-						},
-						batch,
-					),
-				);
-				let ok = false;
-				for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-					try {
-						const response = await doFetch(`${endpoint}/v1/logs`, {
-							method: "POST",
-							headers: {
-								"content-type": "application/json",
-								authorization: `Bearer ${apiKey}`,
-							},
-							body,
-						});
-						ok = response.ok;
-						// 4xx (bad key, payload rejected) will not improve on retry.
-						if (!ok && response.status < 500) break;
-					} catch {
-						/* retry once */
-					}
-				}
-				if (!ok) {
+				if (!(await postLogs(destination, batch))) {
 					exporter.dropped += batch.length;
 					console.warn(
-						`[autter-runtime-edge] ${batch.length} record(s) could not be delivered to ${endpoint}/v1/logs`,
+						`[autter-runtime-edge] ${batch.length} record(s) could not be delivered to ${destination.endpoint}/v1/logs`,
 					);
 				}
 			}
@@ -403,6 +406,102 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 		fetch: wrapped,
 		flush: () => deliver(),
 	});
+}
+
+let warnedCaptureNoKey = false;
+
+/** Errors already reported, shared by every copy of this module in the
+ * isolate (middleware and instrumentation may be bundled separately), so an
+ * error `withAutter` captured and rethrew is not reported again by
+ * `captureEdgeException` (e.g. from Next.js `onRequestError`). */
+function capturedErrors(): WeakSet<object> {
+	const key = Symbol.for("autter.runtime.edge.captured");
+	const registry = globalThis as unknown as Record<symbol, WeakSet<object> | undefined>;
+	let set = registry[key];
+	if (!set) {
+		set = new WeakSet<object>();
+		registry[key] = set;
+	}
+	return set;
+}
+
+/** True the first time `error` is seen; objects only. */
+function firstCapture(error: unknown): boolean {
+	if (!error || typeof error !== "object") return true;
+	const set = capturedErrors();
+	if (set.has(error)) return false;
+	set.add(error);
+	return true;
+}
+
+function safeString(value: unknown): string {
+	try {
+		return String(value);
+	} catch {
+		return "Error";
+	}
+}
+
+/**
+ * Report one exception outside `withAutter`: Next.js `onRequestError` on the
+ * edge runtime, a scheduled or queue handler. Sends a single error record
+ * (`autter.capture.mode = "log"`, which the ingester 1.5.0+ promotes to an
+ * occurrence, stack included) to `${endpoint}/v1/logs` straight away, and
+ * resolves once it was delivered or dropped. An error already reported (by
+ * this function or by `withAutter`) is skipped. Never rejects; hand the
+ * promise to `waitUntil` where the runtime has one.
+ *
+ *   ctx.waitUntil(captureEdgeException({ apiKey, service: "edge-api" }, error, { "job.name": "sync" }));
+ */
+export async function captureEdgeException(
+	options: AutterEdgeOptions,
+	error: unknown,
+	attributes?: RuntimeLogContext,
+): Promise<void> {
+	try {
+		if (!firstCapture(error)) return;
+		const redact = makeRedactor(options.redactAttributes ?? true);
+		const isError = error instanceof Error;
+		const message = isError ? error.message : safeString(error);
+		const user = userContext(
+			{
+				...safeAttributes(attributes),
+				"exception.type": isError ? error.name : "Error",
+				"exception.message": message,
+				"exception.stacktrace": (isError && error.stack) || new Error(message).stack || "",
+			},
+			redact,
+		);
+		const event = createRuntimeEvent({
+			level: "error",
+			message: String(boundContext({ message }, redact).message ?? "").slice(0, 4000),
+			attributes: boundContext(
+				{
+					"autter.event.id": randomId(),
+					"autter.capture.mode": "log",
+					...errorAttributes(error),
+					...user,
+				} as RuntimeLogContext,
+				redact,
+			),
+		});
+		if (options.console)
+			console.log(JSON.stringify({ ...event.attributes, level: event.level, message: event.message }));
+		if (!options.apiKey) {
+			if (!warnedCaptureNoKey) {
+				warnedCaptureNoKey = true;
+				console.warn("[autter-runtime-edge] no apiKey: captured exceptions are not exported");
+			}
+			return;
+		}
+		const destination = destinationOf({ ...options, apiKey: options.apiKey });
+		if (!(await postLogs(destination, [toOtlpLogRecord(event)])))
+			console.warn(
+				`[autter-runtime-edge] 1 record(s) could not be delivered to ${destination.endpoint}/v1/logs`,
+			);
+	} catch {
+		/* reporting never throws into the caller */
+	}
 }
 
 /** Explicit per-request state (no AsyncLocalStorage on the edge). */
@@ -508,6 +607,7 @@ function buildRuntime(
 			if (err && typeof err === "object") {
 				if (captured.has(err)) return;
 				captured.add(err);
+				capturedErrors().add(err);
 			}
 			noteError(err);
 			const isError = err instanceof Error;

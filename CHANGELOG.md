@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Server errors keep their stacks: `autterErrorHandler()` (Express/Connect error middleware that calls `next(err)` unchanged), `autterFastifyErrors` (Fastify `onError` hook, as a plugin or `autterFastifyErrors(app)`) and `autterKoa()` (Koa middleware that rethrows) record a thrown error, with its stack, on the request span. Previously the framework's 500 reached the ingester as a stackless `HttpServerError` grouped by route. By default they report status ≥ 500, RuntimeErrors and coded errors (`capture` option). New `captureRequestError(error, attributes?)` for other frameworks: reported once, on the request's HTTP server span even when a child span is active (`runtime-node`).
+- Unhandled promise rejections are recorded as errors (`autter.unhandled_rejection: true`, not fatal) without changing whether the process crashes. When Node would crash (default `--unhandled-rejections=throw`, no other listener) the rejection is rethrown on the next tick, so it still exits with code 1 and is recorded as a fatal crash as before; `warn-with-error-code` keeps its warning and exit code; `strict` is left to the crash monitor. Opt out with `captureUnhandledRejections: false` (`initAutterServer`, `initAutterLogging`) (`runtime-node`).
+- Next.js `onRequestError` from `@autter/runtime-next/instrumentation`: errors Next catches in server components, server actions, route handlers and middleware are recorded with their stack and Next's context (`next.route_path`, `next.router_kind`, `next.route_type`, `next.render_source`, `next.digest`, method and query-less path; never headers or cookies). Node: on the request span through `registerAutter`'s tracker. Edge: an `edge-light`/`worker` build with no Node imports sends the error to `/v1/logs` with `autterOnRequestError({ edge })` options. Redirects and `notFound()` are skipped (`runtime-next`).
+- `captureEdgeException(options, error, attributes?)` reports one exception outside `withAutter`, skipping errors `withAutter` already reported (`runtime-edge`).
+
+### Fixes
+
+- Boundary captures (`autterErrorResponse`, `autterFastify`, `withRuntimeRequest`) land on the request's HTTP server span when an instrumentation's child span is active, so the 500 is not also reported as a stackless `HttpServerError`; a throwing `capture` predicate no longer escapes into the response (`runtime-node`).
+- `shutdown()` removes the crash monitor it installed (`runtime-node`).
+
 ## [1.5.0] - 2026-10-08
 
 Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `runtime-browser` 1.4.0, new `runtime-edge` 1.0.0. Additive: 1.4.0 code keeps working unchanged (golden-tested).

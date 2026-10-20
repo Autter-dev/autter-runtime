@@ -167,6 +167,60 @@ import { ExpressInstrumentation } from "@opentelemetry/instrumentation-express";
 initAutterServer({ ..., instrumentations: [new ExpressInstrumentation()] });
 ```
 
+### Server errors keep their stacks
+
+When a handler throws, the framework answers 500 — and on its own that 500
+is all the tracker sees: a stackless `HttpServerError` grouped by route. Add
+your framework's hook and the thrown error is recorded, with its stack, on
+the request span; the framework then carries on exactly as before.
+
+```ts
+import { autterErrorHandler, autterFastifyErrors, autterKoa, captureRequestError } from "@autter/runtime-node";
+
+// Express / Connect: after your routes, before your own error handlers.
+// Records the error, then calls next(err) unchanged.
+app.use(autterErrorHandler());
+
+// Fastify 4/5: an onError hook (Fastify's error handler still answers).
+// autterFastify (request summaries) already includes it.
+app.register(autterFastifyErrors);   // or autterFastifyErrors(app)
+
+// Koa 2/3: mount first; records and rethrows, so app.on("error") still fires.
+app.use(autterKoa());
+
+// Anything else (NestJS exception filters, hapi onPreResponse, …):
+captureRequestError(err, { "app.handler": "checkout" });
+```
+
+All three report errors with status ≥ 500 (or none), RuntimeErrors and coded
+errors — `ctx.throw(404)` and validation failures stay out of your issues.
+Pass `{ capture: true }` to report every error, or a predicate. An error is
+reported once, even if your handler already called `captureException`, and it
+lands on the request's HTTP server span even when an instrumentation's child
+span is active. `autterErrorResponse()` reports the same way and also answers
+the request.
+
+### Unhandled promise rejections
+
+Recorded as errors (severity `error`, `autter.unhandled_rejection: true`, not
+fatal) — without changing whether your process crashes. Any
+`unhandledRejection` listener switches off Node's default crash, so the SDK
+does what Node would have done when its listener is the only one:
+
+| `--unhandled-rejections` | Your own listener? | What happens | Recorded as |
+| --- | --- | --- | --- |
+| `throw` (default) | no | rethrown on the next tick: exit code 1, as before | fatal crash (`autter.unhandled`) |
+| `throw` (default) | yes | your listener decides | error |
+| `strict` | either | Node crashes first, as before | fatal crash |
+| `warn`, `none` | either | no crash, as before | error |
+| `warn-with-error-code` | no | Node's warning and exit code 1, as before | error |
+
+The one visible difference: after the rethrow, `uncaughtException` listeners
+receive origin `"uncaughtException"` rather than `"unhandledRejection"`.
+`captureUnhandledRejections: false` (or `captureGlobalErrors: false`) restores
+the 1.5.0 behaviour, where a rejection is seen only when it crashes the
+process.
+
 ### Version compatibility: checked for you
 
 Some features need a minimum ingester version: operation logging needs

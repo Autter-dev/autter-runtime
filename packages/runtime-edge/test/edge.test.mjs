@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { withAutter, defineRuntimeErrors, RuntimeError, toClientError } from "../dist/index.js";
+import { withAutter, captureEdgeException, defineRuntimeErrors, RuntimeError, toClientError } from "../dist/index.js";
 
 const billing = defineRuntimeErrors("billing", {
 	declined: { status: 402, message: "Payment declined", expected: true, why: "Issuer rejected the charge" },
@@ -213,4 +213,80 @@ test("hostile attributes never make rt.error or rt.captureException throw", asyn
 	assert.equal(response.status, 200);
 	await Promise.all(h.pending);
 	assert.ok(h.records().some((r) => r.message === "second"));
+});
+
+test("captureEdgeException sends one promoted error record outside withAutter", async () => {
+	const h = harness();
+	function edgeRenderFailure() {
+		return new Error("render failed for person@example.com");
+	}
+	const error = edgeRenderFailure();
+	await captureEdgeException(
+		{ apiKey: "server-key", service: "web-edge", environment: "test", release: "abc", endpoint: "https://ingest.test/", fetch: h.fakeFetch },
+		error,
+		{ "next.route_path": "/blog/[slug]", "http.request.method": "GET", "autter.capture.mode": "spoofed", password: "hunter2" },
+	);
+	assert.equal(h.posts.length, 1);
+	assert.equal(h.posts[0].url, "https://ingest.test/v1/logs");
+	assert.equal(h.posts[0].headers.authorization, "Bearer server-key");
+	const resource = Object.fromEntries(h.posts[0].body.resourceLogs[0].resource.attributes.map((a) => [a.key, a.value.stringValue]));
+	assert.deepEqual(resource, { "service.name": "web-edge", "deployment.environment.name": "test", "service.version": "abc" });
+	const [record] = h.records();
+	assert.equal(record.level, "ERROR");
+	assert.equal(record.attrs["autter.capture.mode"], "log", "SDK-owned keys cannot be overridden");
+	assert.equal(record.attrs["exception.type"], "Error");
+	assert.match(record.attrs["exception.stacktrace"], /edgeRenderFailure/, "the error's own stack");
+	assert.equal(record.attrs["next.route_path"], "/blog/[slug]");
+	assert.equal(record.attrs["http.request.method"], "GET");
+	assert.equal(record.attrs.password, "[redacted]");
+	assert.equal(JSON.stringify(h.posts).includes("person@example.com"), false, "message and stack are redacted");
+
+	// Coded errors keep their code; non-errors still get a stack.
+	await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, billing.declined());
+	await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, "plain failure");
+	const [, coded, plain] = h.records();
+	assert.equal(coded.attrs["autter.error.code"], "billing.declined");
+	assert.equal(plain.attrs["exception.message"], "plain failure");
+	assert.ok(plain.attrs["exception.stacktrace"].length > 0);
+});
+
+test("captureEdgeException never rejects: no key, failing fetch, hostile errors", async () => {
+	const warn = console.warn;
+	const warnings = [];
+	console.warn = (message) => warnings.push(message);
+	try {
+		let calls = 0;
+		await captureEdgeException({ service: "web-edge", fetch: async () => (calls++, new Response("{}")) }, new Error("x"));
+		assert.equal(calls, 0, "no apiKey → nothing sent");
+		await captureEdgeException(
+			{ apiKey: "k", service: "web-edge", fetch: async () => (calls++, new Response("", { status: 503 })) },
+			new Error("x"),
+		);
+		assert.equal(calls, 2, "retried once on 5xx");
+		await captureEdgeException(
+			{ apiKey: "k", service: "web-edge", fetch: async () => { throw new TypeError("network down"); } },
+			new Error("x"),
+		);
+		const hostile = { [Symbol.toPrimitive]() { throw new Error("no string for you"); } };
+		await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: async () => new Response("{}") }, hostile);
+		assert.ok(warnings.some((w) => /could not be delivered/.test(w)));
+	} finally {
+		console.warn = warn;
+	}
+});
+
+test("captureEdgeException skips an error withAutter already captured", async () => {
+	const h = harness();
+	const thrown = new Error("middleware failed");
+	const worker = withAutter({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, async () => {
+		throw thrown;
+	});
+	await assert.rejects(worker(new Request("https://edge.test/mw"), {}, h.ctx), /middleware failed/);
+	await Promise.all(h.pending);
+	const before = h.records().filter((r) => r.attrs["autter.capture.mode"] === "log").length;
+	assert.equal(before, 1);
+	// e.g. Next.js then calls onRequestError with the same error.
+	await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, thrown);
+	await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, thrown);
+	assert.equal(h.records().filter((r) => r.attrs["autter.capture.mode"] === "log").length, 1);
 });

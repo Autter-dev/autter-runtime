@@ -65,11 +65,22 @@ export {
 	autterRequests,
 	autterFastify,
 	autterErrorResponse,
+	captureRequestError,
 	withRuntimeRequest,
 	type AutterRequestsOptions,
 	type AutterErrorResponseOptions,
 	type RuntimeRequestOptions,
 } from "./requests.js";
+export {
+	autterErrorHandler,
+	autterFastifyErrors,
+	autterKoa,
+	type AutterErrorHandlerOptions,
+} from "./framework-errors.js";
+export {
+	unhandledRejectionsMode,
+	type UnhandledRejectionsMode,
+} from "./unhandled-rejections.js";
 export * from "./errors.js";
 export {
 	initAutterLogging,

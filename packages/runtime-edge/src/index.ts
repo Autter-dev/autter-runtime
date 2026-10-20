@@ -30,6 +30,7 @@ import {
 	createRuntimeEvent,
 	isSummary,
 	errorAttributes,
+	isError,
 	fingerprintEventAttributes,
 	makeRedactor,
 	maxLevel,
@@ -467,14 +468,14 @@ export async function captureEdgeException(
 	try {
 		if (!firstCapture(error)) return;
 		const redact = makeRedactor(options.redactAttributes ?? true);
-		const isError = error instanceof Error;
-		const message = isError ? error.message : safeString(error);
+		const isErr = isError(error);
+		const message = isErr ? error.message : safeString(error);
 		const user = userContext(
 			{
 				...safeAttributes(attributes),
-				"exception.type": isError ? error.name : "Error",
+				"exception.type": isErr ? error.name : "Error",
 				"exception.message": message,
-				"exception.stacktrace": (isError && error.stack) || new Error(message).stack || "",
+				"exception.stacktrace": (isErr && error.stack) || new Error(message).stack || "",
 			},
 			redact,
 		);
@@ -597,10 +598,10 @@ function buildRuntime(
 			noteError(err);
 			log(
 				"error",
-				err instanceof Error ? err.message : String(err),
+				isError(err) ? err.message : String(err),
 				{
 					...safeAttributes(attrs),
-					...(err instanceof Error
+					...(isError(err)
 						? { "exception.type": err.name, "exception.stacktrace": err.stack ?? "" }
 						: {}),
 				},
@@ -616,8 +617,8 @@ function buildRuntime(
 				capturedErrors().add(err);
 			}
 			noteError(err);
-			const isError = err instanceof Error;
-			const message = isError ? err.message : String(err);
+			const isErr = isError(err);
+			const message = isErr ? err.message : String(err);
 			appendInlineLog(inline, "error", message, undefined, redact);
 			const split = splitFingerprint(safeAttributes(attrs));
 			record(
@@ -625,9 +626,9 @@ function buildRuntime(
 				message,
 				{
 					...split.attributes,
-					"exception.type": isError ? err.name : "Error",
+					"exception.type": isErr ? err.name : "Error",
 					"exception.message": message,
-					"exception.stacktrace": (isError && err.stack) || new Error(message).stack || "",
+					"exception.stacktrace": (isErr && err.stack) || new Error(message).stack || "",
 				},
 				{ "autter.capture.mode": "log", ...errorAttributes(err), ...fingerprintEventAttributes(split.fingerprint) },
 			);
@@ -646,7 +647,7 @@ function buildRuntime(
 		record(
 			level,
 			outcomeMessage ?? `${method} ${route}: ${outcome}`,
-			error instanceof Error
+			isError(error)
 				? { "exception.type": error.name, "exception.stacktrace": error.stack ?? "" }
 				: {},
 			{

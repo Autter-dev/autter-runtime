@@ -197,6 +197,27 @@ export function defineRuntimeErrors<const C extends Record<string, CatalogEntry>
 }
 
 /**
+ * `value instanceof Error`, across JavaScript realms. An error thrown in
+ * another realm fails `instanceof Error` here: Next.js runs edge code in a
+ * `vm` sandbox under `next start` and hands edge route-handler errors to the
+ * Node `onRequestError`. Without this check those errors were recorded as
+ * strings ("Error: …") with a synthetic stack instead of their own.
+ */
+export function isError(value: unknown): value is Error {
+	if (!value || typeof value !== "object") return false;
+	try {
+		if (value instanceof Error) return true;
+		// Error.isError (ES2026) checks the internal error slot; older runtimes
+		// fall back to the built-in tag every realm's native errors carry.
+		const native = (Error as { isError?: (value: unknown) => boolean }).isError;
+		if (typeof native === "function") return native(value) === true;
+		return Object.prototype.toString.call(value) === "[object Error]";
+	} catch {
+		return false;
+	}
+}
+
+/**
  * True for any error carrying Autter's structured fields — a RuntimeError,
  * or ANY object with a string `code`/`why`/`fix`/`link`, a numeric `status`
  * (or `statusCode`) or a boolean `expected`. Existing error classes benefit

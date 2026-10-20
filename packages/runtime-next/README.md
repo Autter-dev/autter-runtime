@@ -9,7 +9,8 @@ same-origin relay route, and a React error boundary.
 npm install @autter/runtime-next
 ```
 
-Set `AUTTER_RUNTIME_KEY` in your environment. Then three small files.
+Set `AUTTER_RUNTIME_KEY` in your environment. Then one line of
+`next.config` and three small files.
 
 The package has two entry points — this split is what keeps the Node
 OpenTelemetry SDK out of your browser bundle:
@@ -20,6 +21,25 @@ OpenTelemetry SDK out of your browser bundle:
   error boundary. Never imports Node code.
 - `@autter/runtime-next/instrumentation` — `onRequestError` for
   `instrumentation.ts`; safe on both the Node and edge runtimes.
+
+**`next.config`** — one copy of the Node SDK for `instrumentation.ts` and
+your routes:
+
+```js
+// next.config.mjs
+export default {
+  serverExternalPackages: ["@autter/runtime-node"],
+};
+```
+
+Next bundles server dependencies separately into `instrumentation.ts` and
+into each route. Without this line, code in routes, server components and
+server actions (`withRuntimeRequest`, `captureServerException`,
+`runtimeLogger`, `runtimeContext`, …) reaches a copy of the SDK that
+`registerAutter` never started: request summaries are printed to the
+console instead of being exported, and an error `withRuntimeRequest`
+reports is reported a second time by `onRequestError`. Next 14.2:
+`experimental: { serverComponentsExternalPackages: ["@autter/runtime-node"] }`.
 
 **1. `instrumentation.ts`** — server tracing/errors:
 
@@ -57,14 +77,28 @@ bundles. Without edge errors to report, `export { onRequestError } from
 
 On Node the error is recorded on the request span through the
 `registerAutter` tracker — once, even when `withRuntimeRequest` already
-reported it. Recorded with it: `next.route_path` (`/blog/[slug]`),
+reported it (Next's context is then added to that report). Recorded with
+it: `next.route_path` (the route template: `/blog/[slug]`, `/api/orders`;
+middleware is `/middleware` on Next 15 and `/proxy` on Next 16),
 `next.router_kind`, `next.route_type` (`render`, `route`, `action`,
-`middleware`), `next.render_source`, `next.render_type`,
-`next.revalidate_reason`, `next.digest` (matches the `digest` your error
-boundary sees), `http.request.method` and `url.path` without its query
-string. Headers and cookies are never read. Next's control-flow signals
-(`redirect()`, `notFound()`, `forbidden()`, `unauthorized()`, dynamic
-bailouts) are skipped; `capture: true` or a predicate changes that.
+`middleware` on Next 15, `proxy` on Next 16), `next.render_source`
+(`react-server-components`, `react-server-components-payload`,
+`server-rendering`), `next.render_type`, `next.revalidate_reason`,
+`next.digest` (matches the `digest` your error boundary sees),
+`http.request.method` and `url.path` without its query string. Headers and
+cookies are never read. Next's control-flow signals (`redirect()`,
+`notFound()`, `forbidden()`, `unauthorized()`, dynamic bailouts) are
+skipped; `capture: true` or a predicate changes that.
+
+On the edge runtime, Next calls `onRequestError` inside the function for
+middleware and edge pages; the record goes out with the `edge` options and
+is also handed to the request's `waitUntil`, since Next does not await the
+hook for errors raised while rendering. Edge route handlers
+(`export const runtime = "edge"` in `route.ts`) are the exception: Next
+never calls the hook inside them. Self-hosted (`next start`), the Node
+server reports them instead, so the Node tracker records them with their
+own stack, `next.router_kind` `Pages Router` and `next.route_path` such as
+`/api/orders/route`.
 
 `registerAutter` passes options straight to `initAutterServer`, so the
 server SDK's defaults apply out of the box: exporters are flushed on

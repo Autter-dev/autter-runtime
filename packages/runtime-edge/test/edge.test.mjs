@@ -250,6 +250,18 @@ test("captureEdgeException sends one promoted error record outside withAutter", 
 	assert.ok(plain.attrs["exception.stacktrace"].length > 0);
 });
 
+test("captureEdgeException keeps an error from another realm as an error, with its own stack", async () => {
+	const h = harness();
+	const { runInNewContext } = await import("node:vm");
+	const foreign = runInNewContext("(function sandboxedFailure() { return new TypeError('sandboxed boom'); })()");
+	assert.equal(foreign instanceof Error, false);
+	await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, foreign);
+	const [record] = h.records();
+	assert.equal(record.attrs["exception.type"], "TypeError");
+	assert.equal(record.attrs["exception.message"], "sandboxed boom");
+	assert.match(record.attrs["exception.stacktrace"], /sandboxedFailure/);
+});
+
 test("captureEdgeException never rejects: no key, failing fetch, hostile errors", async () => {
 	const warn = console.warn;
 	const warnings = [];

@@ -14,6 +14,7 @@ import {
 	createInlineLogState,
 	createRuntimeEvent,
 	errorAttributes,
+	isError,
 	formatTraceparent,
 	maxLevel,
 	mergeContext,
@@ -342,8 +343,8 @@ export function notifyException(error: unknown, attributes: Record<string, unkno
 	const record: CapturedException = {
 		time: Date.now(),
 		error,
-		message: error instanceof Error ? error.message : String(error),
-		type: error instanceof Error ? error.name : "Error",
+		message: isError(error) ? error.message : String(error),
+		type: isError(error) ? error.name : "Error",
 		attributes: { ...attributes, ...errorAttributes(error) },
 		...(state ? { operationId: state.id } : {}),
 		...(state?.requestId ? { requestId: state.requestId } : {}),
@@ -412,11 +413,11 @@ export function createRuntimeLogger(attributes: RuntimeLogContext = {}) {
 		error: (error: unknown, extra?: RuntimeLogContext) =>
 			emit(
 				"error",
-				error instanceof Error ? error.message : String(error),
+				isError(error) ? error.message : String(error),
 				{
 					...attrs,
 					...extra,
-					...(error instanceof Error
+					...(isError(error)
 						? {
 								"exception.type": error.name,
 								"exception.stacktrace": error.stack ?? "",
@@ -438,9 +439,9 @@ export function captureExceptionAsLog(
 	error: unknown,
 	attributes: Record<string, unknown> = {},
 ): void {
-	const isError = error instanceof Error;
-	const message = isError ? error.message : String(error);
-	const stack = isError && error.stack
+	const isErr = isError(error);
+	const message = isErr ? error.message : String(error);
+	const stack = isErr && error.stack
 		? error.stack
 		: (new Error().stack
 				?.split("\n")
@@ -452,7 +453,7 @@ export function captureExceptionAsLog(
 		message,
 		{
 			...(attributes as RuntimeLogContext),
-			"exception.type": isError ? error.name : "Error",
+			"exception.type": isErr ? error.name : "Error",
 			"exception.message": message,
 			"exception.stacktrace": stack,
 		},
@@ -587,7 +588,7 @@ export function emitSummary(
 		state.message ?? `${state.name}: ${state.outcome}`,
 		{
 			...operationAttributes(state),
-			...(err instanceof Error
+			...(isError(err)
 				? {
 						"exception.type": err.name,
 						"exception.stacktrace": err.stack ?? "",

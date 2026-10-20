@@ -235,8 +235,11 @@ errors — `ctx.throw(404)` and validation failures stay out of your issues.
 Pass `{ capture: true }` to report every error, or a predicate. An error is
 reported once, even if your handler already called `captureException`, and it
 lands on the request's HTTP server span even when an instrumentation's child
-span is active. `autterErrorResponse()` reports the same way and also answers
-the request.
+span is active (`captureRequestError` still adds its attributes to that span
+when the error was already reported). Errors from another JavaScript realm
+(a `vm` context, Next's edge sandbox under `next start`) keep their own type,
+message and stack. `autterErrorResponse()` reports the same way and also
+answers the request.
 
 ### Unhandled promise rejections
 

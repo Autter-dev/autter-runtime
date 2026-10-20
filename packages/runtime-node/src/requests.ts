@@ -42,6 +42,12 @@ let capturer: ExceptionCapturer = () => {};
 export function setRequestExceptionCapturer(fn: ExceptionCapturer): void {
 	capturer = fn;
 }
+type SpanAnnotator = (attributes: Attributes) => void;
+let annotator: SpanAnnotator = () => {};
+/** @internal server.ts registers a redacting "set these on the active span" here. */
+export function setRequestSpanAnnotator(fn: SpanAnnotator): void {
+	annotator = fn;
+}
 /** @internal Remember errors already captured so boundaries don't double-report. */
 export function markCaptured(error: unknown): void {
 	if (error && typeof error === "object") CAPTURED.add(error);
@@ -172,9 +178,20 @@ export function requestStateOf(req: unknown): OperationState | undefined {
  * it reports each error once (an error a handler or another hook already
  * captured is skipped), and it records the exception, with its stack, on the
  * request's HTTP server span even when a child span is active, so the failed
- * request and its exception stay one issue.
+ * request and its exception stay one issue. When the error was already
+ * captured (e.g. by `withRuntimeRequest`), `attributes` still go on the
+ * request span, without a second exception.
  */
 export function captureRequestError(error: unknown, attributes?: Attributes): void {
+	if (error && typeof error === "object" && CAPTURED.has(error)) {
+		if (!attributes) return;
+		try {
+			onRequestSpan(() => annotator(attributes));
+		} catch {
+			/* annotation never breaks the response */
+		}
+		return;
+	}
 	captureAtBoundary(error, currentOperation(), true, attributes);
 }
 

@@ -16,11 +16,15 @@ export interface NextRequestErrorRequest {
 
 /** Next.js `onRequestError` context argument. */
 export interface NextRequestErrorContext {
-	/** `"App Router"` or `"Pages Router"`. */
+	/** `"App Router"` or `"Pages Router"` (also what Next passes for middleware and edge route handlers). */
 	routerKind?: string;
-	/** The route, e.g. `/blog/[slug]`. */
+	/**
+	 * The route template, e.g. `/blog/[slug]` or `/api/orders`. Middleware:
+	 * `/middleware` (Next 15) or `/proxy` (Next 16). An edge route handler
+	 * reported by `next start`: the page, e.g. `/api/orders/route`.
+	 */
 	routePath?: string;
-	/** `"render"`, `"route"`, `"action"` or `"middleware"`. */
+	/** `"render"`, `"route"`, `"action"`, `"middleware"` (Next 15) or `"proxy"` (Next 16). */
 	routeType?: string;
 	/** `"react-server-components"`, `"react-server-components-payload"` or `"server-rendering"`. */
 	renderSource?: string;
@@ -122,6 +126,27 @@ export function requestErrorAttributes(
 
 let warnedNoEdgeOptions = false;
 
+/**
+ * The current request's `waitUntil` from Next's request context (set on the
+ * edge runtime and in `next start`'s edge sandbox). Next awaits
+ * `onRequestError` for middleware, but calls it fire-and-forget for errors
+ * React reports during a render, so the delivery is handed to the platform
+ * too: an edge function may stop once its response is done.
+ */
+function nextWaitUntil(): ((promise: Promise<unknown>) => void) | undefined {
+	try {
+		const store = (globalThis as Record<symbol, unknown>)[Symbol.for("@next/request-context")] as
+			| { get?: () => { waitUntil?: unknown } | undefined }
+			| undefined;
+		const context = typeof store?.get === "function" ? store.get() : undefined;
+		const waitUntil = context?.waitUntil;
+		if (typeof waitUntil !== "function") return undefined;
+		return (promise) => (waitUntil as (promise: Promise<unknown>) => void).call(context, promise);
+	} catch {
+		return undefined;
+	}
+}
+
 /** Edge runtime: one promoted error record over `/v1/logs`. */
 export async function reportOnEdge(
 	edge: AutterOnRequestErrorOptions["edge"],
@@ -139,5 +164,11 @@ export async function reportOnEdge(
 		}
 		return;
 	}
-	await captureEdgeException(options, error, attributes);
+	const delivery = captureEdgeException(options, error, attributes);
+	try {
+		nextWaitUntil()?.(delivery);
+	} catch {
+		/* no waitUntil: awaiting below is all there is */
+	}
+	await delivery;
 }

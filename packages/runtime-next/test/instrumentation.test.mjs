@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import * as instrumentation from "../dist/instrumentation.js";
 import * as edgeBuild from "../dist/instrumentation-edge.js";
 import { registerAutter, withRuntimeRequest } from "../dist/server.js";
@@ -100,14 +101,20 @@ test("Node runtime: onRequestError records the error with its stack and Next's c
 	const handled = withRuntimeRequest(async () => {
 		throw new Error("route handler failed");
 	});
+	// `next start` runs edge route handlers in a vm sandbox and hands their
+	// errors to the Node onRequestError: an Error from another realm.
+	const edgeRealmError = vm.runInNewContext(
+		"(function edgeRouteExplodes() { return new TypeError('edge route boom'); })()",
+	);
 	const app = await nextLikeServer(instrumentation.onRequestError, async (url) => {
 		if (url.startsWith("/blog/")) renderBlogPost();
 		if (url === "/redirect") throw Object.assign(new Error("NEXT_REDIRECT"), { digest: "NEXT_REDIRECT;replace;/login;307;" });
 		if (url === "/not-found") throw Object.assign(new Error("NEXT_HTTP_ERROR_FALLBACK;404"), { digest: "NEXT_HTTP_ERROR_FALLBACK;404" });
 		if (url === "/api/route") await handled(new Request("http://next.test/api/route"));
+		if (url === "/api/edge-route") throw edgeRealmError;
 	});
 	try {
-		for (const route of ["/blog/hello?draft=preview42", "/redirect", "/not-found", "/api/route"]) {
+		for (const route of ["/blog/hello?draft=preview42", "/redirect", "/not-found", "/api/route", "/api/edge-route"]) {
 			const response = await fetch(`${app.url}${route}`, { headers: { cookie: "sid=rawcookievalue" } });
 			assert.equal(response.status, 500);
 			await response.text();
@@ -149,10 +156,21 @@ test("Node runtime: onRequestError records the error with its stack and Next's c
 	assert.equal(exceptions(serverSpan("/redirect")).length, 0);
 	assert.equal(exceptions(serverSpan("/not-found")).length, 0);
 
-	// Captured once: withRuntimeRequest reported it, onRequestError skips it.
+	// Captured once: withRuntimeRequest reported it, onRequestError skips it
+	// but still puts Next's context on the request span.
 	const route = serverSpan("/api/route");
 	assert.equal(exceptions(route).length, 1);
 	assert.equal(attrs(exceptions(route)[0].attributes)["exception.message"], "route handler failed");
+	assert.equal(attrs(route.attributes)["next.route_path"], "/blog/[slug]");
+	assert.equal(attrs(route.attributes)["url.path"], "/api/route");
+
+	// An error from another realm is still an Error: its own type, message and stack.
+	const [edgeEvent, ...extra] = exceptions(serverSpan("/api/edge-route"));
+	assert.equal(extra.length, 0);
+	const edgeAttrs = attrs(edgeEvent.attributes);
+	assert.equal(edgeAttrs["exception.type"], "TypeError");
+	assert.equal(edgeAttrs["exception.message"], "edge route boom", "not the stringified error");
+	assert.match(edgeAttrs["exception.stacktrace"], /edgeRouteExplodes/, "the sandboxed error's own stack");
 });
 
 function edgeHarness() {
@@ -208,6 +226,48 @@ for (const [name, build, env] of [
 		assert.equal(wire.includes("rawcookievalue"), false);
 		assert.equal(wire.includes("headersecret123"), false);
 		assert.equal(wire.includes("preview42"), false, "query string dropped");
+	});
+}
+
+for (const [name, build, env] of [
+	["default build with NEXT_RUNTIME=edge", instrumentation, "edge"],
+	["edge-only build", edgeBuild, undefined],
+]) {
+	test(`edge runtime (${name}): delivery is handed to Next's request-context waitUntil`, async () => {
+		// Next calls onRequestError without awaiting it for errors React reports
+		// during a render; waitUntil keeps the edge function alive for the POST.
+		const h = edgeHarness();
+		const key = Symbol.for("@next/request-context");
+		const previousContext = globalThis[key];
+		const previousRuntime = process.env.NEXT_RUNTIME;
+		const requestContext = {
+			pending: [],
+			waitUntil(promise) {
+				this.pending.push(promise);
+			},
+		};
+		globalThis[key] = { get: () => requestContext };
+		if (env) process.env.NEXT_RUNTIME = env;
+		try {
+			const onRequestError = build.autterOnRequestError({
+				edge: { apiKey: "server-key", service: "web-edge", endpoint: "https://ingest.test", fetch: h.fetch },
+			});
+			await onRequestError(new Error("render failed on the edge"), nextRequest, nextContext);
+			// No request context (or a broken one): still delivered, never throws.
+			globalThis[key] = { get: () => { throw new Error("no context"); } };
+			await onRequestError(new Error("outside a request"), nextRequest, nextContext);
+		} finally {
+			if (previousContext === undefined) delete globalThis[key];
+			else globalThis[key] = previousContext;
+			if (previousRuntime === undefined) delete process.env.NEXT_RUNTIME;
+			else process.env.NEXT_RUNTIME = previousRuntime;
+		}
+		assert.equal(requestContext.pending.length, 1, "handed to waitUntil, called on its context");
+		await requestContext.pending[0];
+		assert.deepEqual(
+			h.records().map((r) => r["exception.message"]),
+			["render failed on the edge", "outside a request"],
+		);
 	});
 }
 

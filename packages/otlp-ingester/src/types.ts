@@ -60,6 +60,13 @@ export interface RuntimeOccurrenceInput {
 	expected?: boolean;
 	/** `autter.request.id` — joins the occurrence to its request summary. */
 	requestId?: string;
+	/**
+	 * Browser only (EI-13): script URL (query and hash stripped) → debug id,
+	 * for the scripts in this event's stack whose bundles were injected by
+	 * `autter-runtime sourcemaps inject`. Symbolication passes the id to
+	 * lookupSourceMap (source-maps-lookup.ts). Omitted when empty.
+	 */
+	debugIds?: Record<string, string>;
 }
 
 /**

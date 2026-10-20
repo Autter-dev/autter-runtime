@@ -3,6 +3,7 @@ import { liftErrorFields } from "./error-fields.js";
 import { sanitizeRuntimeContext } from "./context.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { scrubText } from "./redact.js";
+import { browserDebugIds } from "./source-maps.js";
 import {
 	asSeverity,
 	type RuntimeMetricPoint,
@@ -53,6 +54,9 @@ const browserEventSchema = z.object({
 	 * instead of rejecting the whole beacon.
 	 */
 	context: z.record(z.unknown()).optional(),
+	/** runtime-browser ≥1.6.0: script URL → debug id for the scripts in this
+	 * event's stack (EI-13). Malformed values are dropped, never the beacon. */
+	debugIds: z.record(z.string().max(1000), z.unknown()).optional().catch(undefined),
 });
 
 export const browserPayloadSchema = z.object({
@@ -206,6 +210,7 @@ export function normalizeBrowserPayload(
 			},
 			occurredAt,
 			...liftErrorFields(event.context),
+			...browserDebugIds(event.debugIds),
 		});
 	}
 

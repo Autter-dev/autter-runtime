@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Readable stack traces with debug ids (EI-13): new `@autter/runtime-cli` package (`autter-runtime sourcemaps inject|upload`) gives every JS bundle with a map a content-addressed debug id (`//# debugId=`, a `globalThis._autterDebugIds` registration snippet, and `debugId` in the `.map`), and uploads maps in parallel, skipping ones the ingester already has. Release defaults to `GITHUB_SHA`, `VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `GIT_SHA`, then `git rev-parse HEAD`. Bundler plugins: `@autter/runtime-cli/vite` (Vite and Rollup), `@autter/runtime-cli/webpack` and `withAutterSourceMaps` from `@autter/runtime-cli/next`; composite action `.github/actions/upload-sourcemaps`. `/v1/sourcemaps` accepts `debugId` (or reads it from the map) and `.mjs`/`.cjs` bundles; new `/v1/sourcemaps/check`; `runtime_source_maps` gains `debug_id` and `content_hash` (migration `0016-source-maps-debug-id`); `lookupSourceMap` finds a map by debug id, then by release + path (`otlp-ingester`). Exceptions carry `debugIds` for the scripts in their stack, read from `globalThis._autterDebugIds` (`runtime-browser`); the browser relay forwards them, and its `autter-runtime` bin hands `sourcemaps` commands to `@autter/runtime-cli` (`runtime-node`). New compat feature `source_map_debug_ids`. See `docs/SOURCE-MAPS.md`.
+
 ## [1.5.0] - 2026-10-08
 
 Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `runtime-browser` 1.4.0, new `runtime-edge` 1.0.0. Additive: 1.4.0 code keeps working unchanged (golden-tested).

@@ -153,7 +153,11 @@ sampler may otherwise discard it.
 
 ## Browser source maps
 
-CI can upload each production JavaScript source map to `/v1/sourcemaps` with
+Use `@autter/runtime-cli` (CLI, Vite/Rollup, webpack and Next.js plugins, or
+the `upload-sourcemaps` GitHub Action): it gives each bundle a debug id so maps
+match whatever release the SDK reports. See [Readable stack traces](SOURCE-MAPS.md).
+
+Without it, CI can upload each production JavaScript source map to `/v1/sourcemaps` with
 a server key and JSON `{ "release": "<commit SHA>", "filename": "/assets/app.js",
 "map": <source map object> }`. The `release` must match the browser SDK
 release. Autter strips `sourcesContent`, stores the mapping for 30 days, and

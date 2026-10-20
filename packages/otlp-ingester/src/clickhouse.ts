@@ -7,7 +7,8 @@ import type { IngesterConfig } from "./config.js";
 import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
 import { profileTableDDL, type ProfileSample } from "./profiles.js";
 import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
-import { sourceMapTableDDL } from "./source-maps.js";
+import { sourceMapTableDDL, type SourceMapCheck, type ValidSourceMap } from "./source-maps.js";
+import { presentSourceMaps } from "./source-maps-lookup.js";
 import {
 	logTableDDL,
 	requestRollupTableDDL,
@@ -513,13 +514,21 @@ export class ClickHouseStore {
 				occurred_at: event.occurredAt }] });
 	}
 
-	async insertSourceMap(ctx: IngestContext, sourceMap: { release: string; filename: string; map: string }): Promise<void> {
+	async insertSourceMap(ctx: IngestContext, sourceMap: ValidSourceMap): Promise<void> {
 		await this.ensureSchema();
 		await this.getClient().insert({
 			table: this.table("runtime_source_maps"), format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
-			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, ...sourceMap }],
+			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, release: sourceMap.release,
+				filename: sourceMap.filename, map: sourceMap.map, debug_id: sourceMap.debugId,
+				content_hash: sourceMap.contentHash }],
 		});
+	}
+
+	/** Indexes of `check.entries` this tenant uploaded recently (see presentSourceMaps). */
+	async sourceMapsPresent(ctx: IngestContext, check: SourceMapCheck): Promise<number[]> {
+		await this.ensureSchema();
+		return presentSourceMaps(this.getClient(), this.config.clickhouseDatabase, ctx, check);
 	}
 
 	async insertLlmCalls(

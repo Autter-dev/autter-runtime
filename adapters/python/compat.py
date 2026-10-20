@@ -174,6 +174,19 @@ MANIFEST: dict[str, Any] = json.loads(
                 "@autter/runtime-browser": "1.4.0",
                 "@autter/runtime-edge": "1.0.0"
             }
+        },
+        {
+            "id": "source_map_debug_ids",
+            "title": "Source map debug ids",
+            "ingester": "1.6.0",
+            "migrations": [
+                "0016-source-maps-debug-id"
+            ],
+            "route": "/v1/sourcemaps/check",
+            "sdks": {
+                "@autter/runtime-browser": "1.6.0",
+                "@autter/runtime-next": "1.6.0"
+            }
         }
     ]
 }

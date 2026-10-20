@@ -1,0 +1,98 @@
+{
+	"name": "@autter/runtime-cli",
+	"version": "1.0.0",
+	"description": "Readable stack traces for Autter Runtime: inject debug ids into JS bundles and upload their source maps (CLI, Vite/Rollup, webpack and Next.js plugins)",
+	"license": "MIT",
+	"type": "module",
+	"main": "./dist/index.cjs",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"require": "./dist/index.cjs"
+		},
+		"./vite": {
+			"types": "./dist/vite.d.ts",
+			"import": "./dist/vite.js",
+			"require": "./dist/vite.cjs"
+		},
+		"./rollup": {
+			"types": "./dist/vite.d.ts",
+			"import": "./dist/vite.js",
+			"require": "./dist/vite.cjs"
+		},
+		"./webpack": {
+			"types": "./dist/webpack.d.ts",
+			"import": "./dist/webpack.js",
+			"require": "./dist/webpack.cjs"
+		},
+		"./next": {
+			"types": "./dist/next.d.ts",
+			"import": "./dist/next.js",
+			"require": "./dist/next.cjs"
+		},
+		"./package.json": "./package.json"
+	},
+	"bin": {
+		"autter-runtime": "./dist/cli.js"
+	},
+	"files": [
+		"dist"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Autter-dev/autter-runtime.git",
+		"directory": "packages/runtime-cli"
+	},
+	"scripts": {
+		"build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+		"test": "npm run build -w @autter/otlp-ingester && npm run build && node --test test/*.test.mjs"
+	},
+	"peerDependencies": {
+		"next": ">=13",
+		"rollup": ">=3",
+		"vite": ">=4",
+		"webpack": ">=5"
+	},
+	"peerDependenciesMeta": {
+		"next": {
+			"optional": true
+		},
+		"rollup": {
+			"optional": true
+		},
+		"vite": {
+			"optional": true
+		},
+		"webpack": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"rollup": "^4.62.2",
+		"tsup": "^8.3.5",
+		"typescript": "^5.7.0"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"homepage": "https://github.com/Autter-dev/autter-runtime#readme",
+	"bugs": "https://github.com/Autter-dev/autter-runtime/issues",
+	"keywords": [
+		"source-maps",
+		"sourcemaps",
+		"debug-id",
+		"error-tracking",
+		"vite",
+		"webpack",
+		"nextjs",
+		"cli"
+	]
+}

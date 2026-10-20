@@ -239,3 +239,17 @@ test("the relay still rejects an unknown event type", () => {
 		events: [{ ...event, type: "dom_recording" }],
 	}), null);
 });
+
+test("the relay keeps valid debug ids, query-stripped, and drops the rest", () => {
+	const id = "4F3C6A1E-9B2D-4E8F-A1B2-C3D4E5F60718";
+	const payload = sanitizeBrowserPayload({
+		version: 1, service: "web", environment: "production",
+		events: [
+			{ type: "exception", timestamp: new Date().toISOString(), message: "boom",
+				debugIds: { "https://app.test/assets/app.js?v=1": id, "https://app.test/x.js": "nope", "https://app.test/y.js": 7 } },
+			{ type: "exception", timestamp: new Date().toISOString(), message: "boom", debugIds: ["not", "a", "map"] },
+		],
+	});
+	assert.deepEqual(payload.events[0].debugIds, { "https://app.test/assets/app.js": id.toLowerCase() });
+	assert.equal("debugIds" in payload.events[1], false);
+});

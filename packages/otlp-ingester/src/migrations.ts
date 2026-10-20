@@ -35,7 +35,11 @@
 
 import { latencyTableDDL } from "./latency.js";
 import { profileTableDDL } from "./profiles.js";
-import { sourceMapTableDDL } from "./source-maps.js";
+import {
+	SOURCE_MAP_DEBUG_COLUMNS,
+	SOURCE_MAP_DEBUG_ID_INDEX,
+	sourceMapTableDDL,
+} from "./source-maps.js";
 import {
 	LOG_REQUEST_COLUMNS,
 	LOG_REQUEST_ID_INDEX,
@@ -216,6 +220,20 @@ export const MIGRATIONS: Migration[] = [
 			(column) =>
 				`ALTER TABLE {db}.runtime_error_occurrences ADD COLUMN IF NOT EXISTS ${column}`,
 		),
+	},
+	// Source map debug ids (EI-13): the bundle's debug id, so a map matches
+	// by the bytes it was built from whatever release the SDK reports, plus
+	// the stored map's sha256 so CI skips maps it already uploaded. The
+	// sorting key is unchanged: uploads still need a release.
+	{
+		id: "0017-source-maps-debug-id",
+		statements: [
+			...SOURCE_MAP_DEBUG_COLUMNS.map(
+				(column) =>
+					`ALTER TABLE {db}.runtime_source_maps ADD COLUMN IF NOT EXISTS ${column}`,
+			),
+			`ALTER TABLE {db}.runtime_source_maps ADD ${SOURCE_MAP_DEBUG_ID_INDEX.replace("INDEX ", "INDEX IF NOT EXISTS ")}`,
+		],
 	},
 ];
 

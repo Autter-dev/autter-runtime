@@ -13,7 +13,8 @@ profile and source-map uploads use the server key.
 | `POST /v1/traces`, `POST /v1/metrics`, `POST /v1/logs` | OTLP/HTTP — **protobuf or JSON**, gzip ok |
 | `POST /v1/browser` | compact JSON (`@autter/runtime-browser` payload v1) |
 | `POST /v1/profiles` | symbolized pprof (server key only) |
-| `POST /v1/sourcemaps` | release-keyed source map JSON (server key only) |
+| `POST /v1/sourcemaps` | source map JSON keyed by release + path, plus an optional `debugId` (server key only; see [Readable stack traces](SOURCE-MAPS.md)) |
+| `POST /v1/sourcemaps/check` | which maps are already stored, so uploads skip them (server key only, 1.6.0+) |
 | `POST /v1/platform-events` | ECS/Kubernetes OOM and restart JSON (server key only) |
 | `GET /v1/compat` | ingester version, schema level and supported features (public; see [Version compatibility](COMPATIBILITY.md)) |
 

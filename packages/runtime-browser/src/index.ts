@@ -15,6 +15,7 @@
 
 import { version as SDK_VERSION } from "../package.json";
 import type { Breadcrumb } from "./breadcrumbs";
+import { attachDebugIds } from "./debug-ids";
 
 export interface AutterBrowserOptions {
 	/**
@@ -81,6 +82,8 @@ export interface BrowserEvent {
 	durationMs?: number;
 	/** Steps before a failure, oldest first (`@autter/runtime-browser/breadcrumbs`). */
 	breadcrumbs?: Breadcrumb[];
+	/** Script URL → debug id for the scripts in `stack` (sourcemaps inject). */
+	debugIds?: Record<string, string>;
 }
 
 const MAX_QUEUE = 10;
@@ -479,6 +482,7 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	// straddling the limit is masked whole instead of half-exported.
 	event.message = scrubText(event.message).slice(0, 4000);
 	if (event.stack) event.stack = scrubText(event.stack).slice(0, 32000);
+	attachDebugIds(event);
 	if (event.name) event.name = scrubText(event.name).slice(0, 200);
 	if (event.context) {
 		try {

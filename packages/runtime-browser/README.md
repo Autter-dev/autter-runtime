@@ -13,8 +13,11 @@ hidden origin. Use a stable, non-sensitive
 only the element type is recorded. Set `captureActions: false` to disable this
 context. Set `captureNetworkFailures: false` or `captureTimings: false` to
 disable either observer. Production browser fixes
-can use release keyed source maps uploaded by CI; see
-`docs/CONTINUOUS-DETECTION.md` in the repository.
+use source maps uploaded by CI. With `@autter/runtime-cli` (1.6.0+), exceptions
+also carry `debugIds` for the scripts in their stack, read from the
+`globalThis._autterDebugIds` registry its injected snippet fills, so maps match
+the exact build whatever `release` says; see `docs/SOURCE-MAPS.md` in the
+repository.
 
 Tiny, dependency-free browser error + usage tracker for Autter Runtime.
 **~4 KB brotlied** (5 KB CI budget), zero runtime dependencies, no OTel SDK,

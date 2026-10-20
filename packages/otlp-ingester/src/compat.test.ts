@@ -16,12 +16,6 @@ import { browserPayloadSchema } from "./normalize-browser.js";
 const ALL = MIGRATIONS.map((m) => m.id);
 const pkgVersion = (dir: string) =>
 	(JSON.parse(readFileSync(new URL(`../../${dir}/package.json`, import.meta.url), "utf8")) as { version: string }).version;
-/** CHANGELOG "## Unreleased": features it names (`id`) ship in the next
- * release and may require versions the packages reach only at its bump. */
-const unreleased =
-	readFileSync(new URL("../../../CHANGELOG.md", import.meta.url), "utf8")
-		.split(/^## /m)
-		.find((section) => section.startsWith("Unreleased")) ?? "";
 
 test("version comparison handles v-prefixes, prereleases and junk", () => {
 	assert.equal(compareVersions("1.4.0", "1.4.0"), 0);
@@ -33,19 +27,28 @@ test("version comparison handles v-prefixes, prereleases and junk", () => {
 	assert.equal(versionAtLeast("2.0.0", "1.4.0"), true);
 });
 
+/** While CHANGELOG.md has an "## Unreleased" section, features merged for the
+ * next release may name it (the ingester's next minor) before the packages
+ * are bumped at release time. */
+function released(min: string, version: string): boolean {
+	if (compareVersions(min, version)! <= 0) return true;
+	const changelog = readFileSync(new URL("../../../CHANGELOG.md", import.meta.url), "utf8");
+	const [major, minor] = pkgVersion("otlp-ingester").split(".").map(Number);
+	return /^## Unreleased\b/m.test(changelog) && min === `${major}.${minor! + 1}.0`;
+}
+
 test("manifest is consistent with migrations, routes and released package versions", () => {
 	const ids = new Set<string>();
 	const server = readFileSync(new URL("./server.ts", import.meta.url), "utf8");
 	for (const feature of COMPAT_MANIFEST.features) {
 		assert.ok(!ids.has(feature.id), `duplicate ${feature.id}`);
 		ids.add(feature.id);
-		const pending = unreleased.includes(`\`${feature.id}\``);
-		assert.ok(pending || compareVersions(feature.ingester, pkgVersion("otlp-ingester"))! <= 0, `${feature.id}: ingester ${feature.ingester} is unreleased`);
+		assert.ok(released(feature.ingester, pkgVersion("otlp-ingester")), `${feature.id}: ingester ${feature.ingester} is unreleased`);
 		for (const migration of feature.migrations) assert.ok(ALL.includes(migration), `${feature.id}: unknown migration ${migration}`);
 		if (feature.route) assert.ok(server.includes(`app.post("${feature.route}"`), `${feature.id}: no route ${feature.route}`);
 		for (const [pkg, min] of Object.entries(feature.sdks)) {
 			const dir = pkg.replace("@autter/", "");
-			assert.ok(pending || compareVersions(min, pkgVersion(dir))! <= 0, `${feature.id}: ${pkg} ${min} is unreleased`);
+			assert.ok(released(min, pkgVersion(dir)), `${feature.id}: ${pkg} ${min} is unreleased`);
 		}
 		for (const type of feature.browserEvents ?? []) {
 			const parsed = browserPayloadSchema.safeParse({

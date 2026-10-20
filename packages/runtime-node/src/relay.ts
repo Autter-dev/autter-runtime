@@ -251,6 +251,22 @@ function relayBreadcrumbs(raw: unknown, redactor: Redactor): { breadcrumbs?: obj
 	return breadcrumbs ? { breadcrumbs } : {};
 }
 
+// runtime-browser ≥1.6.0 `debugIds` (EI-13): script URL → debug id for the
+// scripts in the event's stack. Query-stripped, scrubbed, at most 50 entries.
+const DEBUG_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+function relayDebugIds(raw: unknown, redactor: Redactor): { debugIds?: Record<string, string> } {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+	const debugIds: Record<string, string> = {};
+	let count = 0;
+	for (const [url, id] of Object.entries(raw)) {
+		if (count >= 50) break;
+		if (typeof id !== "string" || !DEBUG_ID_RE.test(id) || url.length > 1000) continue;
+		debugIds[redactor.text(url.split(/[?#]/)[0]!)] = id.toLowerCase();
+		count++;
+	}
+	return count ? { debugIds } : {};
+}
+
 // Whitelist sanitiser — anything not listed here is dropped, so a
 // compromised or buggy client can't smuggle cookies/DOM/bodies through the
 // relay. Returns null when the payload is structurally invalid.
@@ -306,6 +322,7 @@ export function sanitizeBrowserPayload(
 				? relayContext(e.context, redactor)
 				: {}),
 			...relayBreadcrumbs(e.breadcrumbs, redactor),
+			...relayDebugIds(e.debugIds, redactor),
 		});
 	}
 

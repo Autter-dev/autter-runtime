@@ -31,7 +31,8 @@ jobs:
         run: |
           # runtime-core is private (bundled into node + edge) and never published.
           # Dependencies first: runtime-next depends on node, edge and browser.
-          for pkg in runtime-browser runtime-node runtime-edge runtime-next otlp-ingester; do
+          # runtime-cli (source map CLI + bundler plugins) has no package deps.
+          for pkg in runtime-browser runtime-node runtime-edge runtime-next runtime-cli otlp-ingester; do
             name=$(node -p "require('./packages/$pkg/package.json').name")
             version=$(node -p "require('./packages/$pkg/package.json').version")
             if npm view "$name@$version" version >/dev/null 2>&1; then

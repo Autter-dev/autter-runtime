@@ -99,6 +99,7 @@ copy that a test keeps identical.
 | Browser CSP violation capture (`csp_violations`) | 1.3.4 | | | browser 1.3.3, next 1.3.4 |
 | Operation logging (`operation_logging`) | 1.4.0 | `0011-runtime-logs` | `/v1/logs` | node/next 1.4.0 |
 | Breadcrumbs: the steps before an error (`breadcrumbs`) | 1.6.0 | | | browser/node/next 1.6.0 |
+| Source map debug ids (`source_map_debug_ids`) | 1.6.0 | `0017-source-maps-debug-id` | `/v1/sourcemaps/check` | browser/next 1.6.0 |
 
 Notes:
 

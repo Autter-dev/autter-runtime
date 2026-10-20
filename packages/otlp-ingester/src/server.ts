@@ -30,7 +30,7 @@ import { decodeMetricsRequest, decodeTraceRequest, decodeLogsRequest } from "./o
 import { normalizeLogs, type OtlpLogsRequest } from "./logs.js";
 import { decodeProfile } from "./profiles.js";
 import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
-import { validateSourceMap } from "./source-maps.js";
+import { validateSourceMap, validateSourceMapCheck } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
 import {
@@ -427,7 +427,20 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		if (!ctx) return;
 		const sourceMap = validateSourceMap(req.body);
 		if (!sourceMap) { res.status(400).json({ error: "invalid source map" }); return; }
+		// Idempotent: the same release + path replaces the earlier row
+		// (ReplacingMergeTree), so CI retries and re-runs are harmless.
 		try { await store.insertSourceMap(ctx, sourceMap); res.status(202).json({ accepted: true }); }
+		catch (err) { storageError(res, err); }
+	});
+
+	/** Which of these maps does this tenant already have? Lets
+	 * `autter-runtime sourcemaps upload` skip unchanged maps (1.6.0+). */
+	app.post("/v1/sourcemaps/check", async (req, res) => {
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		const check = validateSourceMapCheck(req.body);
+		if (!check) { res.status(400).json({ error: "invalid source map check" }); return; }
+		try { res.status(200).json({ present: await store.sourceMapsPresent(ctx, check) }); }
 		catch (err) { storageError(res, err); }
 	});
 

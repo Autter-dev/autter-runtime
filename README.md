@@ -41,6 +41,7 @@ npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, B
 | `@autter/runtime-next` | 1.5.0 | Next.js: server + client + `/edge` for `middleware.ts` |
 | `@autter/runtime-edge` | 1.0.0 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
 | `@autter/otlp-ingester` | 1.5.0 | Self-hosted ingest — upgrade it **before** the SDKs |
+| `@autter/runtime-cli` | 1.0.0 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
 
 Prefer to have an AI agent set it up for you? Install the companion agent
 skills — they inventory your repo and wire up Autter Runtime for whatever
@@ -135,6 +136,7 @@ Full walkthrough (keys, relay setup, Next.js, verification):
 | [`@autter/runtime-next`](packages/runtime-next) | **v1.5** | One-command Next.js integration (server, client, relay route, error boundary, edge middleware) |
 | [`@autter/runtime-edge`](packages/runtime-edge) | **v1.0** | Zero-dependency edge SDK: request summaries and coded errors for Workers, Vercel Edge, Deno, Bun |
 | [`@autter/otlp-ingester`](packages/otlp-ingester) | **v1.5** | Self-hostable ingest service: OTLP/HTTP (protobuf + JSON) traces, metrics, logs, browser payloads → ClickHouse |
+| [`@autter/runtime-cli`](packages/runtime-cli) | **v1.0** | Readable stack traces: `autter-runtime sourcemaps inject/upload`, Vite/Rollup, webpack and Next.js plugins ([guide](docs/SOURCE-MAPS.md)) |
 
 `packages/runtime-core` is private: shared code bundled into runtime-node and
 runtime-edge at build time, never published.

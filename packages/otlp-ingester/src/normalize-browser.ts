@@ -4,6 +4,7 @@ import { sanitizeRuntimeContext } from "./context.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { scrubText } from "./redact.js";
 import { breadcrumbsField } from "./breadcrumbs.js";
+import { browserDebugIds } from "./source-maps.js";
 import {
 	asSeverity,
 	type RuntimeMetricPoint,
@@ -56,6 +57,9 @@ const browserEventSchema = z.object({
 	context: z.record(z.unknown()).optional(),
 	/** runtime-browser `/breadcrumbs`: steps before a failure. Validated entry by entry in breadcrumbs.ts; a malformed list is dropped, never the beacon. */
 	breadcrumbs: z.array(z.unknown()).optional().catch(undefined),
+	/** runtime-browser ≥1.6.0: script URL → debug id for the scripts in this
+	 * event's stack (EI-13). Malformed values are dropped, never the beacon. */
+	debugIds: z.record(z.string().max(1000), z.unknown()).optional().catch(undefined),
 });
 
 export const browserPayloadSchema = z.object({
@@ -210,6 +214,7 @@ export function normalizeBrowserPayload(
 			occurredAt,
 			...liftErrorFields(event.context),
 			...breadcrumbsField(event.breadcrumbs),
+			...browserDebugIds(event.debugIds),
 		});
 	}
 

@@ -96,6 +96,14 @@
 			"ingester": "1.6.0",
 			"migrations": [],
 			"sdks": { "@autter/runtime-browser": "1.6.0", "@autter/runtime-node": "1.6.0", "@autter/runtime-next": "1.6.0" }
+		},
+		{
+			"id": "source_map_debug_ids",
+			"title": "Source map debug ids",
+			"ingester": "1.6.0",
+			"migrations": ["0017-source-maps-debug-id"],
+			"route": "/v1/sourcemaps/check",
+			"sdks": { "@autter/runtime-browser": "1.6.0", "@autter/runtime-next": "1.6.0" }
 		}
 	]
 }

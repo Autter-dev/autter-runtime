@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-cli",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "Readable stack traces for Autter Runtime: inject debug ids into JS bundles and upload their source maps (CLI, Vite/Rollup, webpack and Next.js plugins)",
 	"license": "MIT",
 	"type": "module",

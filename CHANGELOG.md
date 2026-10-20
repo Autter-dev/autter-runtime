@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## [1.6.1] - 2026-10-21
+
+Packages: `runtime-node` 1.6.1, `runtime-next` 1.6.1, `runtime-cli` 1.1.0, `otlp-ingester` 1.6.1. `runtime-browser` 1.6.0 and `runtime-edge` 1.1.0 are unchanged. Upgrade `runtime-cli` now: 1.0.0's bundler plugins could leave source maps in the deployed output (see Security). CLI 1.1.0 works with ingester 1.6.0, which accepts maps up to 5 MiB; 1.6.1 takes up to 32 MiB.
 
 ### Features
 

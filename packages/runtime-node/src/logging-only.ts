@@ -36,6 +36,7 @@ import {
 	setLoggerOnlyCapture,
 	structuredErrorAttributes,
 } from "./server.js";
+import { sharedSlot } from "./shared.js";
 
 /**
  * Logger-only mode: requests, operations, coded errors, sinks and enrichers
@@ -84,10 +85,12 @@ export interface AutterLogging {
 	shutdown(): Promise<void>;
 }
 
-let activeLogging: AutterLogging | null = null;
+/** The running initAutterLogging handle, shared by every copy of this
+ * package in the process (see shared.ts). */
+const L = sharedSlot<{ active: AutterLogging | null }>("logging", () => ({ active: null }));
 
 export function initAutterLogging(options: AutterLoggingOptions): AutterLogging {
-	if (activeLogging) return activeLogging;
+	if (L.active) return L.active;
 	if (serverActive()) {
 		console.warn(
 			"[autter-runtime] initAutterLogging() ignored: initAutterServer() is already active and includes logging",
@@ -195,10 +198,10 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 			autoFlushHandle?.dispose();
 			autoFlushHandle = null;
 			unregisterFlushTargets();
-			activeLogging = null;
+			if (L.active === handle) L.active = null;
 			await shutdownRuntimeLogger();
 		},
 	};
-	activeLogging = handle;
+	L.active = handle;
 	return handle;
 }

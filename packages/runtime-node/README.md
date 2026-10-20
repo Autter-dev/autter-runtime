@@ -184,6 +184,7 @@ Defaults (cheap by construction):
 | Request metrics | exported every 60 s |
 | Logs | not collected |
 | PII in custom attributes | redacted before export (`redactAttributes`) |
+| Query strings in span URLs | parameter names only (`keepQueryParams`) |
 | Forgotten `shutdown()` | exporters still flushed on exit (`autoFlush`) |
 
 **Error-linked trace retention.** Errors export at 100% while traces are
@@ -382,6 +383,48 @@ The raw primitives are exported too (`redactAttributes(attrs, options)`,
 This closes the server-side gap to match the browser relay's payload
 whitelist; it is best-effort scrubbing of obvious PII shapes, not a DLP
 engine — keep secrets out of attributes in the first place.
+
+**Query strings (1.6.1+).** Query strings carry what a path never should:
+emails, one-time codes, API keys, session ids, search terms. So no span
+leaves the process with query values, whichever instrumentation made it
+(HTTP server and client spans, undici/fetch, Express, Fastify, Next.js's own
+spans):
+
+- `http.target`, `http.url`, `url.full` and `url.original` are cut at the `?`
+  (and `#`): `/search?email=jane@example.com&page=2` becomes `/search`;
+- `url.query` keeps only the parameter names, `email=[redacted]&page=[redacted]`.
+  It is added from the URL when the instrumentation did not set it, so you
+  still see which parameters a request used. A parameter without `=`
+  (`/verify?<token>`) may itself be the secret and is masked whole;
+- span names lose their query too (Next.js names a request span
+  `GET /search?q=…` until it knows the route).
+
+List the parameters whose values are safe to keep, such as pagination or
+sorting (exact names, after percent-decoding; kept values are still scrubbed
+by `redactAttributes`):
+
+```ts
+initAutterServer({ ..., keepQueryParams: ["page", "sort"] });
+// url.query: "email=[redacted]&page=2"
+```
+
+This runs at export, like the scrubbing above, and also with
+`redactAttributes: false`. Route templates (`http.route`) and request
+summaries never contained a query.
+
+### One SDK per process, however many copies are loaded
+
+Bundlers can load this package more than once: Next.js bundles one copy
+into `instrumentation.ts` and another into each route (unless it is in
+`serverExternalPackages`), and a process can load both the ESM and the CJS
+build. Since 1.6.1 every copy shares one process-wide state
+(`globalThis[Symbol.for("@autter/runtime-node")]`): the copy that ran
+`initAutterServer` (or `initAutterLogging`) is the SDK for all of them, so
+`withRuntimeRequest`, `captureException`, `runtimeLogger` and the rest export
+through it from any copy, and an error one copy reported is never reported
+again by another. Before any copy starts, and after `shutdown()`, every copy
+behaves as before: records go to the console. The shared object is
+versioned; a copy that finds a layout it does not know keeps its own state.
 
 ## 3. LLM tracing
 

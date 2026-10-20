@@ -13,6 +13,7 @@ const autter = initAutterServer({
 	metricIntervalMs: 3_600_000, // keep metric noise out of this test
 	traceSampleRate: 1,
 	redactAttributes: { additionalValuePatterns: [/CUST-\d{6}/] },
+	keepQueryParams: ["page"],
 });
 
 // Fake secrets assembled from fragments so repo secret scanners stay quiet.

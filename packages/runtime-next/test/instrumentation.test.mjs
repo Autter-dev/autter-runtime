@@ -131,8 +131,11 @@ test("Node runtime: onRequestError records the error with its stack and Next's c
 	const serverSpan = (target) => spans.find((span) => span.kind === 2 && attrs(span.attributes)["http.target"] === target);
 	const exceptions = (span) => (span?.events ?? []).filter((event) => event.name === "exception");
 
-	const blog = serverSpan("/blog/hello?draft=preview42");
+	// The query never leaves the process: only its parameter names (runtime-node's query policy).
+	const blog = serverSpan("/blog/hello");
 	assert.ok(blog, "request span exported");
+	assert.equal(attrs(blog.attributes)["url.query"], "draft=[redacted]");
+	assert.equal(JSON.stringify(traceBodies).includes("preview42"), false, "query values never exported");
 	const [event, ...more] = exceptions(blog);
 	assert.equal(more.length, 0);
 	const eventAttrs = attrs(event.attributes);

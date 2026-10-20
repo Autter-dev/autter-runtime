@@ -139,10 +139,11 @@ secret binding. Next.js `middleware.ts`: import from `@autter/runtime-next/edge`
 ## Next.js
 
 `npm install @autter/runtime-next` — three files (instrumentation.ts, relay
-route, client init + boundary) and `serverExternalPackages:
-["@autter/runtime-node"]` in `next.config`, so routes use the SDK copy
-`registerAutter` started (Next otherwise bundles a separate one into each
-route). See the package README. Route handlers:
+route, client init + boundary). `serverExternalPackages:
+["@autter/runtime-node"]` in `next.config` is recommended: it keeps the SDK
+out of the route bundles. Without it Next bundles extra copies of the SDK,
+which share the one `registerAutter` started (1.6.1+; 1.6.0 needed the line).
+See the package README. Route handlers:
 `export const POST = withRuntimeRequest(handler)` (flush wired to `after()`);
 `middleware.ts`: `@autter/runtime-next/edge`.
 

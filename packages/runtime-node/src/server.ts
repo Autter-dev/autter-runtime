@@ -58,6 +58,7 @@ import {
 	type Redactor,
 } from "./redact.js";
 import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporter.js";
+import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
 import {
 	configureRuntimeLogger,
@@ -83,6 +84,36 @@ import {
 	recordedAsRejection,
 } from "./unhandled-rejections.js";
 import { breadcrumbEventAttributes } from "./breadcrumbs.js";
+import { sharedSlot } from "./shared.js";
+
+/**
+ * The started tracker, shared by every copy of this package in the process
+ * (see shared.ts), so `captureException`, `withLlmCall`, … in a copy that was
+ * never initialised (a Next.js route bundle) report through the copy that
+ * was (`instrumentation.ts`).
+ */
+interface ServerSlot {
+	/** The initAutterServer handle while it runs. */
+	active: AutterServer | null;
+	/** Always-on provider shared by error, LLM, and process spans — set while
+	 * a server is active so withLlmCall/withProcessSpan bypass head sampling. */
+	alwaysOnProvider: Pick<BasicTracerProvider, "getTracer" | "forceFlush"> | null;
+	/** Compiled attribute redactor — defaults until initAutterServer applies
+	 * its own configuration. Used by every capture path including LLM
+	 * attributes. */
+	redactor: Redactor;
+	/** Set by initAutterLogging: exception capture without NodeSDK. */
+	loggerOnlyCapture: ((error: unknown, attributes?: Attributes) => void) | null;
+	/** `logging.requests: true` — zero-code request summaries (experimental). */
+	hookRequests: boolean;
+}
+const S = sharedSlot<ServerSlot>("server", () => ({
+	active: null,
+	alwaysOnProvider: null,
+	redactor: makeRedactor(true),
+	loggerOnlyCapture: null,
+	hookRequests: false,
+}));
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -185,6 +216,18 @@ export interface AutterServerOptions {
 	 * Default true.
 	 */
 	redactAttributes?: boolean | RedactOptions;
+	/**
+	 * Query strings never leave the process with their values. Every span
+	 * (any instrumentation, Next.js's own included) is exported with
+	 * `http.target`, `http.url` and `url.full` cut at the `?`, `url.query`
+	 * reduced to its parameter names (`email=[redacted]&page=[redacted]`,
+	 * added when only the URL had the query) and the query dropped from span
+	 * names. List parameters whose values are safe to keep in `url.query`,
+	 * such as pagination or sorting: `keepQueryParams: ["page", "sort"]`
+	 * (exact names; kept values are still scrubbed by `redactAttributes`).
+	 * Applies even with `redactAttributes: false`. Default `[]`.
+	 */
+	keepQueryParams?: string[];
 	/**
 	 * Verbose lifecycle logging to stderr: "exported N spans", flushes and
 	 * auto-flush activity — handy while wiring the SDK up. Also enabled by
@@ -619,7 +662,7 @@ function llmBaseAttributes(info: LlmCallInfo): Attributes {
 		...(info.sessionId ? { "autter.session_id": info.sessionId } : {}),
 		// Caller-supplied extras go through redaction like every other
 		// custom attribute family (prompts can contain emails/keys).
-		...(info.attributes ? activeRedactor(info.attributes) : {}),
+		...(info.attributes ? S.redactor(info.attributes) : {}),
 	};
 }
 
@@ -666,7 +709,7 @@ async function runLlmSpan<T>(
 		},
 		setResponseModel,
 		setModel: setResponseModel,
-		setAttributes: (attributes) => span.setAttributes(activeRedactor(attributes)),
+		setAttributes: (attributes) => span.setAttributes(S.redactor(attributes)),
 	};
 	try {
 		const result = await context.with(
@@ -744,7 +787,7 @@ async function runWithSpan<T>(
  */
 export function recordError(span: Span, err: unknown): void {
 	const isErr = isError(err);
-	const message = activeRedactor.text(isErr ? err.message : String(err));
+	const message = S.redactor.text(isErr ? err.message : String(err));
 	// Like recordException, only real Errors get an exception event; other
 	// thrown values keep just the (scrubbed) error status.
 	if (isErr) {
@@ -752,9 +795,9 @@ export function recordError(span: Span, err: unknown): void {
 			"exception.type": err.name,
 			"exception.message": message,
 			...(err.stack
-				? { "exception.stacktrace": activeRedactor.text(err.stack) }
+				? { "exception.stacktrace": S.redactor.text(err.stack) }
 				: {}),
-			...breadcrumbEventAttributes(activeRedactor.text, err),
+			...breadcrumbEventAttributes(S.redactor.text, err),
 		});
 	}
 	span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -762,7 +805,7 @@ export function recordError(span: Span, err: unknown): void {
 
 /** @internal Redact attributes with the active configuration. */
 export function redactWithActive(attributes?: Attributes | null): Attributes {
-	return activeRedactor(attributes);
+	return S.redactor(attributes);
 }
 
 /**
@@ -793,11 +836,8 @@ function captureExpressRoute(
 	// 'close' covers aborted ones; setRoute is idempotent.
 	response.prependListener("finish", setRoute);
 	response.prependListener("close", setRoute);
-	if (hookRequests) startHookRequest(response);
+	if (S.hookRequests) startHookRequest(response);
 }
-
-/** `logging.requests: true` — zero-code request summaries (experimental). */
-let hookRequests = false;
 
 /** Span attributes for a structured error: autter.error.* (and the
  * redacted, span-only `autter.error.internal`). */
@@ -807,7 +847,7 @@ function structuredErrorAttributes(error: unknown): Attributes {
 	if (internal) {
 		try {
 			attrs["autter.error.internal"] = JSON.stringify(
-				activeRedactor(internal as Attributes),
+				S.redactor(internal as Attributes),
 			).slice(0, 4000);
 		} catch {
 			/* unserialisable internal payload */
@@ -816,31 +856,24 @@ function structuredErrorAttributes(error: unknown): Attributes {
 	return attrs;
 }
 
-let active: AutterServer | null = null;
-/** Always-on provider shared by error, LLM, and process spans — set while a
- * server is active so withLlmCall/withProcessSpan bypass head sampling. */
-let activeAlwaysOnProvider: BasicTracerProvider | null = null;
-
-/** Compiled attribute redactor — defaults until initAutterServer applies its
- * own configuration. Used by every capture path including LLM attributes. */
-let activeRedactor: Redactor = makeRedactor(true);
-
 export function initAutterServer(options: AutterServerOptions): AutterServer {
-	if (active) return active;
+	if (S.active) return S.active;
 
 	const endpoint = (options.endpoint ?? "https://otlp.autter.dev").replace(
 		/\/$/,
 		"",
 	);
 	const headers = { authorization: `Bearer ${options.apiKey}` };
+	const redactor = makeRedactor(options.redactAttributes ?? true);
 	// Every trace exporter scrubs spans on the way out, whoever created them
-	// (see redact-exporter.ts). Reads the active redactor lazily so the
-	// configuration below applies.
+	// (see redact-exporter.ts): secrets and PII, and URL query values.
+	const queryPolicy = makeUrlQueryPolicy(options.keepQueryParams);
 	const traceExporter = () =>
 		new CountingExporter(
 			new RedactingSpanExporter(
 				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
-				() => activeRedactor,
+				() => redactor,
+				queryPolicy,
 			),
 		);
 	const environment = options.environment ?? process.env.NODE_ENV ?? "production";
@@ -849,7 +882,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// env at import time — never clobber an env-enabled session here).
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
 	debugLog(`initialising service=${options.service} endpoint=${endpoint}`);
-	activeRedactor = makeRedactor(options.redactAttributes ?? true);
+	S.redactor = redactor;
 	const distro = options.distro ?? SDK_IDENTITY;
 	configureCompatCheck({ endpoint, enabled: options.compatCheck !== false, sdk: distro });
 
@@ -913,7 +946,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 				// 60 s export.
 				temporalityPreference: AggregationTemporalityPreference.DELTA,
 			}),
-			() => activeRedactor,
+			() => redactor,
 		),
 		exportIntervalMillis: options.metricIntervalMs ?? 60_000,
 	});
@@ -972,14 +1005,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		// leave the process even if an exporter misbehaves. Messages and
 		// stacks are scrubbed too — `connect ECONNREFUSED
 		// postgres://admin:hunter2@…` is the typical leak, not attributes.
-		const message = activeRedactor.text(isErr ? error.message : String(error));
-		const stackText = isErr && error.stack ? activeRedactor.text(error.stack) : "";
+		const message = redactor.text(isErr ? error.message : String(error));
+		const stackText = isErr && error.stack ? redactor.text(error.stack) : "";
 		// `fingerprint` groups the error (`autter.fingerprint` on the exception
 		// event, so it never sticks to a reused request span).
 		const split = splitFingerprint(attributes);
-		const fingerprint = fingerprintEventAttributes(split.fingerprint, activeRedactor.text);
+		const fingerprint = fingerprintEventAttributes(split.fingerprint, redactor.text);
 		if (fingerprint["autter.fingerprint"]) noteCompatFeature("fingerprint_override");
-		const redacted = activeRedactor(split.attributes);
+		const redacted = redactor(split.attributes);
 
 		// Prefer the live request span (the HTTP server span inside an Express
 		// handler or error middleware) so the thrown exception and its failed
@@ -1026,7 +1059,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
 					: {}),
 				...declared,
-				...breadcrumbEventAttributes(activeRedactor.text, error),
+				...breadcrumbEventAttributes(redactor.text, error),
 			});
 		} else {
 			// No usable stack — an Error thrown without one, or a non-Error
@@ -1040,12 +1073,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			span.addEvent("exception", {
 				"exception.type": isErr ? error.name : "Error",
 				"exception.message": message,
-				...(stack ? { "exception.stacktrace": activeRedactor.text(stack) } : {}),
+				...(stack ? { "exception.stacktrace": redactor.text(stack) } : {}),
 				...(redacted["autter.handled"] === true
 					? { "autter.handled": true, "autter.sampled": redacted["autter.sampled"] === true }
 					: {}),
 				...declared,
-				...breadcrumbEventAttributes(activeRedactor.text, error),
+				...breadcrumbEventAttributes(redactor.text, error),
 			});
 		}
 		span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -1073,16 +1106,16 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			?.split("\n")
 			.filter((line, i) => i === 0 || !line.includes("captureMessage"))
 			.join("\n");
-		const safeMessage = activeRedactor.text(message);
+		const safeMessage = redactor.text(message);
 		const span = errorTracer.startSpan("Message", {
-			attributes: { "autter.severity": severity, ...activeRedactor(attributes) },
+			attributes: { "autter.severity": severity, ...redactor(attributes) },
 		});
 		span.addEvent("exception", {
 			"exception.type": "Message",
 			"exception.message": safeMessage,
-			...(stack ? { "exception.stacktrace": activeRedactor.text(stack) } : {}),
+			...(stack ? { "exception.stacktrace": redactor.text(stack) } : {}),
 			"autter.severity": severity,
-			...breadcrumbEventAttributes(activeRedactor.text),
+			...breadcrumbEventAttributes(redactor.text),
 		});
 		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 		span.end();
@@ -1094,11 +1127,11 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		const activeSpan = trace.getActiveSpan();
 		const reuseActive = activeSpan?.isRecording() === true;
 		const span = reuseActive ? activeSpan : errorTracer.startSpan("OutcomeFailure");
-		const safeOutcome = activeRedactor({ "autter.outcome.name": name.slice(0, 200), "autter.outcome.message": message.slice(0, 1000) });
+		const safeOutcome = redactor({ "autter.outcome.name": name.slice(0, 200), "autter.outcome.message": message.slice(0, 1000) });
 		const safeName = String(safeOutcome["autter.outcome.name"] ?? "operation");
 		const safeMessage = String(safeOutcome["autter.outcome.message"] ?? "failed");
 		span.addEvent("autter.outcome", {
-			...activeRedactor(attributes),
+			...redactor(attributes),
 			"autter.outcome.status": "error",
 			"autter.outcome.name": safeName,
 			"autter.outcome.message": safeMessage,
@@ -1107,11 +1140,11 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		if (!reuseActive) span.end();
 	}
 	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment, distro,
-		release: options.release, options: options.logging, redact: activeRedactor,
-		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, activeRedactor(attributes), links),
+		release: options.release, options: options.logging, redact: redactor,
+		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, redactor(attributes), links),
 		reportOutcome,
 	});
-	hookRequests = options.logging?.requests === true;
+	S.hookRequests = options.logging?.requests === true;
 
 	let onCrash: ((err: unknown) => void) | null = null;
 	let uninstallRejections: (() => void) | null = null;
@@ -1173,17 +1206,22 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		captureMessage,
 		reportOutcome,
 		withProcessSpan: (name, fn, attributes) =>
-			runWithSpan(processTracer, name, fn, activeRedactor(attributes)),
+			runWithSpan(processTracer, name, fn, redactor(attributes)),
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
 			const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
-			hookRequests = false;
 			if (onCrash) process.off("uncaughtExceptionMonitor", onCrash);
 			uninstallRejections?.();
 			stopMemoryMetrics?.();
-			active = null;
-			activeAlwaysOnProvider = null;
+			// Clear the shared state, so every copy is back to "not started"
+			// (console output, captures on the global tracer).
+			if (S.active === server) {
+				S.active = null;
+				S.alwaysOnProvider = null;
+				S.hookRequests = false;
+				S.redactor = makeRedactor(true);
+			}
 			autoFlushHandle?.dispose();
 			autoFlushHandle = null;
 			unregisterFlushTargets();
@@ -1192,8 +1230,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			if (logShutdown[0]?.status === "rejected") throw logShutdown[0].reason;
 		},
 	};
-	active = server;
-	activeAlwaysOnProvider = alwaysOnProvider;
+	S.active = server;
+	S.alwaysOnProvider = alwaysOnProvider;
 	return server;
 }
 
@@ -1203,18 +1241,18 @@ export function captureException(
 	error: unknown,
 	attributes?: Attributes,
 ): void {
-	if (active) {
-		active.captureException(error, attributes);
+	if (S.active) {
+		S.active.captureException(error, attributes);
 		return;
 	}
-	if (loggerOnlyCapture) {
-		loggerOnlyCapture(error, attributes);
+	if (S.loggerOnlyCapture) {
+		S.loggerOnlyCapture(error, attributes);
 		return;
 	}
 	markCaptured(error);
 	noteOperationError(error);
 	const split = splitFingerprint(attributes);
-	const fingerprint = fingerprintEventAttributes(split.fingerprint, activeRedactor.text);
+	const fingerprint = fingerprintEventAttributes(split.fingerprint, S.redactor.text);
 	notifyException(error, { ...split.attributes, ...fingerprint });
 	// Before initAutterServer the span rides the host's global provider,
 	// whose exporter we don't control — so scrub here, at capture time. The
@@ -1222,23 +1260,21 @@ export function captureException(
 	const span = trace
 		.getTracer("autter-errors")
 		.startSpan(isError(error) ? error.name : "Error", {
-			attributes: { ...activeRedactor(split.attributes), ...fingerprint },
+			attributes: { ...S.redactor(split.attributes), ...fingerprint },
 		});
 	recordError(span, error);
 	span.end();
 }
 
-/** @internal Set by initAutterLogging: exception capture without NodeSDK. */
-let loggerOnlyCapture: ((error: unknown, attributes?: Attributes) => void) | null = null;
 /** @internal */
 export function setLoggerOnlyCapture(
 	fn: ((error: unknown, attributes?: Attributes) => void) | null,
 ): void {
-	loggerOnlyCapture = fn;
+	S.loggerOnlyCapture = fn;
 }
-/** @internal True while initAutterServer's NodeSDK pipeline is active. */
+/** @internal True while initAutterServer's NodeSDK pipeline is active (in any copy). */
 export function serverActive(): boolean {
-	return active !== null;
+	return S.active !== null;
 }
 /** @internal Redacted structured-error span attributes (logger-only mode). */
 export { structuredErrorAttributes };
@@ -1246,7 +1282,7 @@ export { structuredErrorAttributes };
 setRequestExceptionCapturer((error, attributes) => captureException(error, attributes));
 setRequestSpanAnnotator((attributes) => {
 	const span = trace.getActiveSpan();
-	if (span?.isRecording()) span.setAttributes(activeRedactor(splitFingerprint(attributes).attributes));
+	if (span?.isRecording()) span.setAttributes(S.redactor(splitFingerprint(attributes).attributes));
 });
 
 /**
@@ -1259,12 +1295,12 @@ export function withProcessSpan<T>(
 	fn: () => T | Promise<T>,
 	attributes?: Attributes,
 ): Promise<T> {
-	if (active) return active.withProcessSpan(name, fn, attributes);
+	if (S.active) return S.active.withProcessSpan(name, fn, attributes);
 	return runWithSpan(
 		trace.getTracer("autter-processes"),
 		name,
 		fn,
-		activeRedactor(attributes),
+		S.redactor(attributes),
 	);
 }
 
@@ -1277,14 +1313,14 @@ export function withLlmCall<T>(
 	info: LlmCallInfo,
 	fn: (llm: LlmCallHandle) => T | Promise<T>,
 ): Promise<T> {
-	if (active) return active.withLlmCall(info, fn);
+	if (S.active) return S.active.withLlmCall(info, fn);
 	return runLlmSpan(trace.getTracer("autter-llm"), info, fn);
 }
 
 /** Module-level convenience — see AutterServer.trackLlmCall. */
 export function trackLlmCall(call: TrackedLlmCall): void {
-	if (active) {
-		active.trackLlmCall(call);
+	if (S.active) {
+		S.active.trackLlmCall(call);
 		return;
 	}
 	recordLlmCall(trace.getTracer("autter-llm"), call);
@@ -1296,19 +1332,19 @@ export function captureMessage(
 	severity: AutterSeverity = "warning",
 	attributes?: Attributes,
 ): void {
-	if (active) {
-		active.captureMessage(message, severity, attributes);
+	if (S.active) {
+		S.active.captureMessage(message, severity, attributes);
 		return;
 	}
-	const safeMessage = activeRedactor.text(message);
+	const safeMessage = S.redactor.text(message);
 	const span = trace.getTracer("autter-errors").startSpan("Message", {
-		attributes: { "autter.severity": severity, ...activeRedactor(attributes) },
+		attributes: { "autter.severity": severity, ...S.redactor(attributes) },
 	});
 	span.addEvent("exception", {
 		"exception.type": "Message",
 		"exception.message": safeMessage,
 		"autter.severity": severity,
-		...breadcrumbEventAttributes(activeRedactor.text),
+		...breadcrumbEventAttributes(S.redactor.text),
 	});
 	span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 	span.end();
@@ -1316,7 +1352,7 @@ export function captureMessage(
 
 /** Portable OTLP `autter.outcome` event for failed results without exceptions. */
 export function reportOutcome(name: string, message: string, attributes?: Attributes): void {
-	if (active) return active.reportOutcome(name, message, attributes);
+	if (S.active) return S.active.reportOutcome(name, message, attributes);
 	const span = trace.getTracer("autter-outcomes").startSpan("OutcomeFailure");
 	const safeOutcome = redactAttributes({ "autter.outcome.name": name.slice(0, 200), "autter.outcome.message": message.slice(0, 1000) });
 	const safeName = String(safeOutcome["autter.outcome.name"] ?? "operation");
@@ -1370,8 +1406,8 @@ export function makeSafeCapture(options?: RedactOptions): SafeCapture {
  * provider when initAutterServer hasn't run — so wrappers are safe to call
  * unconditionally from library code. */
 function alwaysOnTracer(name: string): Tracer {
-	return activeAlwaysOnProvider
-		? activeAlwaysOnProvider.getTracer(name)
+	return S.alwaysOnProvider
+		? S.alwaysOnProvider.getTracer(name)
 		: trace.getTracer(name);
 }
 
@@ -1387,7 +1423,7 @@ export function autterLlmTracer(): Tracer {
  * model. For setup verification only; requires initAutterServer.
  */
 export async function emitLlmSelftestTrace(): Promise<{ traceId: string }> {
-	const provider = activeAlwaysOnProvider;
+	const provider = S.alwaysOnProvider;
 	if (!provider) {
 		throw new Error(
 			"emitLlmSelftestTrace() requires initAutterServer() to have been called",

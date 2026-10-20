@@ -328,8 +328,9 @@ Three files and you have server tracing, browser tracking, the relay, and
 the error boundary — see the
 [`@autter/runtime-next` README](../packages/runtime-next) for the exact
 snippets (`instrumentation.ts`, `app/api/autter-runtime/route.ts`, and a
-client component), plus `serverExternalPackages: ["@autter/runtime-node"]`
-in `next.config` so your routes share the SDK that `registerAutter` starts.
+client component). `serverExternalPackages: ["@autter/runtime-node"]` in
+`next.config` is recommended to keep the SDK out of your route bundles;
+routes share the SDK that `registerAutter` starts either way (1.6.1+).
 Wrap route handlers in `withRuntimeRequest` for request summaries;
 `middleware.ts` uses `@autter/runtime-next/edge`.
 

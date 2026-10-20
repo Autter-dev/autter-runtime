@@ -12,6 +12,7 @@ import {
 import { noteCompatFeature } from "./compat.js";
 import { local, loggerConfigured, type OperationState } from "./logger.js";
 import { redactAttributes } from "./redact.js";
+import { sharedSlot } from "./shared.js";
 
 /**
  * Server breadcrumbs: the steps before an error, scoped to the current
@@ -33,11 +34,19 @@ import { redactAttributes } from "./redact.js";
 const INVALID_TRACE_ID = "00000000000000000000000000000000";
 /** Traces with a trail but no operation: insertion-ordered, oldest evicted. */
 const MAX_TRACE_TRAILS = 200;
-const byTrace = new Map<string, BreadcrumbTrail>();
-const processTrail = new BreadcrumbTrail();
-/** Errors thrown out of an operation keep its trail: the span records them
- * after the operation's AsyncLocalStorage scope has already exited. */
-const thrownTrails = new WeakMap<object, BreadcrumbTrail>();
+/** Trails outside operations, shared by every copy of this package in the
+ * process (see shared.ts): a breadcrumb a route's copy records is attached by
+ * the copy that captures the error. Errors thrown out of an operation keep
+ * its trail (`thrown`): the span records them after the operation's
+ * AsyncLocalStorage scope has already exited. */
+const trails = sharedSlot("breadcrumbs", () => ({
+	byTrace: new Map<string, BreadcrumbTrail>(),
+	process: new BreadcrumbTrail(),
+	thrown: new WeakMap<object, BreadcrumbTrail>(),
+}));
+const byTrace = trails.byTrace;
+const processTrail = trails.process;
+const thrownTrails = trails.thrown;
 
 function redact(attributes: Attributes): Attributes {
 	return loggerConfigured()?.redact(attributes) ?? redactAttributes(attributes);

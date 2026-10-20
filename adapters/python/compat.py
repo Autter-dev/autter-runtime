@@ -208,7 +208,7 @@ MANIFEST: dict[str, Any] = json.loads(
                 "@autter/runtime-browser": "1.6.0",
                 "@autter/runtime-node": "1.6.0",
                 "@autter/runtime-next": "1.6.0",
-                "@autter/runtime-edge": "1.6.0"
+                "@autter/runtime-edge": "1.1.0"
             }
         },
         {

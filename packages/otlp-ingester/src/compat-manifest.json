@@ -110,7 +110,7 @@
 			"title": "Fingerprint override",
 			"ingester": "1.6.0",
 			"migrations": [],
-			"sdks": { "@autter/runtime-browser": "1.6.0", "@autter/runtime-node": "1.6.0", "@autter/runtime-next": "1.6.0", "@autter/runtime-edge": "1.6.0" }
+			"sdks": { "@autter/runtime-browser": "1.6.0", "@autter/runtime-node": "1.6.0", "@autter/runtime-next": "1.6.0", "@autter/runtime-edge": "1.1.0" }
 		},
 		{
 			"id": "browser_trace_propagation",

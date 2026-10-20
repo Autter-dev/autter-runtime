@@ -90,7 +90,9 @@ test("GET /v1/compat reports version, schema state and features without auth or 
 		assert.equal(body.ingester.version, ingesterVersion());
 		assert.equal(body.schema.status, "unconfigured");
 		assert.equal(body.schema.latest, MIGRATIONS[MIGRATIONS.length - 1]!.id);
-		assert.ok(body.features.some((f) => f.id === "operation_logging" && f.ingesterSupported));
+		assert.ok(body.features.some((f) => f.id === "operation_logging"));
+		// This version supports every feature in its own manifest.
+		assert.deepEqual(body.features.filter((f) => !f.ingesterSupported).map((f) => f.id), []);
 		assert.equal(body.issues, undefined);
 
 		const evaluated = (await (
@@ -150,13 +152,13 @@ test("ingest responses carry the version header; SDK versions are recorded once 
 
 		const compat = (await (await fetch(`${url}/v1/compat`)).json()) as {
 			schema: { status: string; applied: string[] };
-			features: Array<{ available: boolean; ingesterSupported: boolean }>;
+			features: Array<{ id: string; available: boolean }>;
 		};
 		assert.equal(compat.schema.status, "ready");
 		assert.equal(compat.schema.applied.length, MIGRATIONS.length);
-		// Every feature this version supports (an unreleased one may need the next version).
-		assert.ok(compat.features.every((f) => f.available || !f.ingesterSupported));
-		assert.ok(compat.features.some((f) => f.available));
+		// Schema ready: every feature in the manifest is available.
+		assert.ok(compat.features.length > 0);
+		assert.deepEqual(compat.features.filter((f) => !f.available).map((f) => f.id), []);
 
 		// Browser payloads: `sdk` is recorded; an invalid value is ignored, not rejected.
 		const browser = (sdk: string) =>

@@ -20,7 +20,9 @@
  * Adding a feature: append an entry to compat-manifest.json with the first
  * ingester release that handles it, the migrations it writes to, its route
  * (if it has its own), and the first SDK release that emits it. The
- * consistency test in compat.test.ts checks ids, migrations and routes.
+ * consistency test in compat.test.ts checks ids, migrations and routes, and
+ * that no version is ahead of its package's package.json: a feature for the
+ * next release bumps the packages it names in the same change.
  */
 
 import manifestJson from "./compat-manifest.json" with { type: "json" };

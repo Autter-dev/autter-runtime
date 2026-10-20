@@ -1,0 +1,861 @@
+[
+	{
+		"name": "v8 node: named, anonymous and node:internal frames",
+		"stack": "TypeError: Cannot read properties of undefined (reading 'total')\n    at OrderService.process (/app/dist/orders/service.js:128:35)\n    at RequestHandler.handle (/app/dist/web/handler.js:64:20)\n    at /app/dist/web/router.js:22:9\n    at processTicksAndRejections (node:internal/process/task_queues:95:5)",
+		"frames": [
+			{
+				"function": "OrderService.process",
+				"module": null,
+				"filename": "/app/dist/orders/service.js",
+				"lineno": 128,
+				"colno": 35,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "RequestHandler.handle",
+				"module": null,
+				"filename": "/app/dist/web/handler.js",
+				"lineno": 64,
+				"colno": 20,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "/app/dist/web/router.js",
+				"lineno": 22,
+				"colno": 9,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "processTicksAndRejections",
+				"module": null,
+				"filename": "node:internal/process/task_queues",
+				"lineno": 95,
+				"colno": 5,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8 browser: minified chunk with origin, query string and hash",
+		"stack": "TypeError: Cannot read properties of undefined (reading 'total')\n    at Xe (https://app.example.com/assets/index-5f3a9c1e.js?v=2#top:1:23456)\n    at HTMLButtonElement.onClick (https://app.example.com/assets/index-5f3a9c1e.js:1:9876)\n    at https://app.example.com/assets/vendor-a1b2c3d4.js:2:100",
+		"frames": [
+			{
+				"function": "Xe",
+				"module": null,
+				"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+				"lineno": 1,
+				"colno": 23456,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "HTMLButtonElement.onClick",
+				"module": null,
+				"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+				"lineno": 1,
+				"colno": 9876,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "https://app.example.com/assets/vendor-a1b2c3d4.js",
+				"lineno": 2,
+				"colno": 100,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8: async, new, Object.<anonymous>, native and Promise.all index frames",
+		"stack": "Error: boom\n    at new OrderService (/app/src/orders/service.js:10:11)\n    at async CheckoutController.submit (/app/src/web/checkout.js:44:5)\n    at Object.<anonymous> (/app/src/main.js:3:1)\n    at Array.map (<anonymous>)\n    at async Promise.all (index 0)\n    at JSON.parse (native)",
+		"frames": [
+			{
+				"function": "new OrderService",
+				"module": null,
+				"filename": "/app/src/orders/service.js",
+				"lineno": 10,
+				"colno": 11,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "async CheckoutController.submit",
+				"module": null,
+				"filename": "/app/src/web/checkout.js",
+				"lineno": 44,
+				"colno": 5,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Object.<anonymous>",
+				"module": null,
+				"filename": "/app/src/main.js",
+				"lineno": 3,
+				"colno": 1,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Array.map",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "async Promise.all",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "JSON.parse",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8: dependency frames (node_modules, .pnpm) are not in-app",
+		"stack": "Error: connect ECONNREFUSED 127.0.0.1:5432\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1555:16)\n    at Client._connect (/app/node_modules/pg/lib/client.js:132:11)\n    at /app/node_modules/.pnpm/knex@3.1.0/node_modules/knex/lib/client.js:290:20\n    at Repo.load (/app/src/repo.ts:20:7)\n    at internal/process/task_queues.js:95:5",
+		"frames": [
+			{
+				"function": "TCPConnectWrap.afterConnect [as oncomplete]",
+				"module": null,
+				"filename": "node:net",
+				"lineno": 1555,
+				"colno": 16,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "Client._connect",
+				"module": null,
+				"filename": "/app/node_modules/pg/lib/client.js",
+				"lineno": 132,
+				"colno": 11,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "/app/node_modules/.pnpm/knex@3.1.0/node_modules/knex/lib/client.js",
+				"lineno": 290,
+				"colno": 20,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "Repo.load",
+				"module": null,
+				"filename": "/app/src/repo.ts",
+				"lineno": 20,
+				"colno": 7,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "internal/process/task_queues.js",
+				"lineno": 95,
+				"colno": 5,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8: windows paths",
+		"stack": "Error: nope\n    at Service.run (C:\\app\\src\\service.js:12:3)\n    at Module._compile (C:\\app\\node_modules\\esm\\index.js:1:2)",
+		"frames": [
+			{
+				"function": "Service.run",
+				"module": null,
+				"filename": "C:\\app\\src\\service.js",
+				"lineno": 12,
+				"colno": 3,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Module._compile",
+				"module": null,
+				"filename": "C:\\app\\node_modules\\esm\\index.js",
+				"lineno": 1,
+				"colno": 2,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "v8: eval frame uses the evaluating script position",
+		"stack": "ReferenceError: x is not defined\n    at eval (eval at render (https://app.example.com/assets/app.js:5:10), <anonymous>:1:1)\n    at render (https://app.example.com/assets/app.js:5:10)",
+		"frames": [
+			{
+				"function": "eval",
+				"module": null,
+				"filename": "https://app.example.com/assets/app.js",
+				"lineno": 5,
+				"colno": 10,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "render",
+				"module": null,
+				"filename": "https://app.example.com/assets/app.js",
+				"lineno": 5,
+				"colno": 10,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "firefox: named, anonymous and nested-closure frames",
+		"stack": "checkout@https://app.example.com/assets/index-5f3a9c1e.js:1:23456\nonClick/<@https://app.example.com/assets/index-5f3a9c1e.js:1:9876\n@https://app.example.com/assets/index-5f3a9c1e.js:1:120",
+		"frames": [
+			{
+				"function": "checkout",
+				"module": null,
+				"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+				"lineno": 1,
+				"colno": 23456,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "onClick/<",
+				"module": null,
+				"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+				"lineno": 1,
+				"colno": 9876,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": null,
+				"module": null,
+				"filename": "https://app.example.com/assets/index-5f3a9c1e.js",
+				"lineno": 1,
+				"colno": 120,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "safari: global code and native code frames",
+		"stack": "submit@https://app.example.com/static/js/main.8c1f2a3b.js:2:3456\nforEach@[native code]\nglobal code@https://app.example.com/static/js/main.8c1f2a3b.js:2:10",
+		"frames": [
+			{
+				"function": "submit",
+				"module": null,
+				"filename": "https://app.example.com/static/js/main.8c1f2a3b.js",
+				"lineno": 2,
+				"colno": 3456,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "forEach",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "global code",
+				"module": null,
+				"filename": "https://app.example.com/static/js/main.8c1f2a3b.js",
+				"lineno": 2,
+				"colno": 10,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "firefox: browser extension frames are not in-app",
+		"stack": "inject@moz-extension://9f0c1d2e-aaaa-bbbb-cccc-0123456789ab/content.js:10:5\nhandler@chrome-extension://abcdefghijklmnop/inject.js:3:9\nrun@https://app.example.com/app.js:7:2",
+		"frames": [
+			{
+				"function": "inject",
+				"module": null,
+				"filename": "moz-extension://9f0c1d2e-aaaa-bbbb-cccc-0123456789ab/content.js",
+				"lineno": 10,
+				"colno": 5,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "handler",
+				"module": null,
+				"filename": "chrome-extension://abcdefghijklmnop/inject.js",
+				"lineno": 3,
+				"colno": 9,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "run",
+				"module": null,
+				"filename": "https://app.example.com/app.js",
+				"lineno": 7,
+				"colno": 2,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python: traceback reversed to innermost first",
+		"stack": "Traceback (most recent call last):\n  File \"/app/web/handler.py\", line 42, in handle\n    return self.service.process(order)\n  File \"/app/orders/service.py\", line 88, in process\n    raise ValueError(f\"order {order_id} is invalid\")\nValueError: order 4821 is invalid",
+		"frames": [
+			{
+				"function": "process",
+				"module": null,
+				"filename": "/app/orders/service.py",
+				"lineno": 88,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "handle",
+				"module": null,
+				"filename": "/app/web/handler.py",
+				"lineno": 42,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python: chained exception uses the last (reported) traceback",
+		"stack": "Traceback (most recent call last):\n  File \"/app/db/pool.py\", line 30, in acquire\n    conn = self._connect()\nTimeoutError: pool exhausted\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/app/web/views.py\", line 12, in checkout\n    order = service.place(cart)\n  File \"/app/orders/service.py\", line 51, in place\n    raise OrderError('could not place order')\norders.errors.OrderError: could not place order",
+		"frames": [
+			{
+				"function": "place",
+				"module": null,
+				"filename": "/app/orders/service.py",
+				"lineno": 51,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "checkout",
+				"module": null,
+				"filename": "/app/web/views.py",
+				"lineno": 12,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python: site-packages and dist-packages frames are not in-app",
+		"stack": "Traceback (most recent call last):\n  File \"/usr/local/lib/python3.12/site-packages/django/core/handlers/base.py\", line 197, in _get_response\n    response = wrapped_callback(request, *callback_args, **callback_kwargs)\n  File \"/app/shop/views.py\", line 18, in cart\n    total = compute_total(items)\n  File \"/usr/lib/python3/dist-packages/decimal_ext.py\", line 4, in quantize\n    raise InvalidOperation()\ndecimal.InvalidOperation",
+		"frames": [
+			{
+				"function": "quantize",
+				"module": null,
+				"filename": "/usr/lib/python3/dist-packages/decimal_ext.py",
+				"lineno": 4,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "cart",
+				"module": null,
+				"filename": "/app/shop/views.py",
+				"lineno": 18,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "_get_response",
+				"module": null,
+				"filename": "/usr/local/lib/python3.12/site-packages/django/core/handlers/base.py",
+				"lineno": 197,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "go: panic with goroutine header, runtime source not in-app",
+		"stack": "panic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x1a2b3c]\n\ngoroutine 42 [running]:\nmain.(*OrderService).Process(0xc0000b4000, 0xc0000d2000)\n\t/app/orders/service.go:128 +0x1a5\nmain.(*Handler).ServeHTTP(0xc0000a2000, {0x8f2a40, 0xc0000b0000})\n\t/app/web/handler.go:64 +0x2c8\nnet/http.(*conn).serve(0xc0001a4000, {0x8f2b20, 0xc0000c2000})\n\t/usr/local/go/src/net/http/server.go:2092 +0x1a5\ncreated by net/http.(*Server).Serve in goroutine 1\n\t/usr/local/go/src/net/http/server.go:3285 +0x33e",
+		"frames": [
+			{
+				"function": "(*OrderService).Process",
+				"module": "main",
+				"filename": "/app/orders/service.go",
+				"lineno": 128,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "(*Handler).ServeHTTP",
+				"module": "main",
+				"filename": "/app/web/handler.go",
+				"lineno": 64,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "(*conn).serve",
+				"module": "net/http",
+				"filename": "/usr/local/go/src/net/http/server.go",
+				"lineno": 2092,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "(*Server).Serve",
+				"module": "net/http",
+				"filename": "/usr/local/go/src/net/http/server.go",
+				"lineno": 3285,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "go: runtime panic frames and only the first goroutine",
+		"stack": "panic: assignment to entry in nil map\n\ngoroutine 7 [running]:\nruntime.mapassign_faststr(0x6a5d60, 0x0, {0x700000, 0x3})\n\t/usr/local/go/src/runtime/map_faststr.go:205 +0x3fd\ngithub.com/acme/shop/cart.(*Cart).Add(...)\n\t/src/cart/cart.go:41\nmain.main()\n\t/src/main.go:12 +0x4a\n\ngoroutine 1 [chan receive]:\nmain.wait()\n\t/src/main.go:30 +0x10",
+		"frames": [
+			{
+				"function": "mapassign_faststr",
+				"module": "runtime",
+				"filename": "/usr/local/go/src/runtime/map_faststr.go",
+				"lineno": 205,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "(*Cart).Add",
+				"module": "github.com/acme/shop/cart",
+				"filename": "/src/cart/cart.go",
+				"lineno": 41,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "main",
+				"module": "main",
+				"filename": "/src/main.go",
+				"lineno": 12,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "jvm: first exception block only (stops at Caused by)",
+		"stack": "java.lang.NullPointerException: Cannot invoke \"com.example.model.Order.total()\" because \"order\" is null\n\tat com.example.orders.OrderService.process(OrderService.java:88)\n\tat com.example.web.RequestHandler.handle(RequestHandler.java:42)\n\tat com.example.web.RequestHandler.doGet(RequestHandler.java:31)\n\tat jakarta.servlet.http.HttpServlet.service(HttpServlet.java:687)\n\tat java.base/java.lang.Thread.run(Thread.java:1583)\nCaused by: java.lang.IllegalStateException: order not loaded\n\tat com.example.orders.OrderLoader.require(OrderLoader.java:55)\n\t... 4 more",
+		"frames": [
+			{
+				"function": "process",
+				"module": "com.example.orders.OrderService",
+				"filename": "OrderService.java",
+				"lineno": 88,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "handle",
+				"module": "com.example.web.RequestHandler",
+				"filename": "RequestHandler.java",
+				"lineno": 42,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "doGet",
+				"module": "com.example.web.RequestHandler",
+				"filename": "RequestHandler.java",
+				"lineno": 31,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "service",
+				"module": "jakarta.servlet.http.HttpServlet",
+				"filename": "HttpServlet.java",
+				"lineno": 687,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "run",
+				"module": "java.lang.Thread",
+				"filename": "Thread.java",
+				"lineno": 1583,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "jvm: kotlin, native method and unknown source frames",
+		"stack": "java.lang.IllegalStateException: closed\n\tat com.acme.billing.Invoice$render$1.invoke(Invoice.kt:77)\n\tat java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)\n\tat kotlin.collections.CollectionsKt.forEach(Unknown Source)\n\tat app//com.acme.Main.main(Main.kt:9)\n\tat javax.servlet.http.HttpServlet.service(HttpServlet.java:750)",
+		"frames": [
+			{
+				"function": "invoke",
+				"module": "com.acme.billing.Invoice$render$1",
+				"filename": "Invoice.kt",
+				"lineno": 77,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "invoke0",
+				"module": "jdk.internal.reflect.NativeMethodAccessorImpl",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "forEach",
+				"module": "kotlin.collections.CollectionsKt",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "main",
+				"module": "com.acme.Main",
+				"filename": "Main.kt",
+				"lineno": 9,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "service",
+				"module": "javax.servlet.http.HttpServlet",
+				"filename": "HttpServlet.java",
+				"lineno": 750,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "dotnet: frames with source locations",
+		"stack": "System.NullReferenceException: Object reference not set to an instance of an object.\n   at MyApp.Orders.OrderService.Process(Order order) in C:\\src\\MyApp\\Orders\\OrderService.cs:line 88\n   at MyApp.Web.RequestHandler.HandleAsync(HttpContext context) in C:\\src\\MyApp\\Web\\RequestHandler.cs:line 42\n   at MyApp.Web.RequestHandler.<HandleAsync>d__4.MoveNext() in C:\\src\\MyApp\\Web\\RequestHandler.cs:line 39\n   at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](ref TStateMachine stateMachine)\n   at System.Threading.Tasks.Task.ExecuteWithThreadLocal(ref Task currentTaskSlot)",
+		"frames": [
+			{
+				"function": "Process",
+				"module": "MyApp.Orders.OrderService",
+				"filename": "C:\\src\\MyApp\\Orders\\OrderService.cs",
+				"lineno": 88,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "HandleAsync",
+				"module": "MyApp.Web.RequestHandler",
+				"filename": "C:\\src\\MyApp\\Web\\RequestHandler.cs",
+				"lineno": 42,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "MoveNext",
+				"module": "MyApp.Web.RequestHandler.<HandleAsync>d__4",
+				"filename": "C:\\src\\MyApp\\Web\\RequestHandler.cs",
+				"lineno": 39,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Start[TStateMachine]",
+				"module": "System.Runtime.CompilerServices.AsyncMethodBuilderCore",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "ExecuteWithThreadLocal",
+				"module": "System.Threading.Tasks.Task",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "dotnet: wrapped exception keeps the outer exception's frames",
+		"stack": "System.InvalidOperationException: checkout failed ---> System.NullReferenceException: Object reference not set to an instance of an object.\n   at Shop.Pricing.Calculate(Cart cart) in /src/Shop/Pricing.cs:line 20\n   --- End of inner exception stack trace ---\n   at Shop.Checkout.Submit(Cart cart) in /src/Shop/Checkout.cs:line 55\n   at Microsoft.AspNetCore.Mvc.Infrastructure.ActionMethodExecutor.Execute(ObjectMethodExecutor executor)\n   at Shop.Checkout..ctor() in /src/Shop/Checkout.cs:line 9",
+		"frames": [
+			{
+				"function": "Submit",
+				"module": "Shop.Checkout",
+				"filename": "/src/Shop/Checkout.cs",
+				"lineno": 55,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Execute",
+				"module": "Microsoft.AspNetCore.Mvc.Infrastructure.ActionMethodExecutor",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": ".ctor",
+				"module": "Shop.Checkout",
+				"filename": "/src/Shop/Checkout.cs",
+				"lineno": 9,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "dotnet: frames without source locations",
+		"stack": "System.ArgumentNullException: Value cannot be null. (Parameter 'key')\n   at System.Collections.Generic.Dictionary`2.FindValue(TKey key)\n   at Shop.Catalog.Lookup(String sku)\n   at Shop.Program.Main(String[] args)",
+		"frames": [
+			{
+				"function": "FindValue",
+				"module": "System.Collections.Generic.Dictionary`2",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "Lookup",
+				"module": "Shop.Catalog",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "Main",
+				"module": "Shop.Program",
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "rust: backtrace with at-lines",
+		"stack": "thread 'actix-rt|system:0|arbiter:1' panicked at src/orders/service.rs:88:21:\ncalled `Result::unwrap()` on an `Err` value: PoolTimedOut\nstack backtrace:\n   0: rust_begin_unwind\n             at /rustc/abc123/library/std/src/panicking.rs:665:5\n   1: core::panicking::panic_fmt\n             at /rustc/abc123/library/core/src/panicking.rs:74:14\n   2: core::result::unwrap_failed\n             at /rustc/abc123/library/core/src/result.rs:1679:5\n   3: myapp::orders::service::OrderService::process\n             at ./src/orders/service.rs:88:21\n   4: myapp::web::handler::handle_request\n             at ./src/web/handler.rs:42:9",
+		"frames": [
+			{
+				"function": "rust_begin_unwind",
+				"module": null,
+				"filename": "/rustc/abc123/library/std/src/panicking.rs",
+				"lineno": 665,
+				"colno": 5,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "core::panicking::panic_fmt",
+				"module": null,
+				"filename": "/rustc/abc123/library/core/src/panicking.rs",
+				"lineno": 74,
+				"colno": 14,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "core::result::unwrap_failed",
+				"module": null,
+				"filename": "/rustc/abc123/library/core/src/result.rs",
+				"lineno": 1679,
+				"colno": 5,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "myapp::orders::service::OrderService::process",
+				"module": null,
+				"filename": "./src/orders/service.rs",
+				"lineno": 88,
+				"colno": 21,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "myapp::web::handler::handle_request",
+				"module": null,
+				"filename": "./src/web/handler.rs",
+				"lineno": 42,
+				"colno": 9,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "rust: addresses and symbol hashes",
+		"stack": "thread 'main' panicked at 'index out of bounds', src/main.rs:5:5\nstack backtrace:\n   0:     0x55d1c8c3b2a1 - std::panicking::begin_panic::h1234567890abcdef\n   1:     0x55d1c8c3b2ff - shop::cart::Cart::total::hfedcba0987654321\n                               at /build/src/cart.rs:42:13\n   2:     0x55d1c8c3c000 - shop::main::h0011223344556677\n                               at /build/src/main.rs:5:5",
+		"frames": [
+			{
+				"function": "std::panicking::begin_panic",
+				"module": null,
+				"filename": null,
+				"lineno": null,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "shop::cart::Cart::total",
+				"module": null,
+				"filename": "/build/src/cart.rs",
+				"lineno": 42,
+				"colno": 13,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "shop::main",
+				"module": null,
+				"filename": "/build/src/main.rs",
+				"lineno": 5,
+				"colno": 5,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "ruby: backtrace (best effort)",
+		"stack": "/app/app/models/order.rb:88:in `process'\n/app/app/controllers/orders_controller.rb:12:in 'OrdersController#create'\n/usr/local/bundle/gems/actionpack-7.1.0/lib/action_controller/metal.rb:227:in `dispatch'",
+		"frames": [
+			{
+				"function": "process",
+				"module": null,
+				"filename": "/app/app/models/order.rb",
+				"lineno": 88,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "create",
+				"module": null,
+				"filename": "/app/app/controllers/orders_controller.rb",
+				"lineno": 12,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "dispatch",
+				"module": null,
+				"filename": "/usr/local/bundle/gems/actionpack-7.1.0/lib/action_controller/metal.rb",
+				"lineno": 227,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "php: backtrace (best effort)",
+		"stack": "#0 /var/www/src/Orders/Service.php(42): App\\Orders\\Service->load()\n#1 /var/www/vendor/laravel/framework/src/Pipeline.php(180): App\\Http\\Controller->handle(Object(Request))\n#2 {main}",
+		"frames": [
+			{
+				"function": "App\\Orders\\Service->load",
+				"module": null,
+				"filename": "/var/www/src/Orders/Service.php",
+				"lineno": 42,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "App\\Http\\Controller->handle",
+				"module": null,
+				"filename": "/var/www/vendor/laravel/framework/src/Pipeline.php",
+				"lineno": 180,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "no frames: a bare message",
+		"stack": "just a bare message, no frames",
+		"frames": []
+	},
+	{
+		"name": "no frames: empty stack",
+		"stack": "",
+		"frames": []
+	}
+]

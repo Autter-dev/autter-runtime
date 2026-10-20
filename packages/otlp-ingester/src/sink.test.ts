@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { IngesterConfig } from "./config.js";
-import { SinkForwarder, type SinkTuning } from "./sink.js";
+import { SinkForwarder, sinkOccurrence, type SinkTuning } from "./sink.js";
 import type { IngestContext, RuntimeOccurrence } from "./types.js";
 
 /**
@@ -292,4 +292,30 @@ test("enqueue after stop is a no-op and pendingCount reflects the queue", async 
 	sink.stop();
 	sink.enqueue(ctx(), [occ()]);
 	assert.equal(sink.pendingCount(), 1);
+});
+
+test("1.6.0 sink fields: frames, fingerprints and the record ride along only when present", () => {
+	const frames = [
+		{ function: "process", module: null, filename: "/app/orders/service.py", lineno: 88, colno: null, inApp: true, resolved: false },
+	];
+	const fingerprints = [
+		{ scheme: "frames-v3" as const, fingerprint: "0".repeat(32) },
+		{ scheme: "message-v1" as const, fingerprint: "fp-1" },
+	];
+	const wire = sinkOccurrence(occ({
+		frames,
+		fingerprints,
+		fingerprintRecord: { scheme: "frames-v3", parts: ["TypeError", "process@service.py"] },
+		debugIds: { "https://x/a.js": "id" },
+	}));
+	assert.deepEqual(wire.frames, frames);
+	assert.deepEqual(wire.fingerprints, fingerprints);
+	assert.deepEqual(wire.fingerprintRecord, { scheme: "frames-v3", parts: ["TypeError", "process@service.py"] });
+	assert.equal(wire.fingerprint, "fp-1");
+	assert.equal("debugIds" in wire, false, "debug ids never leave the ingester");
+
+	const bare = sinkOccurrence(occ({ frames: [], fingerprints: [] }));
+	for (const key of ["frames", "fingerprints", "fingerprintRecord", "debugIds"]) {
+		assert.equal(key in bare, false, key);
+	}
 });

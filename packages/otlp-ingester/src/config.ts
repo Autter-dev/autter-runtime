@@ -55,6 +55,12 @@ export interface IngesterConfig {
 	 */
 	redactValuePatterns?: string[];
 	redactKeyPatterns?: string[];
+	/**
+	 * In-memory budget (MiB, estimated decoded size) for parsed source maps
+	 * used to symbolicate browser frames at ingest (SOURCE_MAP_CACHE_MB,
+	 * default 64).
+	 */
+	sourceMapCacheMb?: number;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -125,6 +131,7 @@ export function loadConfig(): IngesterConfig {
 		logTtlDays: intEnv("LOG_TTL_DAYS", 14),
 		redactValuePatterns: patternListEnv("AUTTER_REDACT_VALUE_PATTERNS"),
 		redactKeyPatterns: patternListEnv("AUTTER_REDACT_KEY_PATTERNS"),
+		sourceMapCacheMb: intEnv("SOURCE_MAP_CACHE_MB", 64),
 	};
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {
 		throw new Error(

@@ -59,6 +59,20 @@ export const OCCURRENCE_CODE_COLUMNS: string[] = [
 export const OCCURRENCE_REQUEST_ID_INDEX =
 	"INDEX idx_occ_request_id request_id TYPE bloom_filter GRANULARITY 4";
 
+/**
+ * Migration 0016 columns — shared with the baseline DDL in clickhouse.ts.
+ * `frames`: the structured (symbolicated) frames as JSON, '' when none.
+ * `fingerprints`: every identity candidate (manual-v1, code-v1, frames-v3,
+ * message-v1 — highest precedence first, ending with the legacy one), so
+ * readers find an issue keyed by ANY scheme with
+ * `(fingerprint = X OR has(fingerprints, X))`; rows written before 0016
+ * read `[]` and still match on the legacy `fingerprint`.
+ */
+export const OCCURRENCE_GROUPING_COLUMNS: string[] = [
+	"frames String DEFAULT '' CODEC(ZSTD(3))",
+	"fingerprints Array(String) DEFAULT []",
+];
+
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
 	id: string;
@@ -193,6 +207,16 @@ export const MIGRATIONS: Migration[] = [
 	// Version compatibility: SDK name/version seen per service, and this
 	// ingester's own version + schema level for the Autter dashboard.
 	{ id: "0015-runtime-compat", statements: [sdkVersionTableDDL("{db}"), ingesterInfoTableDDL("{db}")] },
+	// Structured stacks and multi-scheme identity (frames-v3): the platform
+	// resolves an issue from any candidate, so occurrence lookups by an
+	// issue's fingerprint must match every candidate a row carried.
+	{
+		id: "0016-occurrence-frames-fingerprints",
+		statements: OCCURRENCE_GROUPING_COLUMNS.map(
+			(column) =>
+				`ALTER TABLE {db}.runtime_error_occurrences ADD COLUMN IF NOT EXISTS ${column}`,
+		),
+	},
 ];
 
 /** The tracking table itself — created by the runner before anything else. */

@@ -60,6 +60,61 @@ export interface RuntimeOccurrenceInput {
 	expected?: boolean;
 	/** `autter.request.id` — joins the occurrence to its request summary. */
 	requestId?: string;
+	/**
+	 * Browser only: script URL → debug id for the scripts on the page, used
+	 * to find their source maps (EI-13). Input-only: never stored or sent to
+	 * the sink.
+	 */
+	debugIds?: Record<string, string>;
+}
+
+/**
+ * One stack frame, innermost (crash site) first. The sink wire shape
+ * (contract §1) — also stored as JSON in `runtime_error_occurrences.frames`.
+ */
+export interface StackFrame {
+	/** Resolved name when symbolicated, else as parsed. */
+	function: string | null;
+	/** Package / module / class when the language has one. */
+	module: string | null;
+	/** Path as resolved (the source map `sources` entry when resolved), query/hash stripped. */
+	filename: string | null;
+	lineno: number | null;
+	colno: number | null;
+	/** False for dependency, runtime and extension frames (stack-frames.ts §3). */
+	inApp: boolean;
+	/** True when a source map resolved the frame. */
+	resolved: boolean;
+	/** Only when `sourcesContent` supplied it (≤ 300 chars). */
+	contextLine?: string;
+	/** ≤ 3 lines each, ≤ 300 chars per line. */
+	preContext?: string[];
+	postContext?: string[];
+}
+
+/**
+ * Every grouping scheme an issue identity can come from (contract §1).
+ * The ingester computes `manual-v1`, `code-v1`, `frames-v3` and
+ * `message-v1`; `rule-v1` and `external-v1` exist only on the platform.
+ */
+export type FingerprintSchemeV2 =
+	| "manual-v1"
+	| "rule-v1"
+	| "code-v1"
+	| "frames-v3"
+	| "message-v1"
+	| "external-v1";
+
+export interface FingerprintCandidate {
+	scheme: FingerprintSchemeV2;
+	/** 32 lowercase hex characters. */
+	fingerprint: string;
+}
+
+/** What went into a fingerprint, for the "why these were grouped" UI. */
+export interface FingerprintRecord {
+	scheme: string;
+	parts: string[];
 }
 
 /**
@@ -69,9 +124,22 @@ export interface RuntimeOccurrenceInput {
  */
 export interface RuntimeOccurrence extends RuntimeOccurrenceInput {
 	occurrenceId: string;
+	/**
+	 * The LEGACY identity, byte-for-byte as before 1.6.0 so an older
+	 * platform groups exactly as it did: "code-v1" or "message-v1".
+	 */
 	fingerprint: string;
 	/** "code-v1" when grouped by a valid error code, else "message-v1". */
 	fingerprintScheme: "message-v1" | "code-v1";
+	/** Parsed (and, for browser JS, symbolicated) frames, innermost first, ≤ 50. */
+	frames?: StackFrame[];
+	/**
+	 * Every applicable identity, highest precedence first (manual-v1,
+	 * code-v1, frames-v3, message-v1); always ends with the legacy one.
+	 */
+	fingerprints?: FingerprintCandidate[];
+	/** What went into the frames-v3 fingerprint, when one was computed. */
+	fingerprintRecord?: FingerprintRecord;
 	/** normalizeRoute(route) — "/users/:id/orders/:id"; GROUP BY-safe. */
 	routeNormalized: string;
 	/** normalizeMessage(message) — ids/numbers/strings templated out. */

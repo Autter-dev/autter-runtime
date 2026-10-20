@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Symbolication at ingest and the `frames-v3` issue identity (EI-14/15): every stack is parsed into structured frames, innermost first (V8, Firefox/Safari, Python reversed from its outermost-first traceback, Go, JVM, .NET, Rust, best-effort Ruby/PHP), with dependency, runtime and extension frames marked not in-app. Browser JS frames are resolved through the release's uploaded source maps before grouping (function names from the map's `names`, `ignoreList` honoured, parsed maps cached in a byte-bounded LRU, `SOURCE_MAP_CACHE_MB`); a lookup or map failure never fails ingest. The new `frames-v3` fingerprint hashes service, error type and up to five in-app `function@file` tokens (no line numbers, route, source or release), so a bug stays one issue across deploys, chunk hashes, preview domains, pages and tiers. Sink occurrences gain optional `frames`, `fingerprints` (every candidate: `manual-v1`, `code-v1`, `frames-v3`, `message-v1`, highest precedence first) and `fingerprintRecord`; `fingerprint`/`fingerprintScheme` stay the legacy identity byte-for-byte. `runtime_error_occurrences` gains `frames` and `fingerprints` (migration `0016-occurrence-frames-fingerprints`). Shared vectors: `stack-parse-vectors.json`, `fingerprint-v3-vectors.json` (`otlp-ingester`).
+
 ## [1.5.0] - 2026-10-08
 
 Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `runtime-browser` 1.4.0, new `runtime-edge` 1.0.0. Additive: 1.4.0 code keeps working unchanged (golden-tested).

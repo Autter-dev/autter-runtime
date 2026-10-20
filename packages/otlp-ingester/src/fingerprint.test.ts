@@ -107,6 +107,12 @@ for (const language of LANGUAGES) {
 	test(`fingerprint survives line-number drift across re-deploys for ${language}`, () => {
 		const before = fingerprintOccurrence(input({ stack: fixture.primary }));
 		const after = fingerprintOccurrence(input({ stack: fixture.redeploy }));
+		if (fixture.legacyKeepsLineNumbers) {
+			// The frozen message-v1 normaliser hashes Python's `line N` text, so
+			// it cannot survive drift; frames-v3 does (fingerprint-v3.test.ts).
+			assert.notEqual(before, after);
+			return;
+		}
 		assert.equal(before, after);
 	});
 

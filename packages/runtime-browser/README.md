@@ -13,7 +13,7 @@ hidden origin. Use a stable, non-sensitive
 only the element type is recorded. Set `captureActions: false` to disable this
 context. Set `captureNetworkFailures: false` or `captureTimings: false` to
 disable either observer. Production browser fixes
-use source maps uploaded by CI. With `@autter/runtime-cli` (1.6.0+), exceptions
+use source maps uploaded by CI. From 1.6.0, with `@autter/runtime-cli`, exceptions
 also carry `debugIds` for the scripts in their stack, read from the
 `globalThis._autterDebugIds` registry its injected snippet fills, so maps match
 the exact build whatever `release` says; see `docs/SOURCE-MAPS.md` in the

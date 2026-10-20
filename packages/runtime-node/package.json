@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-node",
-	"version": "1.5.0",
+	"version": "1.6.0",
 	"description": "Autter Runtime for Node.js: request wide events, coded errors, operation logging, same-origin browser relay and a curated OpenTelemetry server tracker",
 	"license": "MIT",
 	"type": "module",

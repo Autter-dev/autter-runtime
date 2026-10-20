@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-edge",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "Autter Runtime for edge runtimes (Cloudflare Workers, Vercel Edge, Deno, Bun): request wide events and coded errors over fetch, zero dependencies",
 	"license": "MIT",
 	"type": "module",

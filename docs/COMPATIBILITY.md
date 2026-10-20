@@ -98,9 +98,11 @@ copy that a test keeps identical.
 | Platform OOM/restart events (`platform_events`) | 1.3.3 | `0008-memory-signals` | `/v1/platform-events` | |
 | Browser CSP violation capture (`csp_violations`) | 1.3.4 | | | browser 1.3.3, next 1.3.4 |
 | Operation logging (`operation_logging`) | 1.4.0 | `0011-runtime-logs` | `/v1/logs` | node/next 1.4.0 |
+| Request summaries and the per-route request rollup (`request_summaries`) | 1.5.0 | `0012`, `0014` | `/v1/logs` | node/next 1.5.0, edge 1.0.0 |
+| Coded errors and code-based grouping (`coded_errors`) | 1.5.0 | `0013-occurrence-codes` | | node/next 1.5.0, browser 1.4.0, edge 1.0.0 |
 | Breadcrumbs: the steps before an error (`breadcrumbs`) | 1.6.0 | | | browser/node/next 1.6.0 |
 | Source map debug ids (`source_map_debug_ids`) | 1.6.0 | `0017-source-maps-debug-id` | `/v1/sourcemaps/check` | browser/next 1.6.0 |
-| Fingerprint override (`fingerprint_override`) | 1.6.0 | | | browser/node/next/edge 1.6.0 |
+| Fingerprint override (`fingerprint_override`) | 1.6.0 | | | browser/node/next 1.6.0, edge 1.1.0 |
 | Browser trace propagation (`browser_trace_propagation`) | 1.6.0 | | | browser/next/node 1.6.0 |
 
 Notes:
@@ -121,5 +123,9 @@ Notes:
 Append an entry to `compat-manifest.json`. Give the first ingester release
 that stores the feature, its migrations, its route (if it has its own), and
 the first SDK releases that emit it. The ingester's `compat.test.ts` checks
-ids, migrations, routes and versions against the code. The Python parity test
-fails until `adapters/python/compat.py` gets the same manifest.
+ids, migrations, routes and versions against the code: every version must be
+at most that package's `package.json` version, so a feature for the next
+release bumps the packages it names in the same change (an ingester or SDK
+built from `main` must never report itself too old for its own features).
+The Python parity test fails until `adapters/python/compat.py` gets the same
+manifest.

@@ -22,7 +22,7 @@ npm install -D @autter/runtime-cli
 ```
 
 Set `AUTTER_RUNTIME_KEY` to a **server** ingest key (`autter_rt_…`) where your
-build runs. Without it, debug ids are injected and nothing is uploaded.
+build runs. Without it, the plugins turn no source maps on and change nothing.
 
 ## Vite / Rollup
 
@@ -50,8 +50,10 @@ export default withAutterSourceMaps({ reactStrictMode: true });
 ```
 
 All three turn on hidden source maps when you haven't configured maps, inject
-debug ids after the build, upload when a key is present, and delete the maps
-they created once uploaded. Options (all optional): `release`, `urlPrefix`,
+debug ids after the build, upload when a key is present, and then delete the
+maps they created whether or not the upload succeeded (a rejected upload, an
+unreachable ingester, a dry run), printing one line that says why; without a
+key they turn none on. Maps you configured yourself are left alone. Options (all optional): `release`, `urlPrefix`,
 `endpoint`, `key`, `upload: false`, `deleteAfterUpload`, `dryRun`,
 `concurrency`, `failOnError` (default `false`: a failed upload is logged and
 never fails the build), `silent`.

@@ -30,6 +30,15 @@ export {
 	type BreadcrumbInput,
 	type BreadcrumbOptions,
 } from "@autter/runtime-browser/breadcrumbs";
+// Opt-in trace propagation (EI-11): a W3C `traceparent` on same-origin and
+// listed requests, so browser errors link to the server trace they caused.
+// Also kept out of the main bundle; re-exported so a Next app needs no
+// direct @autter/runtime-browser dependency.
+export {
+	enableTracePropagation,
+	disableTracePropagation,
+	type TracePropagationOptions,
+} from "@autter/runtime-browser/tracing";
 export {
 	AutterErrorBoundary,
 	type AutterErrorBoundaryProps,

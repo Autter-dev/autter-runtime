@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { processBuildOutput, type AutterSourceMapsOptions } from "./build.js";
+import { logMapsNotGenerated, processBuildOutput, shouldGenerateMaps, type AutterSourceMapsOptions } from "./build.js";
+import { findMapFiles } from "./files.js";
 import { AutterSourceMapsWebpackPlugin } from "./webpack.js";
 
 export type { AutterSourceMapsOptions } from "./build.js";
@@ -48,7 +49,17 @@ function hasAfterCompileHook(version: string | null): boolean {
 function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions): NextConfigObject {
 	// Maps the user already serves publicly stay public and stay on disk.
 	const publicMaps = config.productionBrowserSourceMaps === true;
+	// Otherwise client maps exist only because of this wrapper: only when they
+	// can be uploaded (see shouldGenerateMaps), and never left in .next/static.
+	const ownMaps = !publicMaps && shouldGenerateMaps(options);
 	const deleteAfterUpload = options.deleteAfterUpload ?? !publicMaps;
+	let notified = false;
+	const notifyNoMaps = () => {
+		if (!publicMaps && !ownMaps && !notified) {
+			notified = true;
+			logMapsNotGenerated(options);
+		}
+	};
 	const base = String(config.assetPrefix || config.basePath || "").replace(/\/+$/, "");
 	const nextPrefix = `${base}/_next/`;
 	const useHook = hasAfterCompileHook(installedNextVersion());
@@ -63,11 +74,16 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 			// Client production builds only: Next reverts devtool changes in dev,
 			// and server bundles never reach the browser SDK.
 			if (!context.isServer && !context.dev) {
-				if (!publicMaps) result.devtool = "hidden-source-map";
+				// Without a key Next's own setting stays (no client maps); the
+				// webpack plugin or the after-compile hook says so once.
+				if (ownMaps) result.devtool = "hidden-source-map";
 				if (!useHook) {
 					result.plugins = [
 						...(result.plugins ?? []),
-						new AutterSourceMapsWebpackPlugin({ ...options, urlPrefix: options.urlPrefix ?? nextPrefix, deleteAfterUpload }),
+						new AutterSourceMapsWebpackPlugin(
+							{ ...options, urlPrefix: options.urlPrefix ?? nextPrefix, deleteAfterUpload },
+							{ ownMaps },
+						),
 					];
 				}
 			}
@@ -76,20 +92,26 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 	};
 	if (useHook) {
 		// Turbopack emits client maps only with productionBrowserSourceMaps; the
-		// hook hides them (drops the sourceMappingURL comment) after the build.
-		wrapped.productionBrowserSourceMaps = true;
+		// hook hides them (drops the sourceMappingURL comment) after the build
+		// and deletes them once the upload step is over.
+		if (ownMaps) wrapped.productionBrowserSourceMaps = true;
 		const userHook = config.compiler?.runAfterProductionCompile as ((ctx: unknown) => unknown) | undefined;
 		wrapped.compiler = {
 			...config.compiler,
 			async runAfterProductionCompile(ctx: { distDir?: string; projectDir?: string } = {}) {
 				if (typeof userHook === "function") await userHook(ctx);
 				const distDir = ctx.distDir ?? resolve(ctx.projectDir ?? process.cwd(), String(config.distDir ?? ".next"));
+				const staticDir = join(distDir, "static");
+				notifyNoMaps();
 				await processBuildOutput({
-					dir: join(distDir, "static"),
+					dir: staticDir,
 					urlPrefix: options.urlPrefix ?? `${nextPrefix}static/`,
 					options: { ...options, deleteAfterUpload },
 					deleteAfterUpload,
 					stripSourceMappingUrl: !publicMaps,
+					ownMaps,
+					// Every client map (JS and CSS): .next/static is deployed as is.
+					maps: ownMaps ? await findMapFiles(staticDir) : undefined,
 				});
 			},
 		};
@@ -100,7 +122,8 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 /**
  * Next.js config wrapper: hidden source maps for client production builds,
  * debug ids injected into every client chunk, maps uploaded after the build
- * when AUTTER_RUNTIME_KEY (or `key`) is set. Works with webpack builds, and
+ * when AUTTER_RUNTIME_KEY (or `key`) is set, then deleted whatever the
+ * upload's outcome (without a key, no maps are turned on at all). Works with webpack builds, and
  * with Turbopack builds on Next.js 15.4.1+ (`compiler.runAfterProductionCompile`).
  *
  * ```js

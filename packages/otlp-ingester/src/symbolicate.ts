@@ -3,7 +3,9 @@ import {
 	originalPositionFor,
 	sourceContentFor,
 	TraceMap,
+	type SourceMapInput,
 } from "@jridgewell/trace-mapping";
+import { SCOPES_KEY, ScopeIndex, type ScopeName } from "./source-map-scopes.js";
 import type { SourceMapKey } from "./source-maps-lookup.js";
 import { isInAppPath, stripQueryAndHash } from "./stack-frames.js";
 import type { StackFrame } from "./types.js";
@@ -14,11 +16,17 @@ import type { StackFrame } from "./types.js";
  * fingerprinted, so `frames-v3` hashes `checkout.tsx`, not
  * `index-5f3a9c1e.js` — and an issue survives deploys and preview domains.
  *
- * - Function names come from the map's `names`: the name mapped at the
- *   CALLER's position is the callee's original name (the call site names
- *   what it calls). Without one, a resolved frame keeps its parsed name
- *   only when that is not an obviously mangled one (≤ 2 characters), since
- *   a mangled name changes on every build.
+ * - Function names: when the map carries function scopes
+ *   (`x_autter_scopes`, uploaded by @autter/runtime-cli after 1.0.0), a
+ *   frame is named after the innermost function containing it, with that
+ *   function's original name (null in an anonymous function or top-level
+ *   code) — see source-map-scopes.ts. Maps without scopes keep the earlier
+ *   rule: the name mapped at the CALLER's position is the callee's original
+ *   name; without one, a resolved frame keeps its parsed name only when
+ *   that is not an obviously mangled one (≤ 2 characters), since a mangled
+ *   name changes on every build. That rule is wrong for calls through a
+ *   variable (`const run = actions.captured; run()` names the frame `run`)
+ *   and for handlers a framework calls, which is why scopes exist.
  * - Sources the map lists in `ignoreList` / `x_google_ignoreList` are not
  *   in-app; a resolved path under node_modules/ etc. is not in-app either.
  * - Context lines only when the map carries `sourcesContent` (the upload
@@ -67,8 +75,14 @@ export interface SourceMapCacheOptions {
 	now?: () => number;
 }
 
+/** A parsed map and the function scopes it carries, if any. */
+export interface LoadedSourceMap {
+	map: TraceMap;
+	scopes: ScopeIndex | null;
+}
+
 interface CacheEntry {
-	map: TraceMap | null;
+	map: LoadedSourceMap | null;
 	weight: number;
 	expiresAt: number;
 }
@@ -76,12 +90,13 @@ interface CacheEntry {
 /**
  * Decoded mappings take several times the JSON's size; the budget counts an
  * estimate so a handful of large bundles cannot exhaust a small container.
+ * A map's weight is its JSON size times this, plus its scope table.
  */
 const DECODED_WEIGHT_FACTOR = 8;
 
 export class SourceMapCache {
 	private readonly entries = new Map<string, CacheEntry>();
-	private readonly inFlight = new Map<string, Promise<TraceMap | null>>();
+	private readonly inFlight = new Map<string, Promise<LoadedSourceMap | null>>();
 	private weight = 0;
 	private readonly maxBytes: number;
 	private readonly maxEntries: number;
@@ -112,8 +127,13 @@ export class SourceMapCache {
 		return this.entries.size;
 	}
 
+	/** Estimated bytes of the cached maps (what `maxBytes` bounds). */
+	get bytes(): number {
+		return this.weight;
+	}
+
 	/** The parsed map for `key` (null when none), fetching at most once at a time. */
-	async get(key: SourceMapKey, fetchMap: MapFetcher): Promise<TraceMap | null> {
+	async get(key: SourceMapKey, fetchMap: MapFetcher): Promise<LoadedSourceMap | null> {
 		const id = SourceMapCache.keyOf(key);
 		const hit = this.entries.get(id);
 		if (hit) {
@@ -132,7 +152,7 @@ export class SourceMapCache {
 		return load;
 	}
 
-	private async load(id: string, key: SourceMapKey, fetchMap: MapFetcher): Promise<TraceMap | null> {
+	private async load(id: string, key: SourceMapKey, fetchMap: MapFetcher): Promise<LoadedSourceMap | null> {
 		this.fetches += 1;
 		let json: string | null;
 		try {
@@ -149,19 +169,19 @@ export class SourceMapCache {
 			this.store(id, null, 0, this.missTtlMs);
 			return null;
 		}
-		let map: TraceMap;
+		let loaded: LoadedSourceMap;
 		try {
-			map = new TraceMap(json);
+			loaded = parseSourceMap(json);
 		} catch {
 			// A malformed upload is a miss until it is replaced.
 			this.store(id, null, 0, this.missTtlMs);
 			return null;
 		}
-		this.store(id, map, json.length * DECODED_WEIGHT_FACTOR, this.hitTtlMs);
-		return map;
+		this.store(id, loaded, json.length * DECODED_WEIGHT_FACTOR + (loaded.scopes?.bytes ?? 0), this.hitTtlMs);
+		return loaded;
 	}
 
-	private store(id: string, map: TraceMap | null, weight: number, ttlMs: number): void {
+	private store(id: string, map: LoadedSourceMap | null, weight: number, ttlMs: number): void {
 		// A map bigger than the whole budget serves this lookup but is not kept:
 		// caching it would evict everything else.
 		if (weight > this.maxBytes) return;
@@ -183,6 +203,25 @@ export class SourceMapCache {
 		this.entries.delete(id);
 		this.weight -= entry.weight;
 	}
+}
+
+/** Parse a stored map once: the TraceMap and its scopes (null when absent
+ * or malformed — a bad scope field never loses the map). Throws when the
+ * map itself is unusable. */
+export function parseSourceMap(json: string): LoadedSourceMap {
+	const raw: unknown = JSON.parse(json);
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("not a source map");
+	const fields = raw as Record<string, unknown>;
+	let scopes: ScopeIndex | null = null;
+	try {
+		scopes = ScopeIndex.from(fields[SCOPES_KEY]);
+	} catch {
+		scopes = null;
+	}
+	// TraceMap copies only the standard fields, but given an object that has
+	// its private `_decodedMemo` it would return that object as is.
+	delete fields._decodedMemo;
+	return { map: new TraceMap(fields as unknown as SourceMapInput), scopes };
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────
@@ -217,6 +256,8 @@ interface Resolution {
 	frame: StackFrame;
 	/** The original name mapped at this frame's own position (the callee it calls). */
 	nameHere: string | null;
+	/** The function this frame is in, when its map carries scopes. */
+	scope: ScopeName | null;
 }
 
 export class Symbolicator {
@@ -287,7 +328,11 @@ export class Symbolicator {
 		return frames.map((frame, i) => {
 			const resolution = resolutions[i];
 			if (!resolution) return frame;
-			// Innermost first: the caller is the next frame.
+			const { scope } = resolution;
+			if (scope?.kind === "named") return { ...resolution.frame, function: scope.name };
+			if (scope?.kind === "anonymous") return { ...resolution.frame, function: null };
+			// No scopes (an older upload), or a function whose name the CLI
+			// could not map: innermost first, so the caller is the next frame.
 			const callerName = resolutions[i + 1]?.nameHere ?? null;
 			const parsed = frame.function;
 			const name = callerName ?? (parsed && !looksMangled(parsed) ? parsed : null);
@@ -296,12 +341,12 @@ export class Symbolicator {
 	}
 }
 
-function resolveFrame(map: TraceMap, frame: StackFrame): Resolution | null {
-	const position = originalPositionFor(map, {
-		line: frame.lineno!,
-		// Stack columns are 1-based, source map columns 0-based.
-		column: Math.max(0, (frame.colno ?? 1) - 1),
-	});
+function resolveFrame(loaded: LoadedSourceMap, frame: StackFrame): Resolution | null {
+	const { map } = loaded;
+	// Stack lines and columns are 1-based; source map columns (and scope
+	// positions) 0-based.
+	const column = Math.max(0, (frame.colno ?? 1) - 1);
+	const position = originalPositionFor(map, { line: frame.lineno!, column });
 	if (!position.source || position.line == null) return null;
 	const filename = stripQueryAndHash(position.source);
 	const ignored = (() => {
@@ -321,5 +366,9 @@ function resolveFrame(map: TraceMap, frame: StackFrame): Resolution | null {
 		resolved: true,
 		...contextFor(map, position.source, position.line),
 	};
-	return { frame: resolved, nameHere: position.name ?? null };
+	return {
+		frame: resolved,
+		nameHere: position.name ?? null,
+		scope: loaded.scopes ? loaded.scopes.nameAt(frame.lineno! - 1, column) : null,
+	};
 }

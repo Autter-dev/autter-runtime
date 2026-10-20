@@ -43,6 +43,16 @@ export {
 	type UploadOptions,
 	type UploadSummary,
 } from "./upload.js";
+export {
+	ANONYMOUS_SCOPE,
+	computeScopes,
+	SCOPES_KEY,
+	SCOPES_VERSION,
+	UNKNOWN_SCOPE_NAME,
+	type ScopeEntry,
+	type ScopesResult,
+	type SourceMapScopes,
+} from "./scopes.js";
 export { gitHead, RELEASE_ENV_VARS, RELEASE_RE, resolveRelease, type ResolvedRelease } from "./release.js";
 export {
 	formatUploadSummary,

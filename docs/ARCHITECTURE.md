@@ -218,12 +218,17 @@ frames. Everything else is in-app.
 
 **Symbolication at ingest.** Browser frames in `.js`/`.mjs`/`.cjs` files are
 resolved through the map uploaded for the event's release and the script's
-path (or its debug id) before fingerprinting. Function names come from the
-map's `names` (the name mapped at the caller's position); a resolved frame
-without one keeps its parsed name unless that is an obviously mangled one.
-Parsed maps are cached per (org, repository, release, file) in an LRU bounded
-by `SOURCE_MAP_CACHE_MB`; misses are remembered for 5 minutes. A failed lookup
-or a bad map leaves the frames as parsed — it never fails ingest.
+path (or its debug id) before fingerprinting. When the map carries function
+scopes (`x_autter_scopes`, written by `autter-runtime sourcemaps upload`), a
+frame is named after the innermost function containing it, with that
+function's original name (`null` when anonymous or in top-level code).
+Without scopes, names come from the map's `names` (the name mapped at the
+caller's position); a resolved frame without one keeps its parsed name unless
+that is an obviously mangled one. See `docs/SOURCE-MAPS.md`.
+Parsed maps (and their scope tables) are cached per (org, repository,
+release, file) in an LRU bounded by `SOURCE_MAP_CACHE_MB`; misses are
+remembered for 5 minutes. A failed lookup or a bad map leaves the frames as
+parsed — it never fails ingest.
 
 The two legacy schemes; `fingerprint_scheme` records which one produced a row.
 

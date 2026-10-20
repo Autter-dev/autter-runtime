@@ -13,8 +13,10 @@ the error and prepares a fix.
    `//# debugId=<id>` comment, adds a one-line snippet that registers the id
    with the browser SDK, and writes `"debugId"` into the `.map`.
 2. **Upload.** Every map goes to the ingester's `POST /v1/sourcemaps` with a
-   server key, its debug id, the release and the path the bundle is served
-   from. Maps the ingester already has are skipped.
+   server key, its debug id, the release, the path the bundle is served
+   from and the bundle's function scopes (see **Function names** under
+   [How the pieces fit](#how-the-pieces-fit)).
+   Maps the ingester already has are skipped.
 3. **Match.** `@autter/runtime-browser` 1.6.0+ sends, with each exception, the
    debug ids of the scripts in its stack. The ingester finds the map by debug
    id first, and by release + path when there is none. A debug id names the
@@ -182,6 +184,42 @@ CLI which maps are already stored (same release, path, debug id and content,
 uploaded in the last 7 days), so re-runs skip them; older ones are re-sent to
 refresh the TTL.
 
+**Function names.** A frame is named after the function it is in, the way
+Sentry (js-source-scopes) and PostHog (cymbal's `token.scope()`) do it.
+`upload` parses each bundle exactly as served (after `inject`, so positions
+match browser stacks) with [acorn](https://github.com/acornjs/acorn) and
+records every function: declarations, expressions, arrows, class and object
+methods, getters and setters. Each one is named by, in order, its own name,
+the binding it is assigned to (`const x = () => …`, `x = function …`,
+`obj.x = …`), its object or class key (a constructor takes its class's name),
+else nothing (anonymous). The name token's position is mapped through the map
+to the original identifier: the map's `names` there, else the generated name
+when it isn't a minified one (≤ 2 characters), else the identifier at the
+original position in `sourcesContent`. A name the minifier removed
+(`function onPayClick() {}` passed inline) is read back from `sourcesContent`
+too. The result travels in the map as
+
+```json
+"x_autter_scopes": {
+  "version": 1,
+  "names": ["computeTotal", "captured"],
+  "scopes": [[0, 0, 0, 56, 0], [0, 144, 0, 182, 1], [0, 373, 0, 379, -1]]
+}
+```
+
+where each scope is `[startLine, startColumn, endLine, endColumn, nameIndex]`
+(0-based generated lines and UTF-16 columns, end exclusive), sorted by start;
+`nameIndex` is `-1` for an anonymous function and `-2` for a minified name that
+could not be mapped. The ingester names a frame after the innermost scope that
+contains it (`null` in an anonymous function or top-level code; for `-2` it
+keeps the call-site name). Maps uploaded without scopes (older CLIs) keep the
+earlier rule: the name the map holds at the caller's position. That rule names
+`const run = actions.captured; run()` as `run` and a handler a framework calls
+as `fn`/`func`/`listener`, which also merged different handlers of one file
+into one `frames-v3` issue. A bundle that does not parse, or a map that only
+fits the 5 MB limit without scopes, is uploaded without them and the CLI
+prints a warning.
+
 **Lookup.** Symbolication calls
 `lookupSourceMap(client, database, { orgId, repositoryId, release, filename, debugId })`
 (`packages/otlp-ingester/src/source-maps-lookup.ts`): by debug id first, then
@@ -198,6 +236,10 @@ by release + path (origin, query and hash removed).
   (code-splitting) so each map stays under 5 MB without `sourcesContent`.
 - **`release "…" is not valid`.** Use a commit SHA or a value with only
   letters, digits, `.`, `_` and `-`.
+- **Frames are named after call sites** (`run`, `fn`, `func`, `listener`).
+  The map was uploaded without function scopes: by a CLI that predates them,
+  or with a warning (the bundle did not parse, or the map is close to 5 MB).
+  Upload it again with the current `@autter/runtime-cli`.
 - **Subresource integrity.** Injection changes bundle bytes after the build,
   so script hashes computed during the build (Next.js `experimental.sri`,
   webpack SRI plugins) no longer match. Recompute them after injecting, or

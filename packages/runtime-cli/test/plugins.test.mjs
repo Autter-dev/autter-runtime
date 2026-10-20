@@ -46,6 +46,9 @@ test("Rollup: hidden maps, debug ids injected into every chunk, maps uploaded th
 		const lines = decodeMappings(map.mappings);
 		assert.deepEqual(lines[0], []);
 		assert.ok(lines.slice(1).some((segments) => segments.some((s) => map.sources[s[1]].endsWith(row.filename.includes("lazy") ? "lazy.js" : "main.js"))));
+		// Function scopes, computed on the chunk as written (snippet included).
+		assert.deepEqual(map.x_autter_scopes.names, row.filename.includes("lazy") ? ["run"] : ["add"]);
+		assert.deepEqual(map.x_autter_scopes.scopes[0].slice(0, 2), [0, 2], "the snippet's own anonymous function on line 0");
 	}
 });
 

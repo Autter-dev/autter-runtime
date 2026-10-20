@@ -3,6 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { normalizeDebugId, readDebugIdComment } from "./debug-id.js";
 import { findBundles, stripSourceMappingUrl, type BundleWithMap } from "./files.js";
 import { resolveRelease } from "./release.js";
+import { computeScopes, SCOPES_KEY } from "./scopes.js";
 
 export const DEFAULT_ENDPOINT = "https://otlp.autter.dev";
 /** The ingester's `/v1/sourcemaps` body limit. */
@@ -87,7 +88,21 @@ interface Prepared extends UploadItem {
 	body: string;
 }
 
-async function prepare(bundle: BundleWithMap, urlPrefix: string | undefined, release: string): Promise<Prepared | { error: string }> {
+/** The `/v1/sourcemaps` request body for one map. */
+function uploadBody(release: string, filename: string, debugId: string | null, json: string): string {
+	// The map goes in as a JSON object, not an escaped string, so a map close
+	// to the limit still fits the request.
+	return `{"release":${JSON.stringify(release)},"filename":${JSON.stringify(filename)},${
+		debugId ? `"debugId":${JSON.stringify(debugId)},` : ""
+	}"map":${json}}`;
+}
+
+async function prepare(
+	bundle: BundleWithMap,
+	urlPrefix: string | undefined,
+	release: string,
+	log: (line: string) => void,
+): Promise<Prepared | { error: string }> {
 	let map: Record<string, unknown>;
 	try {
 		map = JSON.parse(await readFile(bundle.map, "utf8")) as Record<string, unknown>;
@@ -99,13 +114,23 @@ async function prepare(bundle: BundleWithMap, urlPrefix: string | undefined, rel
 	}
 	const code = await readFile(bundle.js, "utf8");
 	const debugId = readDebugIdComment(code) ?? normalizeDebugId(map.debugId);
-	const json = storedMapJson(map);
 	const filename = servedFilename(urlPrefix, bundle.path);
-	// The map goes in as a JSON object, not an escaped string, so a map close
-	// to the limit still fits the request.
-	const body = `{"release":${JSON.stringify(release)},"filename":${JSON.stringify(filename)},${
-		debugId ? `"debugId":${JSON.stringify(debugId)},` : ""
-	}"map":${json}}`;
+	// Function scopes, computed on the bundle as it is served (after inject),
+	// so their positions match browser stacks. Never sent stale: any scopes
+	// already in the map are replaced or dropped.
+	const { [SCOPES_KEY]: _stale, ...plain } = map;
+	const scopes = computeScopes(code, map);
+	let json = storedMapJson(plain);
+	if ("scopes" in scopes) {
+		const scoped = storedMapJson({ ...plain, [SCOPES_KEY]: scopes.scopes });
+		if (Buffer.byteLength(uploadBody(release, filename, debugId, scoped)) <= MAX_UPLOAD_BYTES) json = scoped;
+		else if (Buffer.byteLength(uploadBody(release, filename, debugId, json)) <= MAX_UPLOAD_BYTES) {
+			log(`warning: ${bundle.path}: its map is over 5 MB with function scopes, so it is uploaded without them (frames keep call-site names)`);
+		}
+	} else {
+		log(`warning: ${bundle.path}: no function scopes (${scopes.error}); its map is uploaded without them (frames keep call-site names)`);
+	}
+	const body = uploadBody(release, filename, debugId, json);
 	return {
 		bundle,
 		body,
@@ -137,7 +162,7 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 
 	const items: Prepared[] = [];
 	for (const bundle of await findBundles(dir, options.files)) {
-		const prepared = await prepare(bundle, options.urlPrefix, release);
+		const prepared = await prepare(bundle, options.urlPrefix, release, log);
 		if ("error" in prepared) {
 			summary.failed.push({ path: bundle.path, filename: servedFilename(options.urlPrefix, bundle.path), error: prepared.error });
 		} else if (prepared.bytes > MAX_UPLOAD_BYTES) {

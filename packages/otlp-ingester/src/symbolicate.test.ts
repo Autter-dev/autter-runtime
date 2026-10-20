@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { framesV3Fingerprint } from "./fingerprint-v3.js";
 import type { SourceMapKey } from "./source-maps-lookup.js";
+import { ScopeIndex } from "./source-map-scopes.js";
 import { parseStackFrames } from "./stack-frames.js";
 import { SourceMapCache, Symbolicator, type MapFetcher } from "./symbolicate.js";
 
@@ -243,4 +244,194 @@ test("non-JS and position-less frames are left alone", async () => {
 	);
 	assert.deepEqual(await symbolicator.symbolicate(frames, scope), frames);
 	assert.equal(calls.length, 0);
+});
+
+// ── Function scopes (x_autter_scopes) ─────────────────────────────────────
+
+/** One minified line: an object method called through a variable, and a
+ * React-like dispatcher that calls a handler through `fn`. */
+const SCOPED_CODE =
+	'var u={captured(){throw new Error("captured failed")}};' +
+	"async function a(t){let r=u[t];await r()}" +
+	"var e=[];function p(){e.forEach(t=>t())}" +
+	"e.push(function(){i(null)});" +
+	'var i=t=>{throw new TypeError("no price")};';
+const SCOPED_URL = "https://app.example.com/assets/index-5c0bed00.js";
+
+/** 0-based column of `fragment` (+ `offset`) in the minified line. */
+function colOf(fragment: string, offset = 0): number {
+	const index = SCOPED_CODE.indexOf(fragment);
+	assert.ok(index >= 0 && SCOPED_CODE.indexOf(fragment, index + 1) < 0, `unique fragment ${fragment}`);
+	return index + offset;
+}
+/** A function's [startLine, startCol, endLine, endCol] from its exact text. */
+function rangeOf(text: string): [number, number, number, number] {
+	return [0, colOf(text), 0, colOf(text) + text.length];
+}
+
+const SCOPED_NAMES = ["run", "formatPrice", "fn"];
+/** Each frame position maps into actions.ts; call sites carry the name of
+ * the variable they call through, as esbuild writes them. */
+const SCOPED_MAPPINGS = mappings([
+	[
+		[colOf('new Error("captured'), 0, 9, 10],
+		[colOf("r()}"), 0, 19, 8, 0],
+		[colOf("forEach("), 0, 29, 12],
+		[colOf("t())"), 0, 29, 30, 2],
+		[colOf("e.push("), 0, 39, 0],
+		[colOf("i(null)"), 0, 39, 30, 1],
+		[colOf("new TypeError"), 0, 49, 4],
+	].sort((a, b) => a[0]! - b[0]!),
+]);
+const SCOPES = {
+	version: 1,
+	names: ["captured", "runAction", "dispatch", "onCheckoutClick", "formatPrice"],
+	scopes: [
+		[...rangeOf('(){throw new Error("captured failed")}'), 0],
+		[...rangeOf("async function a(t){let r=u[t];await r()}"), 1],
+		[...rangeOf("function p(){e.forEach(t=>t())}"), 2],
+		[...rangeOf("t=>t()"), -1],
+		[...rangeOf("function(){i(null)}"), 3],
+		[...rangeOf('t=>{throw new TypeError("no price")}'), 4],
+	],
+};
+
+function scopedMap(scopes?: unknown): string {
+	return JSON.stringify({
+		version: 3,
+		sources: ["webpack://shop/./src/checkout/actions.ts"],
+		names: SCOPED_NAMES,
+		mappings: SCOPED_MAPPINGS,
+		...(scopes === undefined ? {} : { x_autter_scopes: scopes }),
+	});
+}
+
+const at = (fn: string | null, fragment: string, offset = 0) =>
+	`    at ${fn ? `${fn} (${SCOPED_URL}:1:${colOf(fragment, offset) + 1})` : `${SCOPED_URL}:1:${colOf(fragment, offset) + 1}`}`;
+/** `const run = actions.captured; await run()`. */
+const RUN_STACK = ["Error: captured failed", at("captured", 'new Error("captured'), at("a", "r()}")].join("\n");
+/** dispatch() → listeners.forEach(fn => fn()) → handler → formatPrice. */
+const DISPATCH_STACK = [
+	"TypeError: no price",
+	at("i", "new TypeError"),
+	at(null, "i(null)"),
+	at(null, "t())"),
+	"    at Array.forEach (<anonymous>)",
+	at("p", "forEach("),
+].join("\n");
+
+async function names(map: string, stackText: string): Promise<Array<string | null>> {
+	const symbolicator = new Symbolicator(fetcherFor({ "/assets/index-5c0bed00.js": map }));
+	const frames = await symbolicator.symbolicate(parseStackFrames(stackText), scope);
+	return frames.map((frame) => frame.function);
+}
+
+test("with scopes, a frame is named after the function it is in, not its call site", async () => {
+	const map = scopedMap(SCOPES);
+	// The method called through `const run = actions.captured` is `captured`.
+	assert.deepEqual(await names(map, RUN_STACK), ["captured", "runAction"]);
+	// The handler the dispatcher calls as `fn` is `onCheckoutClick`; the
+	// dispatcher's own arrow is anonymous.
+	assert.deepEqual(await names(map, DISPATCH_STACK), ["formatPrice", "onCheckoutClick", null, "Array.forEach", "dispatch"]);
+	// Resolution is otherwise unchanged.
+	const symbolicator = new Symbolicator(fetcherFor({ "/assets/index-5c0bed00.js": map }));
+	const [captured] = await symbolicator.symbolicate(parseStackFrames(RUN_STACK), scope);
+	assert.deepEqual(captured, {
+		function: "captured",
+		module: null,
+		filename: "webpack://shop/src/checkout/actions.ts",
+		lineno: 10,
+		colno: 11,
+		inApp: true,
+		resolved: true,
+	});
+});
+
+test("without scopes, names still come from the caller's position (older uploads keep their fingerprints)", async () => {
+	const map = scopedMap();
+	assert.deepEqual(await names(map, RUN_STACK), ["run", null]);
+	assert.deepEqual(await names(map, DISPATCH_STACK), ["formatPrice", "fn", null, "Array.forEach", null]);
+});
+
+test("a frame in top-level code is anonymous; an unmapped scope name falls back to the caller's", async () => {
+	const top = [`Error: x`, at("i", "new TypeError"), at(null, "e.push(")].join("\n");
+	assert.deepEqual(await names(scopedMap(SCOPES), top), ["formatPrice", null]);
+	const unknown = { ...SCOPES, scopes: SCOPES.scopes.map((s) => (s[4] === 0 ? [...s.slice(0, 4), -2] : s)) };
+	assert.deepEqual(await names(scopedMap(unknown), RUN_STACK), ["run", "runAction"]);
+});
+
+test("a malformed x_autter_scopes is ignored: the map is used as if it had none", async () => {
+	const legacy = {
+		run: await names(scopedMap(), RUN_STACK),
+		dispatch: await names(scopedMap(), DISPATCH_STACK),
+	};
+	const entry = SCOPES.scopes[0]!;
+	const malformed: unknown[] = [
+		null,
+		"scopes",
+		[entry],
+		{ ...SCOPES, version: 2 },
+		{ ...SCOPES, names: "captured" },
+		{ ...SCOPES, names: [...SCOPES.names, 7] },
+		{ ...SCOPES, scopes: "[]" },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, entry.slice(0, 4)] },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, 1, 0, 2, 5]] },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, 1, 0, 2, -3]] },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, -1, 0, 2, 0]] },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, 1.5, 0, 2, 0]] },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, 3, 0, 3, 0]] },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, "1", 0, 2, 0]] },
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, 2 ** 31, 0, 2 ** 31 + 5, 0]] },
+		// Overlaps `captured` without nesting in it.
+		{ ...SCOPES, scopes: [...SCOPES.scopes, [0, entry[1]! + 2, 0, entry[3]! + 2, 0]] },
+	];
+	for (const scopes of malformed) {
+		assert.equal(ScopeIndex.from(scopes), null, JSON.stringify(scopes));
+		assert.deepEqual(await names(scopedMap(scopes), RUN_STACK), legacy.run, JSON.stringify(scopes));
+		assert.deepEqual(await names(scopedMap(scopes), DISPATCH_STACK), legacy.dispatch, JSON.stringify(scopes));
+	}
+});
+
+test("scope lookup finds the innermost function across lines, with exclusive ends", () => {
+	const index = ScopeIndex.from({
+		version: 1,
+		names: ["outer", "inner", "later"],
+		// Deliberately unsorted.
+		scopes: [
+			[3, 0, 4, 1, 2],
+			[0, 10, 2, 5, 0],
+			[1, 4, 1, 20, 1],
+			[1, 8, 1, 12, -1],
+		],
+	})!;
+	assert.equal(index.size, 4);
+	const at = (line: number, col: number) => {
+		const found = index.nameAt(line, col);
+		return found.kind === "named" ? found.name : found.kind;
+	};
+	assert.equal(at(0, 9), "anonymous", "before every function: top-level code");
+	assert.equal(at(0, 10), "outer", "a start is inside");
+	assert.equal(at(1, 3), "outer");
+	assert.equal(at(1, 4), "inner");
+	assert.equal(at(1, 9), "anonymous");
+	assert.equal(at(1, 12), "inner", "an end is outside: back in the parent");
+	assert.equal(at(1, 20), "outer");
+	assert.equal(at(2, 4), "outer");
+	assert.equal(at(2, 5), "anonymous");
+	assert.equal(at(3, 0), "later");
+	assert.equal(at(4, 1), "anonymous");
+	assert.equal(ScopeIndex.from({ version: 1, names: [], scopes: [] })!.nameAt(0, 0).kind, "anonymous");
+});
+
+test("the cache budget counts a map's scope table on top of its JSON", async () => {
+	const map = scopedMap(SCOPES);
+	const cache = new SourceMapCache();
+	const loaded = await cache.get({ ...scope, filename: "/assets/index-5c0bed00.js" }, async () => map);
+	assert.ok(loaded?.scopes);
+	assert.equal(loaded.scopes.size, SCOPES.scopes.length);
+	assert.ok(loaded.scopes.bytes >= SCOPES.scopes.length * 6 * 4);
+	assert.equal(cache.bytes, map.length * 8 + loaded.scopes.bytes);
+	const plain = new SourceMapCache();
+	await plain.get({ ...scope, filename: "/assets/index-5c0bed00.js" }, async () => scopedMap());
+	assert.equal(plain.bytes, scopedMap().length * 8);
 });

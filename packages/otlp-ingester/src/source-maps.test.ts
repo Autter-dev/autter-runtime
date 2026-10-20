@@ -47,6 +47,18 @@ test("the stored map drops sourcesContent and carries its own sha256", () => {
 	assert.equal(stored.contentHash, createHash("sha256").update(stored.map).digest("hex"));
 });
 
+test("the stored map keeps the function scopes the CLI sends (x_autter_scopes), as sent", () => {
+	const x_autter_scopes = { version: 1, names: ["captured"], scopes: [[0, 4, 0, 30, 0], [0, 40, 0, 50, -1]] };
+	const stored = validateSourceMap({
+		release: "abc",
+		filename: "/app.js",
+		map: { ...MAP, sourcesContent: ["const key = 'secret'"], x_autter_scopes },
+	})!;
+	// Byte-for-byte what the CLI hashed (storedMapJson), so re-runs skip it.
+	assert.equal(stored.map, JSON.stringify({ ...MAP, x_autter_scopes }));
+	assert.deepEqual(JSON.parse(stored.map).x_autter_scopes, x_autter_scopes);
+});
+
 test("check requests name files by path, debug id and hash", () => {
 	const hash = "a".repeat(64);
 	assert.deepEqual(

@@ -93,7 +93,10 @@ export function validateSourceMap(body: unknown): ValidSourceMap | null {
 	const rawDebugId = input.debugId ?? parsed.debugId ?? parsed.debug_id;
 	const debugId = rawDebugId === undefined || rawDebugId === null || rawDebugId === "" ? "" : normalizeDebugId(rawDebugId);
 	if (debugId === null) return null;
-	// Source contents are unnecessary for position lookup and may contain secrets.
+	// Source contents are unnecessary for position lookup and may contain
+	// secrets. Everything else is stored as sent, extension fields included:
+	// symbolication reads `x_autter_scopes` (function scopes) from it, and the
+	// CLI hashes exactly this JSON to skip maps already uploaded.
 	const { sourcesContent: _omitted, ...safe } = parsed;
 	const map = JSON.stringify(safe);
 	if (map.length > SOURCE_MAP_MAX_CHARS) return null;

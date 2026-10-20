@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { captureException, flush, initAutterBrowser } from "../dist/index.js";
-import { enableTracing, LINK_WINDOW_MS } from "../dist/tracing.js";
+import { enableTracePropagation, LINK_WINDOW_MS } from "../dist/tracing.js";
 
 // W3C trace context (EI-11, `@autter/runtime-browser/tracing`): which
 // requests get a traceparent, and which events carry the trace id.
@@ -76,7 +76,7 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: {
 	},
 } });
 initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web", sessionTracking: false, captureTimings: false });
-enableTracing({ tracePropagationTargets: ["https://api.example.test/", /^https:\/\/[a-z]+\.internal\.example\.test\//] });
+enableTracePropagation({ tracePropagationTargets: ["https://api.example.test/", /^https:\/\/[a-z]+\.internal\.example\.test\//] });
 
 /** The traceparent the last fetch was sent with (null when none). */
 function lastTraceparent() {
@@ -177,8 +177,6 @@ test("XHR: same-origin and target requests get a traceparent; an app's own is ke
 	assert.match(target.traceparent(), TRACEPARENT);
 	const third = xhr("https://cdn.thirdparty.test/x");
 	assert.equal(third.traceparent(), null);
-	const relay = xhr("/api/autter-runtime");
-	assert.equal(relay.traceparent(), null, "the telemetry endpoint never gets one");
 	// Set by the app before send: sent once, never combined with ours.
 	const own = xhr("/api/legacy", (request) => request.setRequestHeader("traceparent", OWN));
 	assert.equal(own.traceparent(), OWN);

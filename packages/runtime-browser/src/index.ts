@@ -104,11 +104,12 @@ let trail: string[] = [];
 let clientCache: { browser: string; os: string } | undefined;
 let seenCspPolicyHash = "";
 // W3C trace propagation lives in the opt-in `@autter/runtime-browser/tracing`
-// module (it doesn't fit this bundle's 5 KB budget); it installs these hooks
-// and the fetch/XHR observers call them.
+// module (it doesn't fit this bundle's 5 KB budget). It installs these hooks:
+// the fetch observer asks it for a traceparent and reports when the request
+// settled, and every event passes through `link` for its trace id. XHR is
+// wrapped by the module itself.
 let tracer: {
 	fetch(url: string, input: RequestInfo | URL, init?: RequestInit): [RequestInit?, string?];
-	xhr(xhr: XMLHttpRequest, url: string): string | undefined;
 	settle(id?: string): void;
 	link(event: BrowserEvent): void;
 } | undefined;
@@ -682,11 +683,10 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
 			const [traced, traceId] = (!isTelemetry && tracer?.fetch(target, input, init)) || [init];
 			return originalFetch(input, traced).then((response) => {
-				if (!isTelemetry) tracer?.settle(traceId);
+				tracer?.settle(traceId);
 				if (!isTelemetry && response.status >= 500) {
 					const event = baseEvent("request_failure", `Request returned ${response.status}`);
 					event.name = path;
-					event.traceId = traceId;
 					event.errorType = "HttpRequestError";
 					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
 					try { addRequestId(event, response.headers.get("x-request-id")); } catch { /* No headers. */ }
@@ -694,11 +694,10 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				}
 				return response;
 			}, (error: unknown) => {
-				if (!isTelemetry) tracer?.settle(traceId);
+				tracer?.settle(traceId);
 				if (!isTelemetry) {
 					const event = baseEvent("request_failure", "Request failed");
 					event.name = path;
-					event.traceId = traceId;
 					event.errorType = "NetworkError";
 					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
 					enqueue(event, true);
@@ -720,14 +719,12 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			if (!target.includes(options.endpoint)) {
 				const started = performance.now();
 				const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
-				const traceId = tracer?.xhr(this, target);
 				let recorded = false;
 				const record = (message: string, errorType: string, requestId?: string | null) => {
 					if (recorded) return;
 					recorded = true;
 					const event = baseEvent("request_failure", message);
 					event.name = path;
-					event.traceId = traceId;
 					event.errorType = errorType;
 					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
 					addRequestId(event, requestId);

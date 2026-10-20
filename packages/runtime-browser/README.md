@@ -114,19 +114,19 @@ page to read it.
 ## Trace propagation (1.6.0, opt-in)
 
 `@autter/runtime-browser/tracing` adds a W3C `traceparent` header
-(`00-<trace id>-<span id>-00`) to the `fetch` and `XMLHttpRequest` requests
-the tracker observes, so the server continues the browser's trace and a
-browser failure links to the server spans and request summary of the same
-request. `@autter/runtime-node` (OpenTelemetry HTTP instrumentation)
-continues it with no setup. It is a separate import because it does not fit
-the main tracker's 5 KB budget (about 0.55 KB more, brotlied):
+(`00-<trace id>-<span id>-00`) to `fetch` and `XMLHttpRequest` requests, so
+the server continues the browser's trace and a browser failure links to the
+server spans and request summary of the same request.
+`@autter/runtime-node` (OpenTelemetry HTTP instrumentation) continues it with
+no setup. It is a separate import because it does not fit the main tracker's
+5 KB budget (about 0.6 KB more, brotlied):
 
 ```ts
 import { initAutterBrowser } from "@autter/runtime-browser";
-import { enableTracing } from "@autter/runtime-browser/tracing";
+import { enableTracePropagation } from "@autter/runtime-browser/tracing";
 
 initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
-enableTracing({
+enableTracePropagation({
   tracePropagationTargets: ["https://api.example.com/", /^https:\/\/[a-z-]+\.internal\.example\.com\//],
 });
 ```
@@ -152,8 +152,11 @@ Rules:
   `remoteParentNotSampled` sampler to your ratio sampler to keep your usual
   rate.
 - The tracker's own `endpoint` (the same-origin relay) never gets a header.
-- Propagation rides on the network observers, so `captureNetworkFailures:
-  false` turns it off too. `disableTracing()` turns it off at runtime.
+- `fetch` is traced through the tracker's network observer, so
+  `captureNetworkFailures: false` turns fetch propagation off;
+  `XMLHttpRequest` is wrapped by the module itself. Call
+  `enableTracePropagation()` before your app sends requests;
+  `disableTracePropagation()` turns it off at runtime.
 
 **CORS for cross-origin APIs.** `traceparent` is not a CORS-safelisted
 header, so a listed cross-origin API gets a preflight (`OPTIONS`) and must
@@ -171,7 +174,7 @@ Only list APIs you control and whose CORS configuration allows it.
 | Function | Notes |
 | --- | --- |
 | `initAutterBrowser(options)` | Installs error, rejection, CSP, and recent-action listeners; sends a session ping |
-| `enableTracing({ tracePropagationTargets? })` | From `@autter/runtime-browser/tracing`: W3C trace propagation, see [Trace propagation](#trace-propagation-160-opt-in) |
+| `enableTracePropagation({ tracePropagationTargets? })` | From `@autter/runtime-browser/tracing`: W3C trace propagation, see [Trace propagation](#trace-propagation-160-opt-in) |
 | `captureException(error, context?)` | Handled errors; fast-flushed; duck-types `code/why/fix/link/expected/requestId` |
 | `autterErrorFromResponse(response)` | `Promise<Error>` from a failed Response's JSON error body (or status text) |
 | `captureMessage(message, severity?, context?)` | Warnings/info without an exception (`"warning"` default); grouped and aggregated like errors |

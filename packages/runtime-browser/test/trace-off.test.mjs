@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { captureException, flush, initAutterBrowser } from "../dist/index.js";
-import { disableTracing, enableTracing } from "../dist/tracing.js";
+import { disableTracePropagation, enableTracePropagation } from "../dist/tracing.js";
 
-// Without `enableTracing()` (or after `disableTracing()`) the tracker adds no
-// traceparent and events carry no trace id (EI-11).
+// Without `enableTracePropagation()` (or after `disableTracePropagation()`)
+// the tracker adds no traceparent and events carry no trace id (EI-11).
 
 const calls = [];
 const sent = [];
@@ -36,10 +36,10 @@ test("no traceparent and no trace ids unless tracing is enabled", async () => {
 	captureException(new Error("after"));
 	assert.deepEqual((await drain()).map((e) => [e.type, e.traceId]), [["request_failure", undefined], ["exception", undefined]]);
 
-	enableTracing();
+	enableTracePropagation();
 	await window.fetch("/api/orders");
 	assert.ok(new Headers(calls[1].init.headers).get("traceparent"));
-	disableTracing();
+	disableTracePropagation();
 	await window.fetch("/api/orders");
 	assert.equal(calls[2].init, undefined);
 	captureException(new Error("after disable"));

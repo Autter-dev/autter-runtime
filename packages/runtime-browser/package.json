@@ -42,7 +42,7 @@
 			"name": "dist/index.js + dist/tracing.js",
 			"import": {
 				"dist/index.js": "{ initAutterBrowser, captureException, captureMessage, captureOutcome, trackEvent, setUser, setContext, flush, autterErrorFromResponse, scrubText, redactContext }",
-				"dist/tracing.js": "{ enableTracing, disableTracing }"
+				"dist/tracing.js": "{ enableTracePropagation, disableTracePropagation }"
 			},
 			"limit": "5.6 KB"
 		}

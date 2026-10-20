@@ -3,15 +3,15 @@
  * failure links to the server trace that served it.
  *
  * Opt-in on purpose: it does not fit the main tracker's 5 KB budget.
- * Importing this module and calling `enableTracing()` turns it on:
+ * Importing this module and calling `enableTracePropagation()` turns it on:
  *
  *   import { initAutterBrowser } from "@autter/runtime-browser";
- *   import { enableTracing } from "@autter/runtime-browser/tracing";
+ *   import { enableTracePropagation } from "@autter/runtime-browser/tracing";
  *   initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web" });
- *   enableTracing({ tracePropagationTargets: ["https://api.example.com/"] });
+ *   enableTracePropagation({ tracePropagationTargets: ["https://api.example.com/"] });
  *
- * Which requests get a header (fetch and XMLHttpRequest, through the
- * tracker's network observers):
+ * Which requests get a header (`fetch` through the tracker's observer,
+ * `XMLHttpRequest` through this module's own wrapper):
  * - same-origin requests, and URLs matching `tracePropagationTargets` (a
  *   string matches as a URL prefix, a RegExp is tested against the URL), get
  *   `traceparent: 00-<trace id>-<span id>-00`. Other cross-origin requests
@@ -32,7 +32,7 @@
 
 import { _useTracing, type BrowserEvent } from "./index";
 
-export interface TracingOptions {
+export interface TracePropagationOptions {
 	/**
 	 * Cross-origin URLs that also get a `traceparent`: a string matches as a
 	 * URL prefix, a RegExp is tested against the full URL. Same-origin
@@ -44,13 +44,16 @@ export interface TracingOptions {
 
 /** How recently a request must have settled for an exception to link to it. */
 export const LINK_WINDOW_MS = 5000;
+/** A request_failure is reported in the same task its request settled in. */
+const FAILURE_WINDOW_MS = 100;
 
 const TP = "traceparent";
-type Xhr = XMLHttpRequest & { __autterTp?: string | null };
+type Xhr = XMLHttpRequest & { __autterUrl?: string; __autterTp?: string | null };
+let enabled = false;
 let targets: (string | RegExp)[] = [];
 /** [trace id, settled at] of the request that settled last, when it was traced. */
 let last: [string, number] | undefined;
-let setHeader: XMLHttpRequest["setRequestHeader"] | undefined;
+let xhrWrapped = false;
 
 /** A new trace id + header for same-origin and target URLs; the app's own traceparent wins. */
 function traceFor(url: string, existing: string | null | undefined, set: (value: string) => void): string | undefined {
@@ -77,7 +80,7 @@ function settle(id?: string): void {
 }
 
 const hooks = {
-	/** The init to send (with a traceparent when one is added) and the request's trace id. */
+	/** From the fetch observer: the init to send and the request's trace id. */
 	fetch(url: string, input: RequestInfo | URL, init?: RequestInit): [RequestInit?, string?] {
 		try {
 			// init.headers replace a Request's own headers, as in fetch itself.
@@ -92,59 +95,74 @@ const hooks = {
 			return [init];
 		}
 	},
-	/** From `send`: adds the header when needed and returns the request's trace id. */
-	xhr(xhr: Xhr, url: string): string | undefined {
-		let id: string | undefined;
-		try {
-			const existing = xhr.__autterTp;
-			xhr.__autterTp = null;
-			id = traceFor(url, existing, (value) => setHeader?.call(xhr, TP, value));
-			// readystatechange(4) fires before load/loadend handlers and the
-			// promise reactions they trigger (axios settles there), so an
-			// error thrown from them still links to this request.
-			xhr.addEventListener("readystatechange", () => {
-				if (xhr.readyState === 4) settle(id);
-			});
-		} catch {
-			// Telemetry must never break the request.
-		}
-		return id;
-	},
 	settle,
-	/** Exceptions and unhandled rejections take the trace of the request that just settled. */
+	/**
+	 * Every event the tracker reports passes here. A request_failure is
+	 * reported right after its request settled; exceptions and unhandled
+	 * rejections take the trace of the request that settled last.
+	 */
 	link(event: BrowserEvent): void {
-		if (
-			last &&
-			!event.traceId &&
-			(event.type === "exception" || event.type === "unhandled_rejection") &&
-			Date.now() - last[1] <= LINK_WINDOW_MS
-		) {
-			event.traceId = last[0];
-		}
+		if (!last || event.traceId) return;
+		const age = Date.now() - last[1];
+		const linked =
+			event.type === "request_failure"
+				? age <= FAILURE_WINDOW_MS
+				: (event.type === "exception" || event.type === "unhandled_rejection") && age <= LINK_WINDOW_MS;
+		if (linked) event.traceId = last[0];
 	},
 };
 
 /**
- * Turn on W3C trace propagation for the tracker's fetch and XHR observers
- * (`captureNetworkFailures`, on by default). Call it once, before or after
- * `initAutterBrowser`; a later call replaces the targets.
+ * XMLHttpRequest: remember the URL (open) and any traceparent the app sets,
+ * add ours at send, and report the request settled at readystatechange(4),
+ * which fires before load/loadend handlers and the promise reactions they
+ * trigger (axios settles there), so an error thrown from them still links.
  */
-export function enableTracing(options: TracingOptions = {}): void {
+function wrapXhr(): void {
+	if (xhrWrapped || typeof XMLHttpRequest === "undefined") return;
+	xhrWrapped = true;
+	const proto = XMLHttpRequest.prototype;
+	const { open, send, setRequestHeader } = proto;
+	proto.open = function (this: Xhr, ...args: unknown[]) {
+		this.__autterUrl = String(args[1] ?? "");
+		this.__autterTp = null;
+		return Reflect.apply(open, this, args);
+	} as typeof proto.open;
+	proto.setRequestHeader = function (this: Xhr, name: string, value: string) {
+		if (String(name).toLowerCase() === TP) this.__autterTp = String(value);
+		return setRequestHeader.call(this, name, value);
+	};
+	proto.send = function (this: Xhr, ...args: Parameters<XMLHttpRequest["send"]>) {
+		if (enabled && this.__autterUrl !== undefined) {
+			try {
+				const id = traceFor(this.__autterUrl, this.__autterTp, (value) => setRequestHeader.call(this, TP, value));
+				this.addEventListener("readystatechange", () => {
+					if (this.readyState === 4) settle(id);
+				});
+			} catch {
+				// Telemetry must never break the request.
+			}
+		}
+		return Reflect.apply(send, this, args);
+	};
+}
+
+/**
+ * Turn on W3C trace propagation for fetch (through the tracker's network
+ * observer, `captureNetworkFailures`, on by default) and XMLHttpRequest.
+ * Call it once, before or after `initAutterBrowser`; a later call replaces
+ * the targets.
+ */
+export function enableTracePropagation(options: TracePropagationOptions = {}): void {
 	targets = Array.isArray(options.tracePropagationTargets) ? options.tracePropagationTargets : [];
-	if (!setHeader && typeof XMLHttpRequest !== "undefined") {
-		// Remember a traceparent the app sets on an XHR, so it is never overwritten.
-		const original = XMLHttpRequest.prototype.setRequestHeader;
-		setHeader = original;
-		XMLHttpRequest.prototype.setRequestHeader = function (this: Xhr, name: string, value: string) {
-			if (String(name).toLowerCase() === TP) this.__autterTp = String(value);
-			return original.call(this, name, value);
-		};
-	}
+	enabled = true;
+	wrapXhr();
 	_useTracing(hooks as Parameters<typeof _useTracing>[0]);
 }
 
 /** Turn propagation off again (tests, or an app that starts its own tracing). */
-export function disableTracing(): void {
-	_useTracing(undefined);
+export function disableTracePropagation(): void {
+	enabled = false;
 	last = undefined;
+	_useTracing(undefined);
 }

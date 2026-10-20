@@ -9,8 +9,8 @@ same-origin relay route, and a React error boundary.
 npm install @autter/runtime-next
 ```
 
-Set `AUTTER_RUNTIME_KEY` in your environment. Then one line of
-`next.config` and three small files.
+Set `AUTTER_RUNTIME_KEY` in your environment. Then three small files, and
+(recommended) one line of `next.config`.
 
 The package has two entry points — this split is what keeps the Node
 OpenTelemetry SDK out of your browser bundle:
@@ -22,8 +22,8 @@ OpenTelemetry SDK out of your browser bundle:
 - `@autter/runtime-next/instrumentation` — `onRequestError` for
   `instrumentation.ts`; safe on both the Node and edge runtimes.
 
-**`next.config`** — one copy of the Node SDK for `instrumentation.ts` and
-your routes:
+**`next.config`** (recommended) — load the Node SDK from `node_modules`
+instead of bundling it:
 
 ```js
 // next.config.mjs
@@ -33,12 +33,16 @@ export default {
 ```
 
 Next bundles server dependencies separately into `instrumentation.ts` and
-into each route. Without this line, code in routes, server components and
-server actions (`withRuntimeRequest`, `captureServerException`,
-`runtimeLogger`, `runtimeContext`, …) reaches a copy of the SDK that
-`registerAutter` never started: request summaries are printed to the
-console instead of being exported, and an error `withRuntimeRequest`
-reports is reported a second time by `onRequestError`. Next 14.2:
+into the route bundles. Since 1.6.1 every copy shares the SDK
+`registerAutter` started, so routes, server components and server actions
+(`withRuntimeRequest`, `captureServerException`, `runtimeLogger`,
+`runtimeContext`, …) export through it, and an error `withRuntimeRequest`
+reported is not reported again by `onRequestError`, with or without this
+line. The line keeps the SDK and its OpenTelemetry
+dependencies out of the route bundles: in our Next 15.5 and 16.4 test app
+the server output had 1.1 to 2.3 MB less JavaScript. (1.6.0 needed it:
+without it, request summaries went to the console and errors were reported
+twice.) Next 14.2:
 `experimental: { serverComponentsExternalPackages: ["@autter/runtime-node"] }`.
 
 **1. `instrumentation.ts`** — server tracing/errors:

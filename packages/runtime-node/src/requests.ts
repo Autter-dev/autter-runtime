@@ -23,6 +23,7 @@ import {
 	reportExplicitFailure,
 	type OperationState,
 } from "./logger.js";
+import { sharedSlot } from "./shared.js";
 
 /**
  * Request wide events: one `kind: "request"` summary per HTTP request with
@@ -34,7 +35,13 @@ import {
 
 const REQUEST_STATE = Symbol.for("autter.runtime.request");
 const BOUND = Symbol.for("autter.runtime.bound");
-const CAPTURED = new WeakSet<object>();
+/**
+ * Errors already reported, by any copy of this package in the process (see
+ * shared.ts): an error a route's copy reported is skipped by the copy Next's
+ * `onRequestError` runs in. A WeakSet keyed by identity, so it also marks
+ * errors from another realm (Next's edge sandbox) and frozen errors.
+ */
+const CAPTURED = sharedSlot("requests", () => ({ captured: new WeakSet<object>() })).captured;
 
 type ExceptionCapturer = (error: unknown, attributes?: Attributes) => void;
 let capturer: ExceptionCapturer = () => {};

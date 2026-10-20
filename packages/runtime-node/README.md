@@ -383,6 +383,20 @@ This closes the server-side gap to match the browser relay's payload
 whitelist; it is best-effort scrubbing of obvious PII shapes, not a DLP
 engine — keep secrets out of attributes in the first place.
 
+### One SDK per process, however many copies are loaded
+
+Bundlers can load this package more than once: Next.js bundles one copy
+into `instrumentation.ts` and another into each route (unless it is in
+`serverExternalPackages`), and a process can load both the ESM and the CJS
+build. Since 1.6.1 every copy shares one process-wide state
+(`globalThis[Symbol.for("@autter/runtime-node")]`): the copy that ran
+`initAutterServer` (or `initAutterLogging`) is the SDK for all of them, so
+`withRuntimeRequest`, `captureException`, `runtimeLogger` and the rest export
+through it from any copy, and an error one copy reported is never reported
+again by another. Before any copy starts, and after `shutdown()`, every copy
+behaves as before: records go to the console. The shared object is
+versioned; a copy that finds a layout it does not know keeps its own state.
+
 ## 3. LLM tracing
 
 For the field contract, manual reporting patterns, and provider-agnostic

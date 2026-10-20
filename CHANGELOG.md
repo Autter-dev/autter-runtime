@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Packages: `runtime-node`, `runtime-next` (docs only). No ingester change.
+
+### Fixes
+
+- One SDK per process, however many copies of `@autter/runtime-node` are loaded. Next.js bundles a separate copy into `instrumentation.ts` and into each route, so code in routes, server components and server actions (`withRuntimeRequest`, `captureServerException`, `runtimeLogger`, `runtimeContext`, `captureRequestError`, …) used a copy `registerAutter` never started: request summaries went to the console instead of the ingester, and errors `withRuntimeRequest` reported were reported again by `onRequestError`. The started SDK (tracker, always-on exporter, redactor, logger configuration and sinks, the current request, the already-reported marks, breadcrumbs, the compatibility check) now lives on `globalThis[Symbol.for("@autter/runtime-node")]`, and every copy reads and writes it, including the ESM and CJS builds loaded in one process. The object has a layout version (`v: 1`) to which fields are only ever added; a copy that finds a layout it does not know keeps its own state. `shutdown()` clears it, and before any copy starts every copy still prints to the console. `serverExternalPackages: ["@autter/runtime-node"]` is no longer needed for correctness (checked with Next 15.5 and 16.4, webpack and Turbopack); it stays recommended because it keeps the SDK out of the route bundles (`runtime-node`, `runtime-next`).
+
 ## [1.6.0] - 2026-10-21
 
 Packages: `otlp-ingester` 1.6.0, `runtime-node` 1.6.0, `runtime-next` 1.6.0, `runtime-browser` 1.6.0, `runtime-edge` 1.1.0, new `runtime-cli` 1.0.0. Additive: every new field is optional and older ingesters ignore it. Deploy otlp-ingester 1.6.0 first (migrations 0016–0017 run at boot), then SDKs.

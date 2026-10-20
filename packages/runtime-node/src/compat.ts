@@ -16,6 +16,7 @@ import {
 } from "../../otlp-ingester/src/compat.js";
 import pkg from "../package.json" with { type: "json" };
 import { debugLog } from "./lifecycle.js";
+import { sharedSlot } from "./shared.js";
 
 export {
 	COMPAT_MANIFEST,
@@ -187,7 +188,10 @@ function envDisabled(): boolean {
 
 const defaultWarn = (message: string) => console.warn(`[autter-runtime] ${message}`);
 
-let state: CompatState = freshState(null, false);
+/** One check per process, shared by every copy of this package (see
+ * shared.ts): features a route's copy uses are checked against the ingester
+ * the started copy configured. */
+const compat = sharedSlot("compat", () => ({ state: freshState(null, false) as CompatState }));
 
 function freshState(endpoint: string | null, enabled: boolean, sdk = SDK_IDENTITY, warn = defaultWarn): CompatState {
 	return {
@@ -210,7 +214,7 @@ export function configureCompatCheck(options: {
 	sdk?: SdkIdentity;
 	warn?: (message: string) => void;
 }): void {
-	state = freshState(
+	compat.state = freshState(
 		options.endpoint.replace(/\/$/, ""),
 		options.enabled !== false && !envDisabled(),
 		options.sdk ?? SDK_IDENTITY,
@@ -221,28 +225,28 @@ export function configureCompatCheck(options: {
 /** Relay-only processes (no initAutterServer): check against the relay's
  * ingester. A no-op once initAutterServer configured the check. */
 export function ensureCompatConfigured(endpoint: string): void {
-	if (state.endpoint === null && !envDisabled()) {
-		state = freshState(endpoint.replace(/\/$/, ""), true);
+	if (compat.state.endpoint === null && !envDisabled()) {
+		compat.state = freshState(endpoint.replace(/\/$/, ""), true);
 	}
 }
 
 /** Test hook: back to the unconfigured, disabled state. */
 export function resetCompatCheck(): void {
-	state = freshState(null, false);
+	compat.state = freshState(null, false);
 }
 
 /** A feature is in use. Starts the one-time check if needed. Never throws. */
 export function noteCompatFeature(id: string): void {
 	try {
-		if (!state.enabled || state.features.has(id) || !featureById(id)) return;
-		state.features.add(id);
-		if (state.info) {
+		if (!compat.state.enabled || compat.state.features.has(id) || !featureById(id)) return;
+		compat.state.features.add(id);
+		if (compat.state.info) {
 			evaluateAndWarn();
 			return;
 		}
-		if (state.started) return;
-		state.started = true;
-		const current = state;
+		if (compat.state.started) return;
+		compat.state.started = true;
+		const current = compat.state;
 		// Deferred and unref'd: never on the init call path.
 		setTimeout(() => void runCheck(current), 0).unref();
 	} catch {
@@ -256,7 +260,7 @@ async function runCheck(current: CompatState): Promise<void> {
 		const { info, error } = await fetchIngesterCompat(current.endpoint, {
 			probeRoutes: routesFor(current.features),
 		});
-		if (state !== current) return; // reconfigured meanwhile
+		if (compat.state !== current) return; // reconfigured meanwhile
 		if (!info) {
 			debugLog(`compat check skipped: ${error ?? "ingester version unknown"}`);
 			return;
@@ -284,8 +288,8 @@ function routesFor(features: Iterable<string>): string[] {
 }
 
 function mergeInfo(next: IngesterCompatInfo): void {
-	const prev = state.info;
-	state.info = {
+	const prev = compat.state.info;
+	compat.state.info = {
 		version: next.version ?? prev?.version ?? null,
 		...(next.legacy || prev?.legacy ? { legacy: true } : {}),
 		...(next.schema ?? prev?.schema ? { schema: (next.schema ?? prev?.schema)! } : {}),
@@ -294,19 +298,19 @@ function mergeInfo(next: IngesterCompatInfo): void {
 }
 
 function evaluateAndWarn(): void {
-	const info = state.info;
+	const info = compat.state.info;
 	if (!info) return;
 	// Legacy ingester + a newly used feature with an unprobed route: probe it.
-	if (info.version === null && state.endpoint) {
-		const unprobed = routesFor(state.features).filter(
-			(route) => info.routes?.[route] === undefined && !state.pendingProbes.has(route),
+	if (info.version === null && compat.state.endpoint) {
+		const unprobed = routesFor(compat.state.features).filter(
+			(route) => info.routes?.[route] === undefined && !compat.state.pendingProbes.has(route),
 		);
 		if (unprobed.length) {
-			const current = state;
+			const current = compat.state;
 			for (const route of unprobed) current.pendingProbes.add(route);
 			void Promise.all(unprobed.map((route) => probeRoute(current.endpoint!, route, {}).then((exists) => [route, exists] as const)))
 				.then((results) => {
-					if (state !== current) return;
+					if (compat.state !== current) return;
 					const routes: Record<string, boolean> = {};
 					for (const [route, exists] of results) if (exists !== null) routes[route] = exists;
 					mergeInfo({ version: null, legacy: true, routes });
@@ -315,17 +319,17 @@ function evaluateAndWarn(): void {
 				.catch(() => {});
 		}
 	}
-	for (const issue of evaluateCompat({ features: state.features, ingester: info })) {
+	for (const issue of evaluateCompat({ features: compat.state.features, ingester: info })) {
 		warnOnce(issue);
 	}
 }
 
 function warnOnce(issue: CompatIssue): void {
 	const key = `${issue.feature}:${issue.kind}`;
-	if (state.warned.has(key)) return;
-	state.warned.add(key);
+	if (compat.state.warned.has(key)) return;
+	compat.state.warned.add(key);
 	try {
-		state.warn(issue.message);
+		compat.state.warn(issue.message);
 	} catch {
 		// a throwing custom logger must not break telemetry
 	}
@@ -342,16 +346,16 @@ export function observeIngesterResponse(response: {
 	route?: string;
 }): void {
 	try {
-		if (!state.enabled) return;
+		if (!compat.state.enabled) return;
 		const fromHeader = headerInfo(response.headers);
 		if (fromHeader) {
-			if (state.info?.version !== fromHeader.version) {
+			if (compat.state.info?.version !== fromHeader.version) {
 				mergeInfo(fromHeader);
 				evaluateAndWarn();
 			}
 			return;
 		}
-		if (response.status === 404 && response.route && !state.info?.version) {
+		if (response.status === 404 && response.route && !compat.state.info?.version) {
 			mergeInfo({ version: null, legacy: true, routes: { [response.route]: false } });
 			evaluateAndWarn();
 		}
@@ -368,16 +372,16 @@ export function observeIngesterResponse(response: {
  */
 export function noteRelayRejection(eventTypes: Iterable<string>, status: number, headers: Headers): string[] {
 	try {
-		if (!state.enabled || status !== 400 || headerInfo(headers)) return [];
+		if (!compat.state.enabled || status !== 400 || headerInfo(headers)) return [];
 		const named: string[] = [];
 		for (const id of featuresForBrowserEvents(eventTypes)) {
 			const feature = featureById(id)!;
 			const key = `${id}:relay_rejected`;
-			if (state.warned.has(key)) continue;
-			state.warned.add(key);
+			if (compat.state.warned.has(key)) continue;
+			compat.state.warned.add(key);
 			named.push(id);
 			try {
-				state.warn(
+				compat.state.warn(
 					`The ingester rejected a browser batch containing ${feature.title.toLowerCase()} events. ` +
 						`${feature.title} needs ingester >= ${feature.ingester}; yours is 1.4.0 or older (it predates version reporting), ` +
 						`so those batches are dropped. ${ingesterUpgradeHint(COMPAT_MANIFEST)}`,
@@ -400,9 +404,9 @@ export function compatCheckState(): {
 	warned: string[];
 } {
 	return {
-		enabled: state.enabled,
-		features: [...state.features],
-		info: state.info,
-		warned: [...state.warned],
+		enabled: compat.state.enabled,
+		features: [...compat.state.features],
+		info: compat.state.info,
+		warned: [...compat.state.warned],
 	};
 }

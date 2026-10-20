@@ -35,6 +35,7 @@ import {
 	type RuntimeOutcome,
 } from "@autter/runtime-core";
 import { redactAttributes } from "./redact.js";
+import { sharedSlot } from "./shared.js";
 import { recordLogBreadcrumb, rememberThrownBreadcrumbs } from "./breadcrumbs.js";
 import {
 	consoleSink,
@@ -169,15 +170,33 @@ export interface LoggerConfig {
 	captureThrown?(error: unknown): void;
 }
 
+/**
+ * Logger state of the started SDK, shared by every copy of this package in
+ * the process (see shared.ts): the operation store, so a request one copy
+ * started is the current operation in all of them; the configuration and
+ * sinks `initAutterServer` / `initAutterLogging` installed, so records from
+ * any copy are exported; and test sinks from `captureRuntime()`.
+ */
+interface LoggerSlot {
+	local: AsyncLocalStorage<OperationState>;
+	config: LoggerConfig | null;
+	sinks: RuntimeSink[];
+	extraSinks: Set<RuntimeSink>;
+}
+const shared = sharedSlot<LoggerSlot>("logger", () => ({
+	local: new AsyncLocalStorage<OperationState>(),
+	config: null,
+	sinks: [],
+	extraSinks: new Set(),
+}));
 /** @internal */
-export const local = new AsyncLocalStorage<OperationState>();
-let config: LoggerConfig | null = null;
-let sinks: RuntimeSink[] = [];
-const extraSinks = new Set<RuntimeSink>();
+export const local = shared.local;
+const extraSinks = shared.extraSinks;
+/** Console output when nothing is configured: per copy, like 1.6.0. */
 let fallbackConsole: RuntimeSink | null = null;
 
 function redact(attributes: Attributes): Attributes {
-	return config?.redact(attributes) ?? redactAttributes(attributes);
+	return shared.config?.redact(attributes) ?? redactAttributes(attributes);
 }
 const safe = (attributes: RuntimeLogContext = {}) =>
 	boundContext(attributes, redact);
@@ -185,7 +204,7 @@ const merge = (current: RuntimeLogContext, next?: RuntimeLogContext) =>
 	mergeContext(current, next, redact);
 
 function activeSinks(): RuntimeSink[] {
-	if (config) return extraSinks.size ? [...sinks, ...extraSinks] : sinks;
+	if (shared.config) return extraSinks.size ? [...shared.sinks, ...extraSinks] : shared.sinks;
 	if (extraSinks.size) return [...extraSinks];
 	fallbackConsole ??= consoleSink();
 	return [fallbackConsole];
@@ -255,10 +274,10 @@ function emit(
 	if (!summary) recordLogBreadcrumb(level, message, attributes, state);
 	if (
 		!summary &&
-		LEVEL_SEVERITY[level] < LEVEL_SEVERITY[config?.options?.minLevel ?? "debug"]
+		LEVEL_SEVERITY[level] < LEVEL_SEVERITY[shared.config?.options?.minLevel ?? "debug"]
 	)
 		return;
-	if (!summary && state && config?.options?.inline !== false) {
+	if (!summary && state && shared.config?.options?.inline !== false) {
 		const { "exception.stacktrace": _stack, ...inlineAttrs } = userContext(
 			attributes,
 			redact,
@@ -278,7 +297,7 @@ function emit(
 		...operationAttributes(state),
 		...user,
 	};
-	const enrichers = config?.options?.enrich;
+	const enrichers = shared.config?.options?.enrich;
 	if (summary && state && enrichers?.length) {
 		const event: RuntimeEnrichEvent = { level, message, attributes: raw };
 		for (const enrich of enrichers) {
@@ -310,9 +329,9 @@ function emit(
 
 /** @internal */
 export function configureRuntimeLogger(next: LoggerConfig): void {
-	config = next;
-	sinks = defaultSinks(next);
-	for (const sink of sinks) {
+	shared.config = next;
+	shared.sinks = defaultSinks(next);
+	for (const sink of shared.sinks) {
 		try {
 			sink.start?.({
 				endpoint: next.endpoint,
@@ -329,7 +348,7 @@ export function configureRuntimeLogger(next: LoggerConfig): void {
 }
 /** @internal */
 export function loggerConfigured(): LoggerConfig | null {
-	return config;
+	return shared.config;
 }
 /** @internal Register a sink for every record regardless of configuration (testing). */
 export function addRuntimeSink(sink: RuntimeSink): () => void {
@@ -338,7 +357,7 @@ export function addRuntimeSink(sink: RuntimeSink): () => void {
 }
 /** @internal Forward a captured exception to sinks that observe them. */
 export function notifyException(error: unknown, attributes: Record<string, unknown> = {}): void {
-	if (!extraSinks.size && !sinks.some((sink) => sink.exception)) return;
+	if (!extraSinks.size && !shared.sinks.some((sink) => sink.exception)) return;
 	const state = local.getStore();
 	const record: CapturedException = {
 		time: Date.now(),
@@ -349,7 +368,7 @@ export function notifyException(error: unknown, attributes: Record<string, unkno
 		...(state ? { operationId: state.id } : {}),
 		...(state?.requestId ? { requestId: state.requestId } : {}),
 	};
-	for (const sink of [...sinks, ...extraSinks]) {
+	for (const sink of [...shared.sinks, ...extraSinks]) {
 		try {
 			sink.exception?.(record);
 		} catch {
@@ -360,26 +379,26 @@ export function notifyException(error: unknown, attributes: Record<string, unkno
 
 export function runtimeLogStats(): { buffered: number; dropped: number } {
 	return {
-		buffered: sinks.reduce((sum, sink) => sum + (sink.buffered?.() ?? 0), 0),
+		buffered: shared.sinks.reduce((sum, sink) => sum + (sink.buffered?.() ?? 0), 0),
 		dropped: sinkStats.dropped,
 	};
 }
 export async function flushRuntimeLogs(): Promise<void> {
-	if (!config) return;
+	if (!shared.config) return;
 	const results = await Promise.allSettled(
-		sinks.map((sink) => Promise.resolve().then(() => sink.flush?.())),
+		shared.sinks.map((sink) => Promise.resolve().then(() => sink.flush?.())),
 	);
 	const failed = results.find((result) => result.status === "rejected");
 	if (failed) throw (failed as PromiseRejectedResult).reason;
 }
 /** @internal */
 export async function shutdownRuntimeLogger(): Promise<void> {
-	const active = sinks;
+	const active = shared.sinks;
 	const results = await Promise.allSettled(
 		active.map((sink) => Promise.resolve().then(() => sink.shutdown?.())),
 	);
-	config = null;
-	sinks = [];
+	shared.config = null;
+	shared.sinks = [];
 	const failed = results.find((result) => result.status === "rejected");
 	if (failed) throw (failed as PromiseRejectedResult).reason;
 }
@@ -604,7 +623,7 @@ export function emitSummary(
 /** @internal Outcome reported via `outcome("failed")` without an exception. */
 export function reportExplicitFailure(state: OperationState): void {
 	if (state.outcome === "failed" && state.explicitOutcome && !state.errorThrown)
-		config?.reportOutcome(state.name, state.message ?? "Operation failed", {
+		shared.config?.reportOutcome(state.name, state.message ?? "Operation failed", {
 			...traceAttributes(state),
 			"autter.outcome.stack": state.reportingStack ?? "",
 		});
@@ -656,7 +675,7 @@ function startOperation<T>(
 				thrown = error;
 				noteOperationError(error, true, state);
 				rememberThrownBreadcrumbs(error, state);
-				config?.captureThrown?.(error);
+				shared.config?.captureThrown?.(error);
 				throw error;
 			} finally {
 				trace.getActiveSpan()?.setAttributes({
@@ -665,7 +684,7 @@ function startOperation<T>(
 					"autter.operation.kind": state.kind,
 				});
 				if (state.outcome === "failed" && !thrown)
-					config?.reportOutcome(
+					shared.config?.reportOutcome(
 						state.name,
 						state.message ?? "Operation failed",
 						{
@@ -688,8 +707,8 @@ function startOperation<T>(
 				},
 			]
 		: [];
-	const promise = config?.run
-		? config.run(state.name, run, traceAttributes(state), links)
+	const promise = shared.config?.run
+		? shared.config.run(state.name, run, traceAttributes(state), links)
 		: run();
 	if (!options.waitUntil) return promise;
 	const waitUntil = options.waitUntil;

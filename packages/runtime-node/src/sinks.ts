@@ -14,6 +14,7 @@ import {
 	type RuntimeEvent,
 } from "@autter/runtime-core";
 import { noteCompatFeature, observeIngesterResponse } from "./compat.js";
+import { sharedSlot } from "./shared.js";
 
 /**
  * Where runtime records go. The logger pipeline is
@@ -54,8 +55,9 @@ export interface CapturedException {
 	requestId?: string;
 }
 
-/** Cumulative drop counter shared by every sink (runtimeLogStats().dropped). */
-export const sinkStats = { dropped: 0 };
+/** Cumulative drop counter shared by every sink (runtimeLogStats().dropped),
+ * in every copy of this package in the process (see shared.ts). */
+export const sinkStats = sharedSlot("sinks", () => ({ dropped: 0 }));
 
 // ---------------------------------------------------------------------------
 // OTLP

@@ -24,6 +24,18 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # npm answers a publish it refuses with E404, so name the account the
+      # token signs in as before building: an expired token, or one from an
+      # account without write access to @autter, fails here with a clear error.
+      - name: Check the npm token
+        run: |
+          user=$(npm whoami) || { echo "::error::NPM_TOKEN is invalid or expired (npm whoami failed)"; exit 1; }
+          echo "NPM_TOKEN signs in as npm user: $user"
+          if ! npm access list collaborators @autter/runtime-browser 2>/dev/null | grep -q "$user"; then
+            echo "::warning::npm user $user is not a collaborator on @autter/runtime-browser; publishes will fail with E404"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: npm install
       - run: npm run build
       - run: npm run size -w @autter/runtime-browser

@@ -16,6 +16,12 @@ import { browserPayloadSchema } from "./normalize-browser.js";
 const ALL = MIGRATIONS.map((m) => m.id);
 const pkgVersion = (dir: string) =>
 	(JSON.parse(readFileSync(new URL(`../../${dir}/package.json`, import.meta.url), "utf8")) as { version: string }).version;
+/** CHANGELOG "## Unreleased": features it names (`id`) ship in the next
+ * release and may require versions the packages reach only at its bump. */
+const unreleased =
+	readFileSync(new URL("../../../CHANGELOG.md", import.meta.url), "utf8")
+		.split(/^## /m)
+		.find((section) => section.startsWith("Unreleased")) ?? "";
 
 test("version comparison handles v-prefixes, prereleases and junk", () => {
 	assert.equal(compareVersions("1.4.0", "1.4.0"), 0);
@@ -33,12 +39,13 @@ test("manifest is consistent with migrations, routes and released package versio
 	for (const feature of COMPAT_MANIFEST.features) {
 		assert.ok(!ids.has(feature.id), `duplicate ${feature.id}`);
 		ids.add(feature.id);
-		assert.ok(compareVersions(feature.ingester, pkgVersion("otlp-ingester"))! <= 0, `${feature.id}: ingester ${feature.ingester} is unreleased`);
+		const pending = unreleased.includes(`\`${feature.id}\``);
+		assert.ok(pending || compareVersions(feature.ingester, pkgVersion("otlp-ingester"))! <= 0, `${feature.id}: ingester ${feature.ingester} is unreleased`);
 		for (const migration of feature.migrations) assert.ok(ALL.includes(migration), `${feature.id}: unknown migration ${migration}`);
 		if (feature.route) assert.ok(server.includes(`app.post("${feature.route}"`), `${feature.id}: no route ${feature.route}`);
 		for (const [pkg, min] of Object.entries(feature.sdks)) {
 			const dir = pkg.replace("@autter/", "");
-			assert.ok(compareVersions(min, pkgVersion(dir))! <= 0, `${feature.id}: ${pkg} ${min} is unreleased`);
+			assert.ok(pending || compareVersions(min, pkgVersion(dir))! <= 0, `${feature.id}: ${pkg} ${min} is unreleased`);
 		}
 		for (const type of feature.browserEvents ?? []) {
 			const parsed = browserPayloadSchema.safeParse({
@@ -125,11 +132,13 @@ test("compat report marks availability from version and schema state, and round-
 	assert.equal(logs.ingesterSupported, true);
 	assert.equal(logs.available, false);
 	assert.equal(pending.features.find((f) => f.id === "csp_violations")!.available, true);
-	const ready = buildCompatReport({ version: "1.5.0", schemaStatus: "ready", applied: ALL, allMigrations: ALL });
+	// The newest ingester any feature needs (an unreleased one may be ahead of package.json).
+	const newest = COMPAT_MANIFEST.features.map((f) => f.ingester).sort((a, b) => compareVersions(a, b)!).at(-1)!;
+	const ready = buildCompatReport({ version: newest, schemaStatus: "ready", applied: ALL, allMigrations: ALL });
 	assert.equal(ready.schema.level, ALL[ALL.length - 1]);
 	assert.ok(ready.features.every((f) => f.available));
 	assert.deepEqual(ingesterInfoFromReport(JSON.parse(JSON.stringify(ready))), {
-		version: "1.5.0",
+		version: newest,
 		schema: { status: "ready", applied: ALL },
 	});
 	assert.equal(ingesterInfoFromReport({ ingester: { version: "<script>" } }), null);

@@ -91,3 +91,17 @@ export {
 	CODE_FINGERPRINT_SCHEME,
 	codeFingerprint,
 } from "./fingerprint-code.js";
+export {
+	BREADCRUMBS_ATTRIBUTE,
+	BREADCRUMBS_ATTRIBUTE_MAX_CHARS,
+	MAX_BREADCRUMBS,
+	BreadcrumbTrail,
+	breadcrumbsAttribute,
+	normalizeBreadcrumb,
+	sanitizeBreadcrumbs,
+	type Breadcrumb,
+	type BreadcrumbInput,
+	type BreadcrumbLevel,
+	type BreadcrumbRedactor,
+	type BreadcrumbType,
+} from "./breadcrumbs.js";

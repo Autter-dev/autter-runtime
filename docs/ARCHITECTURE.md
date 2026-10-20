@@ -365,6 +365,14 @@ payload stays `version: 1`; older consumers ignore unknown keys):
 when unknown; they are now left out instead. Occurrences promoted from
 `/v1/logs` arrive through the same payload.
 
+1.6.0 adds the optional `breadcrumbs`: the steps before the error, oldest
+first, at most 30, each `{ type, at, level?, message, data? }` (`type` is
+`console` | `request` | `navigation` | `click` | `log` | `custom`). They come
+from browser events' `breadcrumbs` or the server exception event's
+`autter.breadcrumbs` attribute, are validated, bounded (500-character
+messages, 10 primitive data keys, 16 KB) and scrubbed, and are stored under
+`autter.breadcrumbs` in the occurrence's `attributes` JSON.
+
 Batches also carry `metrics` (1-minute usage rollup points) and `llmCalls`
 (per-call LLM usage — provider, model, tokens, `costUsd`, `costSource`,
 `userId`, `status`, `startedAt`) whenever the ingest produced them — same

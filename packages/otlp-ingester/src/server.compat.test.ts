@@ -150,11 +150,13 @@ test("ingest responses carry the version header; SDK versions are recorded once 
 
 		const compat = (await (await fetch(`${url}/v1/compat`)).json()) as {
 			schema: { status: string; applied: string[] };
-			features: Array<{ available: boolean }>;
+			features: Array<{ available: boolean; ingesterSupported: boolean }>;
 		};
 		assert.equal(compat.schema.status, "ready");
 		assert.equal(compat.schema.applied.length, MIGRATIONS.length);
-		assert.ok(compat.features.every((f) => f.available));
+		// Every feature this version supports (an unreleased one may need the next version).
+		assert.ok(compat.features.every((f) => f.available || !f.ingesterSupported));
+		assert.ok(compat.features.some((f) => f.available));
 
 		// Browser payloads: `sdk` is recorded; an invalid value is ignored, not rejected.
 		const browser = (sdk: string) =>

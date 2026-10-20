@@ -295,6 +295,15 @@ errors and `autterErrorFromResponse`) and `autter.request.id` (the
 `x-request-id` header of a failed fetch/XHR). Each is validated on its own; a
 malformed value is dropped without rejecting the payload.
 
+runtime-browser ≥1.6.0 with `@autter/runtime-browser/tracing` adds a
+per-event `traceId`: the W3C trace id of the `traceparent` its request sent
+(`request_failure`), or of the request that just settled (`exception`,
+`unhandled_rejection`). It must be 32 lowercase hex and
+not all zeros, or it is dropped on its own; it is stored as the occurrence's
+`trace_id`, so a browser occurrence joins the server spans of the same trace.
+Browser occurrences never count as duplicates in the `/v1/logs` promotion
+dedupe (a server error on the same trace is still promoted).
+
 Event types: `exception`, `unhandled_rejection`, `session_start`, and
 `track_event` (carries a `name`; counted into `runtime_metrics_1m` as
 `request_count` on the synthetic route `event:<name>` — coarse usage

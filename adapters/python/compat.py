@@ -174,6 +174,17 @@ MANIFEST: dict[str, Any] = json.loads(
                 "@autter/runtime-browser": "1.4.0",
                 "@autter/runtime-edge": "1.0.0"
             }
+        },
+        {
+            "id": "browser_trace_propagation",
+            "title": "Browser trace propagation (browser errors linked to server traces)",
+            "ingester": "1.6.0",
+            "migrations": [],
+            "sdks": {
+                "@autter/runtime-browser": "1.6.0",
+                "@autter/runtime-next": "1.6.0",
+                "@autter/runtime-node": "1.6.0"
+            }
         }
     ]
 }

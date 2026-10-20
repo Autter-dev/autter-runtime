@@ -53,6 +53,12 @@ const browserEventSchema = z.object({
 	 * instead of rejecting the whole beacon.
 	 */
 	context: z.record(z.unknown()).optional(),
+	/**
+	 * runtime-browser ≥1.6.0: W3C trace id of the request behind the event
+	 * (the `traceparent` it sent), joining it to the server trace. A malformed
+	 * id is dropped on its own instead of rejecting the beacon.
+	 */
+	traceId: z.string().regex(/^(?!0{32})[0-9a-f]{32}$/).optional().catch(undefined),
 });
 
 export const browserPayloadSchema = z.object({
@@ -196,7 +202,7 @@ export function normalizeBrowserPayload(
 			route: event.route ? (event.route.split("?")[0] ?? null) : null,
 			method: null,
 			statusCode: null,
-			traceId: null,
+			traceId: event.traceId ?? null,
 			sessionId: payload.sessionId ?? null,
 			attributes: {
 				...(event.filename ? { filename: event.filename.split("?")[0] } : {}),

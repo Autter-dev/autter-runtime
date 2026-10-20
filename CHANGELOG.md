@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Browser errors link to server traces (EI-11). New opt-in `@autter/runtime-browser/tracing` (`enableTracing({ tracePropagationTargets })`, about 0.55 KB brotlied; the main bundle grows by about 70 B of hooks): same-origin `fetch` and XHR requests, and URLs matching `tracePropagationTargets`, carry an unsampled W3C `traceparent`; an existing `traceparent` is never overwritten and the tracker's own endpoint never gets one. `request_failure` events carry their request's `traceId`; an exception or unhandled rejection carries the trace id of the request that finished or failed in the previous 5 s, when that request was traced (`runtime-browser`). The relay forwards a valid `traceId` (`runtime-node`). Unsampled remote parents are head-sampled at the service's own `traceSampleRate` instead of never, so browser-initiated requests keep their usual sampling (`runtime-node`). `/v1/browser` accepts a 32-hex `traceId` per event and stores it as the occurrence's `trace_id` (sink `traceId`); a malformed one is dropped on its own. Browser occurrences no longer count as duplicates in the `/v1/logs` promotion dedupe (`otlp-ingester`). New compat feature `browser_trace_propagation` (ingester 1.6.0).
+
 ## [1.5.0] - 2026-10-08
 
 Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `runtime-browser` 1.4.0, new `runtime-edge` 1.0.0. Additive: 1.4.0 code keeps working unchanged (golden-tested).

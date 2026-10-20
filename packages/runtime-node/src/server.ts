@@ -841,8 +841,15 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		"autter.metrics_wired": true,
 	});
 
+	const rootSampler = new TraceIdRatioBasedSampler(options.traceSampleRate ?? 0.01);
 	const headSampler = new ParentBasedSampler({
-		root: new TraceIdRatioBasedSampler(options.traceSampleRate ?? 0.01),
+		root: rootSampler,
+		// Browsers (runtime-browser's traceparent) send unsampled parents: they
+		// make no sampling decision. Apply this service's own rate to such
+		// requests instead of never head-sampling them. The ratio sampler is
+		// deterministic by trace id, so services sharing a rate still agree
+		// with an upstream service that chose not to sample.
+		remoteParentNotSampled: rootSampler,
 	});
 	const retainOnError = options.retainTracesOnError !== false;
 	const slowThresholdMs = Number.isFinite(options.retainTracesAboveMs)

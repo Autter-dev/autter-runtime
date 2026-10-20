@@ -4,7 +4,7 @@ import {
 	type Attributes,
 	type Span,
 } from "@opentelemetry/api";
-import { errorAttributes, fingerprintEventAttributes, splitFingerprint } from "@autter/runtime-core";
+import { errorAttributes, fingerprintEventAttributes, isError, splitFingerprint } from "@autter/runtime-core";
 import {
 	captureExceptionAsLog,
 	configureRuntimeLogger,
@@ -116,7 +116,7 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 			notifyException(error, { ...redacted, ...fingerprint });
 			span.setAttributes({ "autter.severity": "error", ...redacted, ...structuredErrorAttributes(error) });
 			const declared = { ...errorAttributes(error), ...fingerprint };
-			if (error instanceof Error) {
+			if (isError(error)) {
 				span.addEvent("exception", {
 					"exception.type": error.name,
 					"exception.message": error.message,
@@ -132,7 +132,7 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 			}
 			span.setStatus({
 				code: SpanStatusCode.ERROR,
-				message: error instanceof Error ? error.message : String(error),
+				message: isError(error) ? error.message : String(error),
 			});
 			return;
 		}

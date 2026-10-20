@@ -139,7 +139,10 @@ secret binding. Next.js `middleware.ts`: import from `@autter/runtime-next/edge`
 ## Next.js
 
 `npm install @autter/runtime-next` — three files (instrumentation.ts, relay
-route, client init + boundary). See the package README. Route handlers:
+route, client init + boundary) and `serverExternalPackages:
+["@autter/runtime-node"]` in `next.config`, so routes use the SDK copy
+`registerAutter` started (Next otherwise bundles a separate one into each
+route). See the package README. Route handlers:
 `export const POST = withRuntimeRequest(handler)` (flush wired to `after()`);
 `middleware.ts`: `@autter/runtime-next/edge`.
 
@@ -159,10 +162,14 @@ export const onRequestError = autterOnRequestError({
 
 Node-only apps can `export { onRequestError } from "@autter/runtime-next/instrumentation"`.
 The subpath is safe on both runtimes: bundlers pick an edge-only build (no
-Node imports) through the `edge-light`/`worker` export conditions. It records
-the stack, `next.route_path`, `next.router_kind`, `next.route_type`,
-`next.render_source`, `next.digest`, the method and the path without its query
-string — never headers or cookies — and skips `redirect()`/`notFound()`.
+Node imports) through the `edge-light`/`worker` export conditions (checked
+with Next 15.5 and 16.4, webpack and Turbopack). It records the stack,
+`next.route_path` (the route template, `/blog/[slug]`; middleware is
+`/middleware` on Next 15, `/proxy` on 16), `next.router_kind`,
+`next.route_type`, `next.render_source`, `next.digest`, the method and the path
+without its query string — never headers or cookies — and skips
+`redirect()`/`notFound()`. Next never calls the hook inside an edge route
+handler; under `next start` the Node server reports those errors instead.
 
 ## Go
 

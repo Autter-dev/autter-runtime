@@ -328,8 +328,10 @@ Three files and you have server tracing, browser tracking, the relay, and
 the error boundary — see the
 [`@autter/runtime-next` README](../packages/runtime-next) for the exact
 snippets (`instrumentation.ts`, `app/api/autter-runtime/route.ts`, and a
-client component). Wrap route handlers in `withRuntimeRequest` for request
-summaries; `middleware.ts` uses `@autter/runtime-next/edge`.
+client component), plus `serverExternalPackages: ["@autter/runtime-node"]`
+in `next.config` so your routes share the SDK that `registerAutter` starts.
+Wrap route handlers in `withRuntimeRequest` for request summaries;
+`middleware.ts` uses `@autter/runtime-next/edge`.
 
 Errors Next catches itself — in server components, server actions, route
 handlers and middleware — reach Autter with their stack through Next 15's

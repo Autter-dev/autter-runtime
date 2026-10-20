@@ -73,9 +73,10 @@ import {
 	expressRouteOf,
 	markCaptured,
 	setRequestExceptionCapturer,
+	setRequestSpanAnnotator,
 	startHookRequest,
 } from "./requests.js";
-import { errorAttributes, errorInternal, fingerprintEventAttributes, splitFingerprint } from "@autter/runtime-core";
+import { errorAttributes, errorInternal, fingerprintEventAttributes, isError, splitFingerprint } from "@autter/runtime-core";
 import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
 import {
 	installUnhandledRejectionCapture,
@@ -676,7 +677,7 @@ async function runLlmSpan<T>(
 		return result;
 	} catch (err) {
 		recordError(span, err);
-		if (err instanceof Error) span.setAttribute("error.type", err.name);
+		if (isError(err)) span.setAttribute("error.type", err.name);
 		throw err;
 	} finally {
 		span.end();
@@ -699,7 +700,7 @@ function recordLlmCall(tracer: Tracer, call: TrackedLlmCall): void {
 	);
 	if (call.error !== undefined && call.error !== null) {
 		recordError(span, call.error);
-		if (call.error instanceof Error) {
+		if (isError(call.error)) {
 			span.setAttribute("error.type", call.error.name);
 		}
 	} else {
@@ -742,11 +743,11 @@ async function runWithSpan<T>(
  * @internal
  */
 export function recordError(span: Span, err: unknown): void {
-	const isError = err instanceof Error;
-	const message = activeRedactor.text(isError ? err.message : String(err));
+	const isErr = isError(err);
+	const message = activeRedactor.text(isErr ? err.message : String(err));
 	// Like recordException, only real Errors get an exception event; other
 	// thrown values keep just the (scrubbed) error status.
-	if (isError) {
+	if (isErr) {
 		span.addEvent("exception", {
 			"exception.type": err.name,
 			"exception.message": message,
@@ -966,13 +967,13 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		// A captured error makes the surrounding trace worth keeping in full.
 		errorTraceBuffer?.retainActiveTrace();
 		telemetryStats.markCaptured();
-		const isError = error instanceof Error;
+		const isErr = isError(error);
 		// Redaction is applied here AND at export time: secrets must not
 		// leave the process even if an exporter misbehaves. Messages and
 		// stacks are scrubbed too — `connect ECONNREFUSED
 		// postgres://admin:hunter2@…` is the typical leak, not attributes.
-		const message = activeRedactor.text(isError ? error.message : String(error));
-		const stackText = isError && error.stack ? activeRedactor.text(error.stack) : "";
+		const message = activeRedactor.text(isErr ? error.message : String(error));
+		const stackText = isErr && error.stack ? activeRedactor.text(error.stack) : "";
 		// `fingerprint` groups the error (`autter.fingerprint` on the exception
 		// event, so it never sticks to a reused request span).
 		const split = splitFingerprint(attributes);
@@ -994,7 +995,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		const reuseActive = activeSpan?.isRecording() === true;
 		const span = reuseActive
 			? (activeSpan as Span)
-			: errorTracer.startSpan(isError ? error.name : "Error");
+			: errorTracer.startSpan(isErr ? error.name : "Error");
 		// Coded errors (RuntimeError, catalogs, or ANY error with
 		// code/why/fix/link/status/expected): autter.error.* on the span AND
 		// on the exception event (one span can carry several exceptions);
@@ -1016,7 +1017,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		noteOperationError(error);
 		notifyException(error, { ...redacted, ...fingerprint });
 
-		if (isError && stackText) {
+		if (isErr && stackText) {
 			span.addEvent("exception", {
 				"exception.type": error.name,
 				"exception.message": message,
@@ -1037,7 +1038,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 				.filter((line, i) => i === 0 || !line.includes("captureException"))
 				.join("\n");
 			span.addEvent("exception", {
-				"exception.type": isError ? error.name : "Error",
+				"exception.type": isErr ? error.name : "Error",
 				"exception.message": message,
 				...(stack ? { "exception.stacktrace": activeRedactor.text(stack) } : {}),
 				...(redacted["autter.handled"] === true
@@ -1220,7 +1221,7 @@ export function captureException(
 	// span is this error's own, so the fingerprint can ride on it.
 	const span = trace
 		.getTracer("autter-errors")
-		.startSpan(error instanceof Error ? error.name : "Error", {
+		.startSpan(isError(error) ? error.name : "Error", {
 			attributes: { ...activeRedactor(split.attributes), ...fingerprint },
 		});
 	recordError(span, error);
@@ -1243,6 +1244,10 @@ export function serverActive(): boolean {
 export { structuredErrorAttributes };
 
 setRequestExceptionCapturer((error, attributes) => captureException(error, attributes));
+setRequestSpanAnnotator((attributes) => {
+	const span = trace.getActiveSpan();
+	if (span?.isRecording()) span.setAttributes(activeRedactor(splitFingerprint(attributes).attributes));
+});
 
 /**
  * Module-level convenience — see AutterServer.withProcessSpan. Before

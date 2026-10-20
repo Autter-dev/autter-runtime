@@ -18,6 +18,10 @@
 
 - Boundary captures (`autterErrorResponse`, `autterFastify`, `withRuntimeRequest`) land on the request's HTTP server span when an instrumentation's child span is active, so the 500 is not also reported as a stackless `HttpServerError`; a throwing `capture` predicate no longer escapes into the response (`runtime-node`).
 - `shutdown()` removes the crash monitor it installed (`runtime-node`).
+- Errors from another JavaScript realm keep their type, message and stack. Under `next start`, Next runs edge code in a `vm` sandbox and hands edge route-handler errors to the Node `onRequestError`; they failed `instanceof Error` and were recorded as `"Error: …"` with a stack synthesized at the capture site. New internal `isError` (`Error.isError`, else the built-in error tag) is used wherever an error is recorded (`runtime-node`, `runtime-edge`).
+- `captureRequestError` on an error that was already reported (by `withRuntimeRequest`, an error hook, …) still adds its attributes to the request span, without a second exception, so Next's `onRequestError` context is kept for route handlers wrapped in `withRuntimeRequest` (`runtime-node`).
+- Edge `onRequestError` hands its delivery to the request's `waitUntil` from Next's request context: Next awaits the hook for middleware but not for errors raised while rendering, so an edge function could finish before the record was sent (`runtime-next`).
+- Docs: Next.js apps add `serverExternalPackages: ["@autter/runtime-node"]` to `next.config`. Next bundles a separate copy of the SDK into `instrumentation.ts` and into each route, so without it code in routes (`withRuntimeRequest`, `captureServerException`, `runtimeLogger`) used a copy `registerAutter` never started: request summaries went to the console instead of the ingester, and errors were reported twice (`runtime-next`).
 
 ## [1.5.0] - 2026-10-08
 

@@ -32,6 +32,7 @@ export {
 	RuntimeError,
 	defineRuntimeErrors,
 	isRuntimeErrorLike,
+	isError,
 	isValidErrorCode,
 	errorCodeOf,
 	errorStatusOf,

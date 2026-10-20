@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import vm from "node:vm";
 import {
 	redactAttributes,
 	RuntimeError,
 	defineRuntimeErrors,
 	isRuntimeErrorLike,
+	isError,
 	errorAttributes,
 	errorInternal,
 	toClientError,
@@ -273,4 +275,24 @@ test("token usage counts are not masked as secrets", () => {
 	assert.equal(out.cache_read_input_tokens, 2);
 	assert.equal(out.reasoning_tokens, 9);
 	assert.equal(out.api_token, "[redacted]");
+});
+
+test("isError recognises errors from another realm (Next's edge sandbox under next start)", () => {
+	const foreign = vm.runInNewContext("(function edgeRouteExplodes() { return new TypeError('edge route boom'); })()");
+	assert.equal(foreign instanceof Error, false, "the case instanceof misses");
+	const nativeIsError = Error.isError;
+	for (const variant of ["Error.isError", "toString tag"]) {
+		if (variant === "toString tag") delete Error.isError;
+		try {
+			assert.equal(isError(foreign), true, variant);
+			assert.equal(isError(new RangeError("x")), true, variant);
+			assert.equal(isError(Object.create(Error.prototype)), true, `${variant}: instanceof still counts`);
+			for (const value of ["Error: x", { message: "x", stack: "Error: x" }, null, undefined, 42])
+				assert.equal(isError(value), false, `${variant}: ${String(value)}`);
+			const hostile = new Proxy({}, { get() { throw new Error("trap"); }, getPrototypeOf() { throw new Error("trap"); } });
+			assert.equal(isError(hostile), false, `${variant}: hostile proxy`);
+		} finally {
+			if (nativeIsError) Error.isError = nativeIsError;
+		}
+	}
 });

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { liftErrorFields } from "./error-fields.js";
+import { fingerprintOverrideOf } from "./fingerprint-override.js";
 import { sanitizeRuntimeContext } from "./context.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { scrubText } from "./redact.js";
@@ -53,6 +54,12 @@ const browserEventSchema = z.object({
 	 * instead of rejecting the whole beacon.
 	 */
 	context: z.record(z.unknown()).optional(),
+	/**
+	 * Fingerprint override (runtime-browser 1.6.0+): one string or a list.
+	 * Bounded and scrubbed in fingerprint-override.ts; a malformed value is
+	 * dropped on its own.
+	 */
+	fingerprint: z.union([z.string().max(2000), z.array(z.string().max(2000)).max(50)]).optional().catch(undefined),
 });
 
 export const browserPayloadSchema = z.object({
@@ -206,6 +213,7 @@ export function normalizeBrowserPayload(
 			},
 			occurredAt,
 			...liftErrorFields(event.context),
+			...fingerprintOverrideOf(event.fingerprint),
 		});
 	}
 

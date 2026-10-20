@@ -113,6 +113,12 @@ const autter = initAutterServer({
 // handled errors — always recorded, never sampled out:
 autter.captureException(err, { "order.id": "…" });
 
+// fingerprint override — every error carrying the same fingerprint is one
+// issue, whatever its message or stack (a string or up to 10 strings, each
+// ≤200 chars; sent as `autter.fingerprint` on the exception event; needs
+// ingester 1.6.0+, older ingesters ignore it):
+autter.captureException(err, { fingerprint: ["checkout", "card-timeout"] });
+
 // warnings/info without an exception — same grouping+aggregation as
 // errors, just a lower severity ("fatal" | "error" | "warning" | "info"):
 autter.captureMessage("Legacy /orders lookup used", "warning");

@@ -14,6 +14,9 @@
  */
 
 import { version as SDK_VERSION } from "../package.json";
+import { takeFingerprint, type Fingerprint } from "./fingerprint";
+
+export type { Fingerprint } from "./fingerprint";
 
 export interface AutterBrowserOptions {
 	/**
@@ -78,6 +81,8 @@ export interface BrowserEvent {
 	route?: string;
 	context?: Record<string, unknown>;
 	durationMs?: number;
+	/** Groups every event that carries it into one issue (see fingerprint.ts). */
+	fingerprint?: Fingerprint;
 }
 
 const MAX_QUEUE = 10;
@@ -568,7 +573,7 @@ export function flush(): void {
 
 export function captureException(
 	error: unknown,
-	context?: Record<string, unknown>,
+	context?: Record<string, unknown> & { fingerprint?: Fingerprint },
 ): void {
 	const isError = error instanceof Error;
 	const event = baseEvent(
@@ -581,7 +586,7 @@ export function captureException(
 		if (error.stack) event.stack = String(error.stack).slice(0, 32512);
 	}
 	// Explicit context wins over the duck-typed declared fields.
-	addContext(event, { ...errorContext(error), ...context });
+	addContext(event, { ...errorContext(error), ...takeFingerprint(event, context) });
 	enqueue(event, true);
 }
 

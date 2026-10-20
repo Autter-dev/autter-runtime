@@ -16,6 +16,14 @@ import { browserPayloadSchema } from "./normalize-browser.js";
 const ALL = MIGRATIONS.map((m) => m.id);
 const pkgVersion = (dir: string) =>
 	(JSON.parse(readFileSync(new URL(`../../${dir}/package.json`, import.meta.url), "utf8")) as { version: string }).version;
+// A feature announced (by its `id`) under CHANGELOG.md's "## Unreleased" may
+// name the versions of the release that ships it: the release bumps the
+// packages to them. Every other feature must name released versions.
+const unreleasedNotes =
+	/^## Unreleased\b([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(
+		readFileSync(new URL("../../../CHANGELOG.md", import.meta.url), "utf8"),
+	)?.[1] ?? "";
+const announced = (id: string) => unreleasedNotes.includes(`\`${id}\``);
 
 test("version comparison handles v-prefixes, prereleases and junk", () => {
 	assert.equal(compareVersions("1.4.0", "1.4.0"), 0);
@@ -33,12 +41,12 @@ test("manifest is consistent with migrations, routes and released package versio
 	for (const feature of COMPAT_MANIFEST.features) {
 		assert.ok(!ids.has(feature.id), `duplicate ${feature.id}`);
 		ids.add(feature.id);
-		assert.ok(compareVersions(feature.ingester, pkgVersion("otlp-ingester"))! <= 0, `${feature.id}: ingester ${feature.ingester} is unreleased`);
+		assert.ok(announced(feature.id) || compareVersions(feature.ingester, pkgVersion("otlp-ingester"))! <= 0, `${feature.id}: ingester ${feature.ingester} is unreleased`);
 		for (const migration of feature.migrations) assert.ok(ALL.includes(migration), `${feature.id}: unknown migration ${migration}`);
 		if (feature.route) assert.ok(server.includes(`app.post("${feature.route}"`), `${feature.id}: no route ${feature.route}`);
 		for (const [pkg, min] of Object.entries(feature.sdks)) {
 			const dir = pkg.replace("@autter/", "");
-			assert.ok(compareVersions(min, pkgVersion(dir))! <= 0, `${feature.id}: ${pkg} ${min} is unreleased`);
+			assert.ok(announced(feature.id) || compareVersions(min, pkgVersion(dir))! <= 0, `${feature.id}: ${pkg} ${min} is unreleased`);
 		}
 		for (const type of feature.browserEvents ?? []) {
 			const parsed = browserPayloadSchema.safeParse({
@@ -127,7 +135,7 @@ test("compat report marks availability from version and schema state, and round-
 	assert.equal(pending.features.find((f) => f.id === "csp_violations")!.available, true);
 	const ready = buildCompatReport({ version: "1.5.0", schemaStatus: "ready", applied: ALL, allMigrations: ALL });
 	assert.equal(ready.schema.level, ALL[ALL.length - 1]);
-	assert.ok(ready.features.every((f) => f.available));
+	assert.ok(ready.features.every((f) => f.available || announced(f.id)));
 	assert.deepEqual(ingesterInfoFromReport(JSON.parse(JSON.stringify(ready))), {
 		version: "1.5.0",
 		schema: { status: "ready", applied: ALL },

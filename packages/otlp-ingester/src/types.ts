@@ -60,6 +60,13 @@ export interface RuntimeOccurrenceInput {
 	expected?: boolean;
 	/** `autter.request.id` — joins the occurrence to its request summary. */
 	requestId?: string;
+	/**
+	 * SDK fingerprint override (browser `fingerprint`, OTLP/log
+	 * `autter.fingerprint`): ≤10 scrubbed values, each ≤200 chars. Hashed into
+	 * the `manual-v1` candidate by `manualFingerprint` (fingerprint-override.ts).
+	 * Omitted when absent.
+	 */
+	fingerprintOverride?: string[];
 }
 
 /**

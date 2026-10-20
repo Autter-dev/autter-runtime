@@ -1,5 +1,6 @@
 import { decodeOtlpAttributes, sanitizeRuntimeContext, type OtlpValue } from "./context.js";
 import { liftErrorFields, validRequestId } from "./error-fields.js";
+import { fingerprintOverrideOf } from "./fingerprint-override.js";
 import { scrubText } from "./redact.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
@@ -299,6 +300,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						// Event attributes first: one span can carry several
 						// exceptions, each with its own code.
 						...liftErrorFields(eventAttrs, attrs),
+						...fingerprintOverrideOf(eventAttrs.get("autter.fingerprint") ?? attrs.get("autter.fingerprint")),
 					});
 				}
 				const failedOutcomes = (span.events ?? []).filter((event) => {

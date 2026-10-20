@@ -174,6 +174,18 @@ MANIFEST: dict[str, Any] = json.loads(
                 "@autter/runtime-browser": "1.4.0",
                 "@autter/runtime-edge": "1.0.0"
             }
+        },
+        {
+            "id": "fingerprint_override",
+            "title": "Fingerprint override",
+            "ingester": "1.6.0",
+            "migrations": [],
+            "sdks": {
+                "@autter/runtime-browser": "1.6.0",
+                "@autter/runtime-node": "1.6.0",
+                "@autter/runtime-next": "1.6.0",
+                "@autter/runtime-edge": "1.6.0"
+            }
         }
     ]
 }

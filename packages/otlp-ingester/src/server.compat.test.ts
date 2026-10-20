@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
@@ -6,6 +7,13 @@ import type { IngesterConfig } from "./config.js";
 import { MIGRATIONS } from "./migrations.js";
 import { createIngesterApp } from "./server.js";
 import { ingesterVersion, SdkVersionTracker, sdkSightingsFromOtlp } from "./sdk-versions.js";
+
+// Features announced under CHANGELOG.md's "## Unreleased" name the version of
+// the release that ships them; they become available once it bumps the package.
+const unreleasedNotes =
+	/^## Unreleased\b([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(
+		readFileSync(new URL("../../../CHANGELOG.md", import.meta.url), "utf8"),
+	)?.[1] ?? "";
 
 const listen = async (server: Server) => {
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -150,11 +158,11 @@ test("ingest responses carry the version header; SDK versions are recorded once 
 
 		const compat = (await (await fetch(`${url}/v1/compat`)).json()) as {
 			schema: { status: string; applied: string[] };
-			features: Array<{ available: boolean }>;
+			features: Array<{ id: string; available: boolean }>;
 		};
 		assert.equal(compat.schema.status, "ready");
 		assert.equal(compat.schema.applied.length, MIGRATIONS.length);
-		assert.ok(compat.features.every((f) => f.available));
+		assert.ok(compat.features.every((f) => f.available || unreleasedNotes.includes(`\`${f.id}\``)));
 
 		// Browser payloads: `sdk` is recorded; an invalid value is ignored, not rejected.
 		const browser = (sdk: string) =>

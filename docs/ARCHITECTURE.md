@@ -200,6 +200,22 @@ truncated to 32 hex chars.
 The same algorithm runs in the Autter backend so browser-relay and OTLP
 occurrences group identically.
 
+**Fingerprint override (`manual-v1`, ingester 1.6.0+)** — an SDK can decide
+the grouping itself: `captureException(err, { fingerprint })` in every SDK
+(browser: the event's `fingerprint` field, also settable in `beforeSend`;
+server and edge: the exception event or promoted-log attribute
+`autter.fingerprint`, a JSON array of strings). The normalisers carry it as
+`fingerprintOverride` — strings only, at most 10, each scrubbed and cut to
+200 chars — and `manualFingerprint()` (`fingerprint-override.ts`) hashes it:
+
+```
+sha256("manual-v1" + "\0" + service + "\0" + values.join("\u0001")).hex()[:32]
+```
+
+It takes precedence over every automatic scheme. Test vector: `web` +
+`["chunk-load"]` → `26c6c2e4050d368f56e84b0353dfc5a3`. Grouping rules set on
+the Autter platform (`rule-v1`) rank just below it.
+
 ## OTLP mapping (traces)
 
 Resource attributes:

@@ -98,6 +98,7 @@ copy that a test keeps identical.
 | Platform OOM/restart events (`platform_events`) | 1.3.3 | `0008-memory-signals` | `/v1/platform-events` | |
 | Browser CSP violation capture (`csp_violations`) | 1.3.4 | | | browser 1.3.3, next 1.3.4 |
 | Operation logging (`operation_logging`) | 1.4.0 | `0011-runtime-logs` | `/v1/logs` | node/next 1.4.0 |
+| Fingerprint override (`fingerprint_override`) | 1.6.0 | | | browser/node/next/edge 1.6.0 |
 
 Notes:
 

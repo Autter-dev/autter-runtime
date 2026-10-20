@@ -78,7 +78,7 @@ Without `waitUntil`, delivery is fire-and-forget (the process stays up).
 | `rt.info(message, attrs?)` | Folded into the summary timeline (`autter.operation.logs`, max 50) |
 | `rt.warn(message, attrs?)` | Folded **and** exported as its own record |
 | `rt.error(err, attrs?)` | Like `warn` at error level; attaches the error's code/why/fix to the summary |
-| `rt.captureException(err, attrs?)` | Report an exception — becomes an occurrence (`autter.capture.mode = "log"`) |
+| `rt.captureException(err, attrs?)` | Report an exception — becomes an occurrence (`autter.capture.mode = "log"`). `attrs.fingerprint` (a string or up to 10 strings) groups every error carrying it into one issue (ingester 1.6.0+) |
 | `rt.requestId` | Honoured `x-request-id` (`^[\w.-]{8,128}$`) or a fresh UUID; echoed in the response header |
 
 Errors thrown from the handler are captured, recorded on the summary and

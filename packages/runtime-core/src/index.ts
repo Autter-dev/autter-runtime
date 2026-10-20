@@ -91,3 +91,12 @@ export {
 	CODE_FINGERPRINT_SCHEME,
 	codeFingerprint,
 } from "./fingerprint-code.js";
+export {
+	FINGERPRINT_ATTRIBUTE,
+	FINGERPRINT_MAX_LENGTH,
+	FINGERPRINT_MAX_VALUES,
+	fingerprintEventAttributes,
+	fingerprintValues,
+	splitFingerprint,
+	type FingerprintInput,
+} from "./fingerprint-override.js";

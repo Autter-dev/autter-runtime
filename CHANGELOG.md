@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fingerprint override (`fingerprint_override`): `captureException(err, { fingerprint })` takes a string or up to 10 strings (≤200 chars each) and groups every error that carries it into one issue. Browser: a `fingerprint` field on the event, also settable in `beforeSend`, passed through the relay. Node, logger-only mode and edge: the exception event (or promoted log) attribute `autter.fingerprint`, a JSON array of strings. The ingester carries it as `fingerprintOverride` (scrubbed, bounded) and `manualFingerprint()` hashes it into the `manual-v1` candidate, which wins over every automatic scheme; older ingesters ignore the field (`runtime-browser`, `runtime-node`, `runtime-next`, `runtime-edge`, `otlp-ingester`).
+
 ## [1.5.0] - 2026-10-08
 
 Packages: `otlp-ingester` 1.5.0, `runtime-node` 1.5.0, `runtime-next` 1.5.0, `runtime-browser` 1.4.0, new `runtime-edge` 1.0.0. Additive: 1.4.0 code keeps working unchanged (golden-tested).

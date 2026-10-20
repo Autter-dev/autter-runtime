@@ -105,3 +105,12 @@ export {
 	type BreadcrumbRedactor,
 	type BreadcrumbType,
 } from "./breadcrumbs.js";
+export {
+	FINGERPRINT_ATTRIBUTE,
+	FINGERPRINT_MAX_LENGTH,
+	FINGERPRINT_MAX_VALUES,
+	fingerprintEventAttributes,
+	fingerprintValues,
+	splitFingerprint,
+	type FingerprintInput,
+} from "./fingerprint-override.js";

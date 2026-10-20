@@ -6,6 +6,7 @@ import {
 	type OtlpValue,
 } from "./context.js";
 import { declaredLink, liftErrorFields } from "./error-fields.js";
+import { fingerprintOverrideOf } from "./fingerprint-override.js";
 import { normalizeRoute } from "./fingerprint.js";
 import type { RuntimeOccurrenceInput } from "./types.js";
 
@@ -214,6 +215,7 @@ export function normalizeLogs(request: OtlpLogsRequest): RuntimeLogRecord[] {
 								attributes,
 								occurredAt,
 								...declared,
+								...fingerprintOverrideOf(attributes["autter.fingerprint"]),
 							}
 						: undefined;
 				rows.push({

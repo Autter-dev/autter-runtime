@@ -4,7 +4,7 @@ import {
 	type Attributes,
 	type Span,
 } from "@opentelemetry/api";
-import { errorAttributes } from "@autter/runtime-core";
+import { errorAttributes, fingerprintEventAttributes, splitFingerprint } from "@autter/runtime-core";
 import {
 	captureExceptionAsLog,
 	configureRuntimeLogger,
@@ -107,13 +107,15 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 
 	function captureException(error: unknown, attributes?: Attributes): void {
 		markCaptured(error);
-		const redacted = redact(attributes);
+		const split = splitFingerprint(attributes);
+		const fingerprint = fingerprintEventAttributes(split.fingerprint, redact.text);
+		const redacted = redact(split.attributes);
 		const span: Span | undefined = trace.getActiveSpan();
 		if (mode === "auto" && span?.isRecording()) {
 			noteOperationError(error);
-			notifyException(error, redacted);
+			notifyException(error, { ...redacted, ...fingerprint });
 			span.setAttributes({ "autter.severity": "error", ...redacted, ...structuredErrorAttributes(error) });
-			const declared = errorAttributes(error);
+			const declared = { ...errorAttributes(error), ...fingerprint };
 			if (error instanceof Error) {
 				span.addEvent("exception", {
 					"exception.type": error.name,
@@ -134,8 +136,8 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 			});
 			return;
 		}
-		notifyException(error, redacted);
-		captureExceptionAsLog(error, redacted);
+		notifyException(error, { ...redacted, ...fingerprint });
+		captureExceptionAsLog(error, { ...redacted, ...fingerprint });
 	}
 
 	const captured = new WeakSet<object>();

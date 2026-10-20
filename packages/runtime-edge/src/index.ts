@@ -30,6 +30,7 @@ import {
 	createRuntimeEvent,
 	isSummary,
 	errorAttributes,
+	fingerprintEventAttributes,
 	makeRedactor,
 	maxLevel,
 	mergeContext,
@@ -37,6 +38,7 @@ import {
 	requestOutcome,
 	resolveRequestId,
 	responseStatusOf,
+	splitFingerprint,
 	toClientError,
 	toOtlpLogRecord,
 	userContext,
@@ -109,7 +111,11 @@ export interface EdgeRuntime {
 	error(error: unknown, attributes?: RuntimeLogContext): void;
 	/** Request id (honoured `x-request-id` or a fresh UUID); echoed in the response. */
 	readonly requestId: string;
-	/** Report an exception (becomes an occurrence/issue). */
+	/**
+	 * Report an exception (becomes an occurrence/issue). `fingerprint` (a
+	 * string or up to 10 strings) groups every error that carries it into
+	 * one issue (ingester 1.6.0+).
+	 */
 	captureException(error: unknown, attributes?: RuntimeLogContext): void;
 }
 
@@ -613,16 +619,17 @@ function buildRuntime(
 			const isError = err instanceof Error;
 			const message = isError ? err.message : String(err);
 			appendInlineLog(inline, "error", message, undefined, redact);
+			const split = splitFingerprint(safeAttributes(attrs));
 			record(
 				"error",
 				message,
 				{
-					...safeAttributes(attrs),
+					...split.attributes,
 					"exception.type": isError ? err.name : "Error",
 					"exception.message": message,
 					"exception.stacktrace": (isError && err.stack) || new Error(message).stack || "",
 				},
-				{ "autter.capture.mode": "log", ...errorAttributes(err) },
+				{ "autter.capture.mode": "log", ...errorAttributes(err), ...fingerprintEventAttributes(split.fingerprint) },
 			);
 		},
 	};

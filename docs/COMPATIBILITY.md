@@ -100,6 +100,7 @@ copy that a test keeps identical.
 | Operation logging (`operation_logging`) | 1.4.0 | `0011-runtime-logs` | `/v1/logs` | node/next 1.4.0 |
 | Breadcrumbs: the steps before an error (`breadcrumbs`) | 1.6.0 | | | browser/node/next 1.6.0 |
 | Source map debug ids (`source_map_debug_ids`) | 1.6.0 | `0017-source-maps-debug-id` | `/v1/sourcemaps/check` | browser/next 1.6.0 |
+| Fingerprint override (`fingerprint_override`) | 1.6.0 | | | browser/node/next/edge 1.6.0 |
 
 Notes:
 

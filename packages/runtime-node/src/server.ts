@@ -75,7 +75,7 @@ import {
 	setRequestExceptionCapturer,
 	startHookRequest,
 } from "./requests.js";
-import { errorAttributes, errorInternal } from "@autter/runtime-core";
+import { errorAttributes, errorInternal, fingerprintEventAttributes, splitFingerprint } from "@autter/runtime-core";
 import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
 import {
 	installUnhandledRejectionCapture,
@@ -265,7 +265,12 @@ export interface TrackedLlmCall extends LlmCallInfo, LlmUsage {
 }
 
 export interface AutterServer {
-	/** Report a handled exception. Always recorded (never sampled out). */
+	/**
+	 * Report a handled exception. Always recorded (never sampled out).
+	 * `attributes.fingerprint` (a string or up to 10 strings) groups every
+	 * error that carries it into one issue (ingester 1.6.0+); it is sent as
+	 * `autter.fingerprint` on the exception event, not as a span attribute.
+	 */
 	captureException(error: unknown, attributes?: Attributes): void;
 	/**
 	 * Report a warning (or info) without an exception — deprecated code
@@ -961,7 +966,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		// postgres://admin:hunter2@…` is the typical leak, not attributes.
 		const message = activeRedactor.text(isError ? error.message : String(error));
 		const stackText = isError && error.stack ? activeRedactor.text(error.stack) : "";
-		const redacted = activeRedactor(attributes);
+		// `fingerprint` groups the error (`autter.fingerprint` on the exception
+		// event, so it never sticks to a reused request span).
+		const split = splitFingerprint(attributes);
+		const fingerprint = fingerprintEventAttributes(split.fingerprint, activeRedactor.text);
+		if (fingerprint["autter.fingerprint"]) noteCompatFeature("fingerprint_override");
+		const redacted = activeRedactor(split.attributes);
 
 		// Prefer the live request span (the HTTP server span inside an Express
 		// handler or error middleware) so the thrown exception and its failed
@@ -984,9 +994,10 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		// cause chains on the event; `internal` on the span only.
 		const structured = structuredErrorAttributes(error);
 		const causes = errorAttributes(error);
-		const declared = Object.fromEntries(
-			Object.entries(causes).filter(([key]) => key !== "autter.error.internal"),
-		);
+		const declared = {
+			...Object.fromEntries(Object.entries(causes).filter(([key]) => key !== "autter.error.internal")),
+			...fingerprint,
+		};
 		const requestId = currentOperation()?.requestId;
 		span.setAttributes({
 			"autter.severity": "error",
@@ -996,7 +1007,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		});
 		markCaptured(error);
 		noteOperationError(error);
-		notifyException(error, redacted);
+		notifyException(error, { ...redacted, ...fingerprint });
 
 		if (isError && stackText) {
 			span.addEvent("exception", {
@@ -1194,13 +1205,16 @@ export function captureException(
 	}
 	markCaptured(error);
 	noteOperationError(error);
-	notifyException(error, attributes);
+	const split = splitFingerprint(attributes);
+	const fingerprint = fingerprintEventAttributes(split.fingerprint, activeRedactor.text);
+	notifyException(error, { ...split.attributes, ...fingerprint });
 	// Before initAutterServer the span rides the host's global provider,
-	// whose exporter we don't control — so scrub here, at capture time.
+	// whose exporter we don't control — so scrub here, at capture time. The
+	// span is this error's own, so the fingerprint can ride on it.
 	const span = trace
 		.getTracer("autter-errors")
 		.startSpan(error instanceof Error ? error.name : "Error", {
-			attributes: activeRedactor(attributes),
+			attributes: { ...activeRedactor(split.attributes), ...fingerprint },
 		});
 	recordError(span, error);
 	span.end();

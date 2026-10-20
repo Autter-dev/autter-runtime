@@ -153,12 +153,37 @@ bundle promises no console patching. The 1.4 `autter.trail` context is still
 sent. Needs ingester 1.6.0 (older ingesters ignore the field); through a
 relay, `@autter/runtime-node` 1.6.0 forwards it.
 
+## Fingerprint override
+
+Errors group by their stack and message by default. To decide the grouping
+yourself, pass a `fingerprint`: every error that carries the same one becomes
+**one issue** (per service and environment), whatever its message or stack.
+
+```ts
+captureException(error, { fingerprint: ["checkout", "card-timeout"] });
+captureException(error, { fingerprint: "chunk-load" }); // a single string works too
+
+initAutterBrowser({
+  ...,
+  beforeSend(event) {
+    if (event.errorType === "ChunkLoadError") event.fingerprint = "chunk-load";
+    return event;
+  },
+});
+```
+
+A string, or up to 10 strings of at most 200 characters each (longer values
+are cut, extra values dropped). It is sent as the event's `fingerprint` field,
+never as context; the relay and the ingester scrub and bound it again. Needs
+ingester 1.6.0+; older ingesters ignore it. For grouping rules you can change
+without a deploy, use the repository's Runtime settings in Autter.
+
 ## API
 
 | Function | Notes |
 | --- | --- |
 | `initAutterBrowser(options)` | Installs error, rejection, CSP, and recent-action listeners; sends a session ping |
-| `captureException(error, context?)` | Handled errors; fast-flushed; duck-types `code/why/fix/link/expected/requestId` |
+| `captureException(error, context?)` | Handled errors; fast-flushed; duck-types `code/why/fix/link/expected/requestId`; `context.fingerprint` overrides grouping |
 | `autterErrorFromResponse(response)` | `Promise<Error>` from a failed Response's JSON error body (or status text) |
 | `captureMessage(message, severity?, context?)` | Warnings/info without an exception (`"warning"` default); grouped and aggregated like errors |
 | `trackEvent(name, props?)` | Usage counter; aggregated server-side per minute |

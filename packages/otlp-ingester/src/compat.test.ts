@@ -16,6 +16,14 @@ import { browserPayloadSchema } from "./normalize-browser.js";
 const ALL = MIGRATIONS.map((m) => m.id);
 const pkgVersion = (dir: string) =>
 	(JSON.parse(readFileSync(new URL(`../../${dir}/package.json`, import.meta.url), "utf8")) as { version: string }).version;
+// A feature announced (by its `id`) under CHANGELOG.md's "## Unreleased" may
+// name the versions of the release that ships it: the release bumps the
+// packages to them. Every other feature must name released versions.
+const unreleasedNotes =
+	/^## Unreleased\b([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(
+		readFileSync(new URL("../../../CHANGELOG.md", import.meta.url), "utf8"),
+	)?.[1] ?? "";
+const announced = (id: string) => unreleasedNotes.includes(`\`${id}\``);
 
 test("version comparison handles v-prefixes, prereleases and junk", () => {
 	assert.equal(compareVersions("1.4.0", "1.4.0"), 0);
@@ -139,7 +147,7 @@ test("compat report marks availability from version and schema state, and round-
 	const newest = COMPAT_MANIFEST.features.map((f) => f.ingester).sort((a, b) => compareVersions(a, b)!).at(-1)!;
 	const ready = buildCompatReport({ version: newest, schemaStatus: "ready", applied: ALL, allMigrations: ALL });
 	assert.equal(ready.schema.level, ALL[ALL.length - 1]);
-	assert.ok(ready.features.every((f) => f.available));
+	assert.ok(ready.features.every((f) => f.available || announced(f.id)));
 	assert.deepEqual(ingesterInfoFromReport(JSON.parse(JSON.stringify(ready))), {
 		version: newest,
 		schema: { status: "ready", applied: ALL },

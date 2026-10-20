@@ -8,7 +8,7 @@ import {
 	observeIngesterResponse,
 } from "./compat.js";
 import { featuresForBrowserEvents } from "../../otlp-ingester/src/compat.js";
-import { sanitizeBreadcrumbs } from "@autter/runtime-core";
+import { fingerprintValues, sanitizeBreadcrumbs } from "@autter/runtime-core";
 
 /**
  * Same-origin browser relay. The browser tracker posts to a route on the
@@ -267,6 +267,13 @@ function relayDebugIds(raw: unknown, redactor: Redactor): { debugIds?: Record<st
 	return count ? { debugIds } : {};
 }
 
+// Fingerprint override (runtime-browser 1.6.0+): a string or up to 10
+// strings, scrubbed and bounded; a string stays a string.
+function relayFingerprint(raw: unknown, redactor: Redactor): { fingerprint?: string | string[] } {
+	const values = fingerprintValues(raw, redactor.text);
+	return values ? { fingerprint: Array.isArray(raw) ? values : values[0]! } : {};
+}
+
 // Whitelist sanitiser — anything not listed here is dropped, so a
 // compromised or buggy client can't smuggle cookies/DOM/bodies through the
 // relay. Returns null when the payload is structurally invalid.
@@ -323,6 +330,7 @@ export function sanitizeBrowserPayload(
 				: {}),
 			...relayBreadcrumbs(e.breadcrumbs, redactor),
 			...relayDebugIds(e.debugIds, redactor),
+			...relayFingerprint(e.fingerprint, redactor),
 		});
 	}
 

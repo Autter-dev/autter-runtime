@@ -8,6 +8,7 @@ import {
 } from "@opentelemetry/sdk-metrics";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { Redactor } from "./redact.js";
+import { makeUrlQueryPolicy, type UrlQueryPolicy } from "./url-query.js";
 
 /**
  * Last line of defence inside the customer's process: every span is
@@ -17,7 +18,8 @@ import type { Redactor } from "./redact.js";
  *
  * - `span.recordException(err)` from HttpInstrumentation, the customer's
  *   own code, or third-party instrumentations — raw message + stack;
- * - `http.url` / `http.target` / `url.full` with `?token=` query strings;
+ * - `http.url` / `http.target` / `url.full` with `?token=` query strings —
+ *   and query strings in general: values are dropped (url-query.ts);
  * - request headers when the host enables `headersToSpanAttributes`;
  * - span status messages copied from `err.message`;
  * - link attributes and event names;
@@ -26,7 +28,8 @@ import type { Redactor } from "./redact.js";
  *   OTEL_RESOURCE_ATTRIBUTES can carry anything.
  *
  * The span is re-wrapped, never mutated (spans are shared with other
- * processors). Disabled when the host passes `redactAttributes: false`.
+ * processors). `redactAttributes: false` disables the scrubbing but not the
+ * query policy, which `keepQueryParams` tunes.
  */
 /** One scrubbed copy per Resource object: the OTLP serializer groups spans
  * by resource identity, so a fresh copy per span would split the batch. */
@@ -40,19 +43,55 @@ function redactResource<R extends ReadableSpan["resource"]>(resource: R, redacto
 	return scrubbed;
 }
 
-export function redactSpan(span: ReadableSpan, redactor: Redactor): ReadableSpan {
-	const status = span.status.message
-		? { ...span.status, message: redactor.text(span.status.message) }
-		: span.status;
+const DEFAULT_QUERY_POLICY = makeUrlQueryPolicy();
+
+/** Query policy only (`redactAttributes: false`): name and attributes. */
+function stripQueries(span: ReadableSpan, query: UrlQueryPolicy): ReadableSpan {
+	const name = query.name(span.name);
+	const attributes = query.attributes(span.attributes);
+	if (name === span.name && attributes === span.attributes) return span;
+	return wrap(span, { name, attributes });
+}
+
+function wrap(
+	span: ReadableSpan,
+	fields: Pick<ReadableSpan, "name" | "attributes"> & Partial<Pick<ReadableSpan, "status" | "links" | "events" | "resource">>,
+): ReadableSpan {
 	return {
-		name: redactor.text(span.name),
+		name: fields.name,
 		kind: span.kind,
 		spanContext: () => span.spanContext(),
 		parentSpanId: span.parentSpanId,
 		startTime: span.startTime,
 		endTime: span.endTime,
+		status: fields.status ?? span.status,
+		attributes: fields.attributes,
+		links: fields.links ?? span.links,
+		events: fields.events ?? span.events,
+		duration: span.duration,
+		ended: span.ended,
+		resource: fields.resource ?? span.resource,
+		instrumentationLibrary: span.instrumentationLibrary,
+		droppedAttributesCount: span.droppedAttributesCount,
+		droppedEventsCount: span.droppedEventsCount,
+		droppedLinksCount: span.droppedLinksCount,
+	};
+}
+
+export function redactSpan(
+	span: ReadableSpan,
+	redactor: Redactor,
+	query: UrlQueryPolicy = DEFAULT_QUERY_POLICY,
+): ReadableSpan {
+	if (!redactor.enabled) return stripQueries(span, query);
+	const status = span.status.message
+		? { ...span.status, message: redactor.text(span.status.message) }
+		: span.status;
+	// Scrub first (a `user:pass@` URL is recognised whole), then cut queries.
+	return wrap(span, {
+		name: query.name(redactor.text(span.name)),
 		status,
-		attributes: redactor.exported(span.attributes),
+		attributes: query.attributes(redactor.exported(span.attributes)),
 		links: span.links.map((link) =>
 			link.attributes ? { ...link, attributes: redactor.exported(link.attributes) } : link,
 		),
@@ -61,20 +100,15 @@ export function redactSpan(span: ReadableSpan, redactor: Redactor): ReadableSpan
 			name: redactor.text(event.name),
 			...(event.attributes ? { attributes: redactor.exported(event.attributes) } : {}),
 		})),
-		duration: span.duration,
-		ended: span.ended,
 		resource: redactResource(span.resource, redactor),
-		instrumentationLibrary: span.instrumentationLibrary,
-		droppedAttributesCount: span.droppedAttributesCount,
-		droppedEventsCount: span.droppedEventsCount,
-		droppedLinksCount: span.droppedLinksCount,
-	};
+	});
 }
 
 export class RedactingSpanExporter implements SpanExporter {
 	constructor(
 		private readonly inner: SpanExporter,
 		private readonly redactor: () => Redactor,
+		private readonly query: UrlQueryPolicy = DEFAULT_QUERY_POLICY,
 	) {}
 
 	export(
@@ -82,17 +116,14 @@ export class RedactingSpanExporter implements SpanExporter {
 		resultCallback: (result: ExportResult) => void,
 	): void {
 		const redactor = this.redactor();
-		let scrubbed = spans;
+		const scrubbed: ReadableSpan[] = [];
 		let failed = 0;
-		if (redactor.enabled) {
-			scrubbed = [];
-			for (const span of spans) {
-				try {
-					scrubbed.push(redactSpan(span, redactor));
-				} catch {
-					// Fail closed: a span we could not scrub is not exported.
-					failed++;
-				}
+		for (const span of spans) {
+			try {
+				scrubbed.push(redactSpan(span, redactor, this.query));
+			} catch {
+				// Fail closed: a span we could not scrub is not exported.
+				failed++;
 			}
 		}
 		if (!failed) {

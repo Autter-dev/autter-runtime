@@ -121,7 +121,12 @@ test("e2e: captured exception attributes are redacted on the wire", async () => 
 	assert.ok(wire.includes("boom: order failed"), "exception message missing");
 	assert.ok(wire.includes("connect ECONNREFUSED postgres://[redacted]@db.internal:5432/app"),
 		"scrubbed message should keep its non-secret context");
-	assert.ok(wire.includes("page=2"), "non-secret query params should survive");
+	// Query strings: the URL loses its query, url.query keeps only the
+	// parameter names except listed ones (keepQueryParams: ["page"]).
+	assert.ok(wire.includes('"stringValue":"https://app.example.test/callback"'), "http.url should lose its query");
+	assert.ok(wire.includes('"stringValue":"code=[redacted]&access_token=[redacted]&page=2"'),
+		"url.query should keep parameter names and listed values");
+	assert.ok(!wire.includes("code=abc"), "query values must not leave the process");
 	// Usage counters on third-party LLM spans must survive for cost tracking.
 	assert.match(wire, /"ai\.usage\.promptTokens","value":\{"intValue":42/);
 

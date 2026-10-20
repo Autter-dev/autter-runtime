@@ -58,6 +58,7 @@ import {
 	type Redactor,
 } from "./redact.js";
 import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporter.js";
+import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
 import {
 	configureRuntimeLogger,
@@ -215,6 +216,18 @@ export interface AutterServerOptions {
 	 * Default true.
 	 */
 	redactAttributes?: boolean | RedactOptions;
+	/**
+	 * Query strings never leave the process with their values. Every span
+	 * (any instrumentation, Next.js's own included) is exported with
+	 * `http.target`, `http.url` and `url.full` cut at the `?`, `url.query`
+	 * reduced to its parameter names (`email=[redacted]&page=[redacted]`,
+	 * added when only the URL had the query) and the query dropped from span
+	 * names. List parameters whose values are safe to keep in `url.query`,
+	 * such as pagination or sorting: `keepQueryParams: ["page", "sort"]`
+	 * (exact names; kept values are still scrubbed by `redactAttributes`).
+	 * Applies even with `redactAttributes: false`. Default `[]`.
+	 */
+	keepQueryParams?: string[];
 	/**
 	 * Verbose lifecycle logging to stderr: "exported N spans", flushes and
 	 * auto-flush activity — handy while wiring the SDK up. Also enabled by
@@ -853,12 +866,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const headers = { authorization: `Bearer ${options.apiKey}` };
 	const redactor = makeRedactor(options.redactAttributes ?? true);
 	// Every trace exporter scrubs spans on the way out, whoever created them
-	// (see redact-exporter.ts).
+	// (see redact-exporter.ts): secrets and PII, and URL query values.
+	const queryPolicy = makeUrlQueryPolicy(options.keepQueryParams);
 	const traceExporter = () =>
 		new CountingExporter(
 			new RedactingSpanExporter(
 				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
 				() => redactor,
+				queryPolicy,
 			),
 		);
 	const environment = options.environment ?? process.env.NODE_ENV ?? "production";

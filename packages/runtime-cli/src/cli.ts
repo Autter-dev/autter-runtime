@@ -31,7 +31,9 @@ inject  Gives every .js/.mjs/.cjs bundle that has a source map a debug id
         that registers it for @autter/runtime-browser, and "debugId" in the
         .map. Running it again changes nothing.
 upload  Sends every map to <endpoint>/v1/sourcemaps with AUTTER_RUNTIME_KEY,
-        in parallel, skipping maps the ingester already has.
+        in parallel, skipping maps the ingester already has. Each map carries
+        the bundle's function scopes ("x_autter_scopes"), so stack frames are
+        named after the function they are in, not the call site.
 
 Options:
   --release <r>          Default: $GITHUB_SHA, $VERCEL_GIT_COMMIT_SHA,

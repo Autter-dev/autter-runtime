@@ -30,7 +30,7 @@ import { decodeMetricsRequest, decodeTraceRequest, decodeLogsRequest } from "./o
 import { normalizeLogs, type OtlpLogsRequest } from "./logs.js";
 import { decodeProfile } from "./profiles.js";
 import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
-import { validateSourceMap, validateSourceMapCheck } from "./source-maps.js";
+import { SOURCE_MAP_MAX_BODY_BYTES, validateSourceMap, validateSourceMapCheck } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
 import {
@@ -130,7 +130,31 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		next();
 	});
 	app.use(express.raw({ limit: "1mb", type: ["application/x-pprof"] }));
-	app.use("/v1/sourcemaps", express.json({ limit: "5mb" }));
+	// A check names at most 500 maps: well under 1 MB, whatever MAX_BODY_BYTES is.
+	app.use("/v1/sourcemaps/check", express.json({ limit: "1mb" }));
+	// Source map uploads (up to 32 MiB of JSON, usually gzipped) are routed
+	// before the small-body parsers below, and read their body only once the
+	// key is checked: an anonymous client can't make the ingester inflate and
+	// parse one. body-parser inflates gzip/deflate and applies the limit to
+	// the inflated bytes, so a small compressed body can't expand past it.
+	const sourceMapBody = express.json({ limit: SOURCE_MAP_MAX_BODY_BYTES });
+	app.post("/v1/sourcemaps", async (req, res, next) => {
+		// On failure the body is never read (Node discards it).
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		sourceMapBody(req, res, async (err?: unknown) => {
+			if (err) {
+				next(err);
+				return;
+			}
+			const sourceMap = validateSourceMap(req.body);
+			if (!sourceMap) { res.status(400).json({ error: "invalid source map" }); return; }
+			// Idempotent: the same release + path replaces the earlier row
+			// (ReplacingMergeTree), so CI retries and re-runs are harmless.
+			try { await store.insertSourceMap(ctx, sourceMap); res.status(202).json({ accepted: true }); }
+			catch (storeErr) { storageError(res, storeErr); }
+		});
+	});
 	app.use(
 		express.json({
 			limit: config.maxBodyBytes,
@@ -420,17 +444,6 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			await store.insertProfileSamples(ctx, samples);
 			res.status(202).json({ profileId: samples[0]!.profileId, samples: samples.length });
 		} catch (err) { storageError(res, err); }
-	});
-
-	app.post("/v1/sourcemaps", async (req, res) => {
-		const ctx = await authenticate(req, res, "otlp");
-		if (!ctx) return;
-		const sourceMap = validateSourceMap(req.body);
-		if (!sourceMap) { res.status(400).json({ error: "invalid source map" }); return; }
-		// Idempotent: the same release + path replaces the earlier row
-		// (ReplacingMergeTree), so CI retries and re-runs are harmless.
-		try { await store.insertSourceMap(ctx, sourceMap); res.status(202).json({ accepted: true }); }
-		catch (err) { storageError(res, err); }
 	});
 
 	/** Which of these maps does this tenant already have? Lets

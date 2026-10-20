@@ -48,7 +48,7 @@ export const SIMPLE_MAP = { version: 3, file: "app.js", sources: ["../src/app.ts
  * The real ingester (built dist) with its ClickHouse store replaced by an
  * in-memory one: uploads go through the real routes, auth and validation.
  */
-export async function startIngester({ legacy = false, failFirst = 0 } = {}) {
+export async function startIngester({ legacy = false, failFirst = 0, rejectUploads = 0 } = {}) {
 	const config = {
 		...loadConfig(),
 		clickhouseUrl: "http://127.0.0.1:8123",
@@ -72,10 +72,15 @@ export async function startIngester({ legacy = false, failFirst = 0 } = {}) {
 	// Record every request; optionally emulate an old ingester (no check
 	// route) or a flaky one, before the real app sees it.
 	const server = createServer((req, res) => {
-		requests.push({ method: req.method, url: req.url });
+		requests.push({ method: req.method, url: req.url, encoding: req.headers["content-encoding"] ?? null, bytes: Number(req.headers["content-length"] ?? 0) });
 		if (legacy && req.url.startsWith("/v1/sourcemaps/check")) {
 			req.resume();
 			res.writeHead(404).end("not found");
+			return;
+		}
+		if (rejectUploads && req.url === "/v1/sourcemaps") {
+			req.resume();
+			res.writeHead(rejectUploads).end("request entity too large");
 			return;
 		}
 		if (failures > 0 && req.url === "/v1/sourcemaps") {

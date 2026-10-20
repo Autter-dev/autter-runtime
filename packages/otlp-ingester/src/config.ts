@@ -56,9 +56,9 @@ export interface IngesterConfig {
 	redactValuePatterns?: string[];
 	redactKeyPatterns?: string[];
 	/**
-	 * In-memory budget (MiB, estimated decoded size) for parsed source maps
-	 * used to symbolicate browser frames at ingest (SOURCE_MAP_CACHE_MB,
-	 * default 64).
+	 * In-memory budget (MiB, decoded size) for parsed source maps used to
+	 * symbolicate browser frames at ingest (SOURCE_MAP_CACHE_MB, default 64).
+	 * A map that needs more than half of it is used without being kept.
 	 */
 	sourceMapCacheMb?: number;
 }

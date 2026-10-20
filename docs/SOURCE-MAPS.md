@@ -12,9 +12,11 @@ the error and prepares a fix.
    same build output always gets the same id. The CLI appends a
    `//# debugId=<id>` comment, adds a one-line snippet that registers the id
    with the browser SDK, and writes `"debugId"` into the `.map`.
-2. **Upload.** Every map goes to the ingester's `POST /v1/sourcemaps` with a
-   server key, its debug id, the release and the path the bundle is served
-   from. Maps the ingester already has are skipped.
+2. **Upload.** Every map goes to the ingester's `POST /v1/sourcemaps`,
+   gzipped, with a server key, its debug id, the release, the path the
+   bundle is served from and the bundle's function scopes (see **Function
+   names** under [How the pieces fit](#how-the-pieces-fit)). Maps the
+   ingester already has are skipped.
 3. **Match.** `@autter/runtime-browser` 1.6.0+ sends, with each exception, the
    debug ids of the scripts in its stack. The ingester finds the map by debug
    id first, and by release + path when there is none. A debug id names the
@@ -176,11 +178,72 @@ nothing. Running inject again changes nothing.
 
 **Storage.** `runtime_source_maps` (ReplacingMergeTree, 30-day TTL) keeps one
 map per org, repository, release and path, now with `debug_id` and
-`content_hash`. `sourcesContent` is stripped by the CLI and again by the
-ingester, and maps are limited to 5 MB. `POST /v1/sourcemaps/check` tells the
-CLI which maps are already stored (same release, path, debug id and content,
-uploaded in the last 7 days), so re-runs skip them; older ones are re-sent to
-refresh the TTL.
+`content_hash`, in a ZSTD-compressed `String` column. `sourcesContent` is
+stripped by the CLI and again by the ingester. A stored map may be up to
+32 MiB (5 MiB up to ingester 1.6.0), enough for a vendor chunk of about 20 MB
+of minified code. The CLI sends the request gzipped (`Content-Encoding:
+gzip`; maps shrink roughly 3×) and the ingester inflates it, counting its body limit
+(32 MiB + 1 MiB) in inflated bytes, so a small compressed body can't expand
+past it. The key is checked before the body is read. `POST
+/v1/sourcemaps/check` tells the CLI which maps are already stored (same
+release, path, debug id and content, uploaded in the last 7 days), so re-runs
+skip them; older ones are re-sent to refresh the TTL.
+
+**Function names.** A frame is named after the function it is in, the way
+Sentry (js-source-scopes) and PostHog (cymbal's `token.scope()`) do it.
+`upload` parses each bundle exactly as served (after `inject`, so positions
+match browser stacks) with [acorn](https://github.com/acornjs/acorn) and
+records every function: declarations, expressions, arrows, class and object
+methods, getters and setters. Each one is named by, in order, its own name,
+the binding it is assigned to (`const x = () => …`, `x = function …`,
+`obj.x = …`), its object or class key (a constructor takes its class's name),
+else nothing (anonymous). The name token's position is mapped through the map
+to the original identifier: the map's `names` there, else the generated name
+when it isn't a minified one (≤ 2 characters), else the identifier at the
+original position in `sourcesContent`. A name the minifier removed
+(`function onPayClick() {}` passed inline) is read back from `sourcesContent`
+too. The result travels in the map, encoded like `mappings`:
+
+```json
+"x_autter_scopes": {
+  "version": 1,
+  "names": ["captured", "other", "addItem", "total", "onCheckoutClick"],
+  "scopes": "AAwDA,oCAgB,0BAsEI,kFAsCY,6CAoBC,yCAiBV,..."
+}
+```
+
+`scopes` is base64 VLQ with `;` between generated lines (the line a scope
+starts on) and `,` between the scopes that start on one line, in start order.
+Each scope is 3 or 4 values, 0-based and in UTF-16 columns: its start column
+(relative to the previous scope's start on the line), its end line (relative
+to the start line), its end column (exclusive; relative to the start column
+when it ends on its start line), and, when it has a name, a name index
+(relative to the last one written). Name indexes continue the map's own
+`names`, which already hold most original names (`AAwDA` above is columns
+0–56 of line 0, named `names[0]`, `computeTotal`); `x_autter_scopes.names`
+holds the rest, and a `null` there is a minified name that could not be
+mapped. A 3-value scope is anonymous. On a TypeScript-sized bundle (21 688
+functions, 5 MB map) this is 187 KB, 3.8% of the map: about 7 bytes per
+function plus 1 204 extra names.
+
+The ingester names a frame after the innermost scope that contains it
+(`null` in an anonymous function or top-level code; for a `null` name it keeps
+the call-site name). Maps uploaded without scopes (older CLIs) keep the
+earlier rule: the name the map holds at the caller's position. That rule names
+`const run = actions.captured; run()` as `run` and a handler a framework calls
+as `fn`/`func`/`listener`, which also merged different handlers of one file
+into one `frames-v3` issue. A bundle that does not parse, or a map that only
+fits the 32 MB limit without scopes, is uploaded without them and the CLI
+prints a warning.
+
+**Parse cache.** Parsed maps are kept in an LRU bounded by
+`SOURCE_MAP_CACHE_MB` (64 MiB by default), counted by what they actually take:
+mappings are decoded into one `Int32Array` (20 bytes per segment, about 3 bytes
+per byte of map JSON; a general-purpose decoder takes about 14), plus names,
+sources and scope tables. A map that would take more than half the budget —
+about 10 MiB of JSON at the default — is not kept: its frames are resolved in
+one pass over the encoded `mappings` for the whole stack, so it never flushes
+the other maps, at the cost of fetching it again for the next event.
 
 **Lookup.** Symbolication calls
 `lookupSourceMap(client, database, { orgId, repositoryId, release, filename, debugId })`
@@ -194,10 +257,16 @@ by release + path (origin, query and hash removed).
   is 1.6.0+, and that the ingester is 1.6.0+ (`GET /v1/compat` lists
   `source_map_debug_ids`). Without debug ids, the SDK `release` must equal the
   upload release and `--url-prefix` must match the served path.
-- **`map is … MB … the ingester accepts up to 5 MB`.** Split the bundle
-  (code-splitting) so each map stays under 5 MB without `sourcesContent`.
+- **`map is … MB … the ingester accepts up to 32 MB`.** Split the bundle
+  (code-splitting) so each map stays under 32 MB without `sourcesContent`.
+- **`HTTP 413 … ingester 1.6.0 and older accept up to 5 MB`.** The ingester
+  predates large maps; upgrade it, or split the bundle.
 - **`release "…" is not valid`.** Use a commit SHA or a value with only
   letters, digits, `.`, `_` and `-`.
+- **Frames are named after call sites** (`run`, `fn`, `func`, `listener`).
+  The map was uploaded without function scopes: by a CLI that predates them,
+  or with a warning (the bundle did not parse, or the map is close to 32 MB).
+  Upload it again with the current `@autter/runtime-cli`.
 - **Subresource integrity.** Injection changes bundle bytes after the build,
   so script hashes computed during the build (Next.js `experimental.sri`,
   webpack SRI plugins) no longer match. Recompute them after injecting, or

@@ -34,6 +34,7 @@ export {
 export {
 	DEFAULT_ENDPOINT,
 	FatalUploadError,
+	MAX_MAP_CHARS,
 	MAX_UPLOAD_BYTES,
 	resolveEndpoint,
 	servedFilename,
@@ -43,6 +44,7 @@ export {
 	type UploadOptions,
 	type UploadSummary,
 } from "./upload.js";
+export { computeScopes, SCOPES_KEY, SCOPES_VERSION, type ScopesResult, type SourceMapScopes } from "./scopes.js";
 export { gitHead, RELEASE_ENV_VARS, RELEASE_RE, resolveRelease, type ResolvedRelease } from "./release.js";
 export {
 	formatUploadSummary,

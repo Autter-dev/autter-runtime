@@ -7,6 +7,7 @@ import { hasDebugIdSnippet, readDebugIdComment } from "../dist/index.js";
 import { withAutterSourceMaps } from "../dist/next.js";
 import { autterSourceMaps } from "../dist/vite.js";
 import { AutterSourceMapsWebpackPlugin } from "../dist/webpack.js";
+import { ScopeIndex } from "../../otlp-ingester/dist/source-map-scopes.js";
 import { decodeMappings, read, readJson, SERVER_KEY, SIMPLE_MAP, startIngester, tempDir, writeFiles } from "./helpers.mjs";
 
 const silent = { silent: true };
@@ -46,6 +47,12 @@ test("Rollup: hidden maps, debug ids injected into every chunk, maps uploaded th
 		const lines = decodeMappings(map.mappings);
 		assert.deepEqual(lines[0], []);
 		assert.ok(lines.slice(1).some((segments) => segments.some((s) => map.sources[s[1]].endsWith(row.filename.includes("lazy") ? "lazy.js" : "main.js"))));
+		// Function scopes, computed on the chunk as written (snippet included).
+		const scopes = ScopeIndex.from(map.x_autter_scopes, map.names);
+		const [marker, name] = row.filename.includes("lazy") ? ["lazy failure", "run"] : ["a + b", "add"];
+		const before = code.slice(0, code.indexOf(marker)).split("\n");
+		assert.deepEqual(scopes.nameAt(before.length - 1, before.at(-1).length), { kind: "named", name });
+		assert.equal(scopes.nameAt(0, code.indexOf("try")).kind, "anonymous", "the snippet's own function on line 0");
 	}
 });
 

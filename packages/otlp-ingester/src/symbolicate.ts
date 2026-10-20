@@ -1,9 +1,17 @@
 import {
 	isIgnored,
-	originalPositionFor,
 	sourceContentFor,
 	TraceMap,
+	type SourceMapInput,
 } from "@jridgewell/trace-mapping";
+import {
+	DecodedMappings,
+	decodedMappingsBytes,
+	findInMappings,
+	type GeneratedPosition,
+	type MappedSegment,
+} from "./source-map-mappings.js";
+import { SCOPES_KEY, ScopeIndex, type ScopeName } from "./source-map-scopes.js";
 import type { SourceMapKey } from "./source-maps-lookup.js";
 import { isInAppPath, stripQueryAndHash } from "./stack-frames.js";
 import type { StackFrame } from "./types.js";
@@ -14,11 +22,17 @@ import type { StackFrame } from "./types.js";
  * fingerprinted, so `frames-v3` hashes `checkout.tsx`, not
  * `index-5f3a9c1e.js` — and an issue survives deploys and preview domains.
  *
- * - Function names come from the map's `names`: the name mapped at the
- *   CALLER's position is the callee's original name (the call site names
- *   what it calls). Without one, a resolved frame keeps its parsed name
- *   only when that is not an obviously mangled one (≤ 2 characters), since
- *   a mangled name changes on every build.
+ * - Function names: when the map carries function scopes
+ *   (`x_autter_scopes`, uploaded by @autter/runtime-cli after 1.0.0), a
+ *   frame is named after the innermost function containing it, with that
+ *   function's original name (null in an anonymous function or top-level
+ *   code) — see source-map-scopes.ts. Maps without scopes keep the earlier
+ *   rule: the name mapped at the CALLER's position is the callee's original
+ *   name; without one, a resolved frame keeps its parsed name only when
+ *   that is not an obviously mangled one (≤ 2 characters), since a mangled
+ *   name changes on every build. That rule is wrong for calls through a
+ *   variable (`const run = actions.captured; run()` names the frame `run`)
+ *   and for handlers a framework calls, which is why scopes exist.
  * - Sources the map lists in `ignoreList` / `x_google_ignoreList` are not
  *   in-app; a resolved path under node_modules/ etc. is not in-app either.
  * - Context lines only when the map carries `sourcesContent` (the upload
@@ -26,7 +40,10 @@ import type { StackFrame } from "./types.js";
  * - Never fails ingest: any error leaves the frame as parsed.
  *
  * Parsed maps are cached per (org, repository, release, file) — or per debug
- * id — in a byte-bounded LRU, so a busy issue never refetches its map.
+ * id — in a byte-bounded LRU, so a busy issue never refetches its map. A map
+ * that would take more than half of that budget is used for its lookup and
+ * not kept (source-map-mappings.ts reads it without decoding it), so one huge
+ * vendor chunk cannot flush every other map.
  */
 
 export type MapFetcher = (key: SourceMapKey) => Promise<string | null>;
@@ -55,7 +72,8 @@ export function scriptPath(filename: string): string | null {
 // ── Cache ─────────────────────────────────────────────────────────────────
 
 export interface SourceMapCacheOptions {
-	/** Budget for the estimated in-memory size of parsed maps (default 64 MiB). */
+	/** Budget for the estimated in-memory size of parsed maps (default 64 MiB).
+	 * A map that would take more than half of it is not cached. */
 	maxBytes?: number;
 	maxEntries?: number;
 	/** How long a found map is reused (default 1 h). */
@@ -67,21 +85,36 @@ export interface SourceMapCacheOptions {
 	now?: () => number;
 }
 
+/** A parsed map: its metadata, its function scopes, and position lookups. */
+export interface LoadedSourceMap {
+	/** Sources, names, ignore list and sourcesContent. Its own `mappings`
+	 * are left empty: positions go through `lookup`. */
+	map: TraceMap;
+	scopes: ScopeIndex | null;
+	/** Original positions for 0-based generated positions (one call per stack). */
+	lookup(positions: readonly GeneratedPosition[]): Array<MappedSegment | null>;
+	/** Estimated heap: decoded mappings (when decoded), strings and scopes. */
+	bytes: number;
+	/** False when the map was too big to keep, so its mappings were not decoded. */
+	cacheable: boolean;
+}
+
 interface CacheEntry {
-	map: TraceMap | null;
+	map: LoadedSourceMap | null;
 	weight: number;
 	expiresAt: number;
 }
 
 /**
- * Decoded mappings take several times the JSON's size; the budget counts an
- * estimate so a handful of large bundles cannot exhaust a small container.
+ * The largest share of the budget one map may take. A bigger one is used
+ * for its lookup and dropped: keeping it would evict most other maps, and
+ * every event in those files would then refetch theirs.
  */
-const DECODED_WEIGHT_FACTOR = 8;
+const MAX_SHARE_OF_BUDGET = 0.5;
 
 export class SourceMapCache {
 	private readonly entries = new Map<string, CacheEntry>();
-	private readonly inFlight = new Map<string, Promise<TraceMap | null>>();
+	private readonly inFlight = new Map<string, Promise<LoadedSourceMap | null>>();
 	private weight = 0;
 	private readonly maxBytes: number;
 	private readonly maxEntries: number;
@@ -91,6 +124,8 @@ export class SourceMapCache {
 	private readonly now: () => number;
 	/** Fetches made (cache misses) — for tests and /healthz-style debugging. */
 	fetches = 0;
+	/** Maps used without being cached because they were too big to keep. */
+	bypassed = 0;
 
 	constructor(options: SourceMapCacheOptions = {}) {
 		this.maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
@@ -112,8 +147,13 @@ export class SourceMapCache {
 		return this.entries.size;
 	}
 
+	/** Estimated bytes of the cached maps (what `maxBytes` bounds). */
+	get bytes(): number {
+		return this.weight;
+	}
+
 	/** The parsed map for `key` (null when none), fetching at most once at a time. */
-	async get(key: SourceMapKey, fetchMap: MapFetcher): Promise<TraceMap | null> {
+	async get(key: SourceMapKey, fetchMap: MapFetcher): Promise<LoadedSourceMap | null> {
 		const id = SourceMapCache.keyOf(key);
 		const hit = this.entries.get(id);
 		if (hit) {
@@ -132,7 +172,7 @@ export class SourceMapCache {
 		return load;
 	}
 
-	private async load(id: string, key: SourceMapKey, fetchMap: MapFetcher): Promise<TraceMap | null> {
+	private async load(id: string, key: SourceMapKey, fetchMap: MapFetcher): Promise<LoadedSourceMap | null> {
 		this.fetches += 1;
 		let json: string | null;
 		try {
@@ -149,19 +189,20 @@ export class SourceMapCache {
 			this.store(id, null, 0, this.missTtlMs);
 			return null;
 		}
-		let map: TraceMap;
+		let loaded: LoadedSourceMap;
 		try {
-			map = new TraceMap(json);
+			loaded = parseSourceMap(json, this.maxBytes * MAX_SHARE_OF_BUDGET);
 		} catch {
 			// A malformed upload is a miss until it is replaced.
 			this.store(id, null, 0, this.missTtlMs);
 			return null;
 		}
-		this.store(id, map, json.length * DECODED_WEIGHT_FACTOR, this.hitTtlMs);
-		return map;
+		if (loaded.cacheable) this.store(id, loaded, loaded.bytes, this.hitTtlMs);
+		else this.bypassed += 1;
+		return loaded;
 	}
 
-	private store(id: string, map: TraceMap | null, weight: number, ttlMs: number): void {
+	private store(id: string, map: LoadedSourceMap | null, weight: number, ttlMs: number): void {
 		// A map bigger than the whole budget serves this lookup but is not kept:
 		// caching it would evict everything else.
 		if (weight > this.maxBytes) return;
@@ -183,6 +224,59 @@ export class SourceMapCache {
 		this.entries.delete(id);
 		this.weight -= entry.weight;
 	}
+}
+
+/** Rough heap of a list of strings (V8 strings plus array slots). */
+function stringsBytes(list: unknown): number {
+	if (!Array.isArray(list)) return 0;
+	let bytes = 16;
+	for (const item of list) bytes += 8 + (typeof item === "string" ? 2 * item.length + 24 : 0);
+	return bytes;
+}
+
+/**
+ * Parse a stored map once: metadata, scopes (null when absent or malformed
+ * — a bad scope field never loses the map) and position lookups. When the
+ * estimated heap is at most `maxDecodedBytes`, the mappings are decoded
+ * once into a compact table; otherwise they are left encoded and each
+ * lookup reads them in one pass (`cacheable: false`). Throws when the map
+ * itself is unusable.
+ */
+export function parseSourceMap(json: string, maxDecodedBytes = Number.POSITIVE_INFINITY): LoadedSourceMap {
+	const raw: unknown = JSON.parse(json);
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("not a source map");
+	const fields = raw as Record<string, unknown>;
+	const { mappings } = fields;
+	if (typeof mappings !== "string") throw new Error("no mappings");
+	// TraceMap copies only the standard fields, but given an object that has
+	// its private `_decodedMemo` it would return that object as is. It gets
+	// no mappings: decoding them is this module's job.
+	delete fields._decodedMemo;
+	const map = new TraceMap({ ...fields, mappings: "" } as unknown as SourceMapInput);
+	let scopes: ScopeIndex | null = null;
+	try {
+		scopes = ScopeIndex.from(fields[SCOPES_KEY], map.names);
+	} catch {
+		scopes = null;
+	}
+	const bytes =
+		decodedMappingsBytes(mappings) +
+		stringsBytes(map.names) +
+		stringsBytes(map.sources) +
+		stringsBytes(map.resolvedSources) +
+		stringsBytes(map.sourcesContent) +
+		(scopes?.bytes ?? 0);
+	if (bytes <= maxDecodedBytes) {
+		const decoded = DecodedMappings.decode(mappings);
+		return {
+			map,
+			scopes,
+			bytes,
+			cacheable: true,
+			lookup: (positions) => positions.map((position) => decoded.find(position.line, position.column)),
+		};
+	}
+	return { map, scopes, bytes, cacheable: false, lookup: (positions) => findInMappings(mappings, positions) };
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────
@@ -217,6 +311,8 @@ interface Resolution {
 	frame: StackFrame;
 	/** The original name mapped at this frame's own position (the callee it calls). */
 	nameHere: string | null;
+	/** The function this frame is in, when its map carries scopes. */
+	scope: ScopeName | null;
 }
 
 export class Symbolicator {
@@ -274,20 +370,16 @@ export class Symbolicator {
 		const maps = await Promise.all(
 			keys.map((key) => (key ? this.cache.get(key, this.fetchMap) : Promise.resolve(null))),
 		);
-		const resolutions: Array<Resolution | null> = frames.map((frame, i) => {
-			const map = maps[i];
-			if (!map) return null;
-			try {
-				return resolveFrame(map, frame);
-			} catch {
-				return null;
-			}
-		});
+		const resolutions = resolveFrames(frames, maps);
 		if (!resolutions.some(Boolean)) return frames;
 		return frames.map((frame, i) => {
 			const resolution = resolutions[i];
 			if (!resolution) return frame;
-			// Innermost first: the caller is the next frame.
+			const { scope } = resolution;
+			if (scope?.kind === "named") return { ...resolution.frame, function: scope.name };
+			if (scope?.kind === "anonymous") return { ...resolution.frame, function: null };
+			// No scopes (an older upload), or a function whose name the CLI
+			// could not map: innermost first, so the caller is the next frame.
 			const callerName = resolutions[i + 1]?.nameHere ?? null;
 			const parsed = frame.function;
 			const name = callerName ?? (parsed && !looksMangled(parsed) ? parsed : null);
@@ -296,30 +388,74 @@ export class Symbolicator {
 	}
 }
 
-function resolveFrame(map: TraceMap, frame: StackFrame): Resolution | null {
-	const position = originalPositionFor(map, {
-		line: frame.lineno!,
-		// Stack columns are 1-based, source map columns 0-based.
-		column: Math.max(0, (frame.colno ?? 1) - 1),
+/** A frame's 0-based generated position (stack lines and columns are 1-based). */
+function generatedPosition(frame: StackFrame): GeneratedPosition {
+	return { line: frame.lineno! - 1, column: Math.max(0, (frame.colno ?? 1) - 1) };
+}
+
+/** Resolve every frame that has a map, with one lookup per map: a map too
+ * big to keep is read in a single pass for the whole stack. */
+function resolveFrames(frames: StackFrame[], maps: Array<LoadedSourceMap | null>): Array<Resolution | null> {
+	const resolutions: Array<Resolution | null> = frames.map(() => null);
+	const byMap = new Map<LoadedSourceMap, number[]>();
+	maps.forEach((loaded, index) => {
+		if (!loaded) return;
+		const indexes = byMap.get(loaded);
+		if (indexes) indexes.push(index);
+		else byMap.set(loaded, [index]);
 	});
-	if (!position.source || position.line == null) return null;
-	const filename = stripQueryAndHash(position.source);
+	for (const [loaded, indexes] of byMap) {
+		const positions = indexes.map((index) => generatedPosition(frames[index]!));
+		let segments: Array<MappedSegment | null>;
+		try {
+			segments = loaded.lookup(positions);
+		} catch {
+			continue;
+		}
+		indexes.forEach((frameIndex, k) => {
+			try {
+				resolutions[frameIndex] = resolveFrame(loaded, frames[frameIndex]!, positions[k]!, segments[k] ?? null);
+			} catch {
+				resolutions[frameIndex] = null;
+			}
+		});
+	}
+	return resolutions;
+}
+
+function resolveFrame(
+	loaded: LoadedSourceMap,
+	frame: StackFrame,
+	position: GeneratedPosition,
+	segment: MappedSegment | null,
+): Resolution | null {
+	const { map } = loaded;
+	if (!segment) return null;
+	const source = map.resolvedSources[segment.source];
+	if (!source) return null;
+	const filename = stripQueryAndHash(source);
 	const ignored = (() => {
 		try {
-			return isIgnored(map, position.source);
+			return isIgnored(map, source);
 		} catch {
 			return false;
 		}
 	})();
+	const line = segment.line + 1;
 	const resolved: StackFrame = {
 		function: frame.function,
 		module: null,
 		filename,
-		lineno: position.line,
-		colno: position.column == null ? null : position.column + 1,
+		lineno: line,
+		colno: segment.column + 1,
 		inApp: !ignored && isInAppPath(filename),
 		resolved: true,
-		...contextFor(map, position.source, position.line),
+		...contextFor(map, source, line),
 	};
-	return { frame: resolved, nameHere: position.name ?? null };
+	const name = segment.name >= 0 ? map.names[segment.name] : undefined;
+	return {
+		frame: resolved,
+		nameHere: typeof name === "string" ? name : null,
+		scope: loaded.scopes ? loaded.scopes.nameAt(position.line, position.column) : null,
+	};
 }

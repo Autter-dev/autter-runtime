@@ -50,6 +50,10 @@ const INSERT_SETTINGS: ClickHouseSettings = {
 	wait_for_async_insert: 1,
 };
 
+/** Source maps above this go in with a plain insert (below ClickHouse's
+ * default async_insert_max_data_size of 10 MiB). */
+const ASYNC_INSERT_MAX_MAP_CHARS = 8 * 1024 * 1024;
+
 /** "YYYY-MM-DD hh:mm:ss.sss" (UTC) — the DateTime64 query-parameter form. */
 function chDateTime(date: Date): string {
 	return date.toISOString().replace("T", " ").replace("Z", "");
@@ -526,7 +530,15 @@ export class ClickHouseStore {
 		await this.ensureSchema();
 		await this.getClient().insert({
 			table: this.table("runtime_source_maps"), format: "JSONEachRow",
-			clickhouse_settings: INSERT_SETTINGS,
+			// One row of up to 32 MiB. Parallel parsing cuts input into
+			// 10 MiB chunks, refuses single JSON rows far past that, and gains
+			// nothing on one row. A map past the async-insert buffer (10 MiB
+			// by default) is inserted directly rather than buffered.
+			clickhouse_settings: {
+				...INSERT_SETTINGS,
+				input_format_parallel_parsing: 0,
+				...(sourceMap.map.length > ASYNC_INSERT_MAX_MAP_CHARS ? { async_insert: 0 } : {}),
+			},
 			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, release: sourceMap.release,
 				filename: sourceMap.filename, map: sourceMap.map, debug_id: sourceMap.debugId,
 				content_hash: sourceMap.contentHash }],

@@ -50,6 +50,9 @@
 		"build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
 		"test": "npm run build -w @autter/otlp-ingester && npm run build && node --test test/*.test.mjs"
 	},
+	"dependencies": {
+		"acorn": "^8.17.0"
+	},
 	"peerDependencies": {
 		"next": ">=13",
 		"rollup": ">=3",
@@ -72,6 +75,7 @@
 	},
 	"devDependencies": {
 		"@types/node": "^22.10.0",
+		"esbuild": "^0.28.1",
 		"rollup": "^4.62.2",
 		"tsup": "^8.3.5",
 		"typescript": "^5.7.0"

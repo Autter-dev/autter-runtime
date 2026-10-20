@@ -3,7 +3,9 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import type { IngesterConfig } from "./config.js";
+import { occurrenceIdFor } from "./fingerprint.js";
 import { createIngesterApp } from "./server.js";
+import type { RuntimeOccurrenceInput } from "./types.js";
 
 /**
  * End-to-end over the wire (Nirzari's repro): a page that only reports
@@ -233,4 +235,98 @@ test("captureException-style internal error spans reach the sink with metrics", 
 	);
 	assert.equal(totals.events, 1);
 	assert.equal(totals.errors, 1);
+});
+
+test("one error recorded on two spans reaches the sink once, with the same id when the batch is re-sent", async () => {
+	const ms = Date.now();
+	const nanos = (offset: number) => `${ms + offset}000000`;
+	const stack = "Error: boom\n    at GET (/app/.next/server/app/api/boom/route.js:12:11)";
+	const event = (offset: number) => ({
+		name: "exception",
+		timeUnixNano: nanos(offset),
+		attributes: [
+			{ key: "exception.type", value: { stringValue: "Error" } },
+			{ key: "exception.message", value: { stringValue: "boom" } },
+			{ key: "exception.stacktrace", value: { stringValue: stack } },
+		],
+	});
+	// Next's route span (recordException), then the HTTP server span with
+	// @autter/runtime-node's capture, as tail retention exports them.
+	const body = JSON.stringify({
+		resourceSpans: [
+			{
+				resource: {
+					attributes: [{ key: "service.name", value: { stringValue: "next-app" } }],
+				},
+				scopeSpans: [
+					{
+						spans: [
+							{
+								traceId: "d".repeat(32),
+								spanId: "2".repeat(16),
+								parentSpanId: "1".repeat(16),
+								name: "executing api route (app) /api/boom",
+								kind: 1,
+								startTimeUnixNano: nanos(0),
+								endTimeUnixNano: nanos(5),
+								status: { code: 2 },
+								attributes: [{ key: "autter.tail_retained", value: { boolValue: true } }],
+								events: [event(5)],
+							},
+							{
+								traceId: "d".repeat(32),
+								spanId: "1".repeat(16),
+								name: "GET",
+								kind: 2,
+								startTimeUnixNano: nanos(0),
+								endTimeUnixNano: nanos(8),
+								status: { code: 2 },
+								attributes: [
+									{ key: "http.route", value: { stringValue: "/api/boom" } },
+									{ key: "http.response.status_code", value: { intValue: 500 } },
+									{ key: "autter.severity", value: { stringValue: "error" } },
+									{ key: "next.route_path", value: { stringValue: "/api/boom" } },
+									{ key: "autter.tail_retained", value: { boolValue: true } },
+								],
+								events: [event(6)],
+							},
+						],
+					},
+				],
+			},
+		],
+	});
+	const send = async () => {
+		const res = await fetch(`${ingestUrl}/v1/traces`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer test-key" },
+			body,
+		});
+		assert.equal(res.status, 200);
+		return nextSinkBatch();
+	};
+	const first = await send();
+	const retry = await send();
+
+	assert.equal(first.occurrences.length, 1);
+	assert.equal(first.occurrences[0].attributes["next.route_path"], "/api/boom");
+	assert.equal(first.occurrences[0].attributes["autter.merged_recordings"], 2);
+	assert.deepEqual(
+		retry.occurrences.map((o: { occurrenceId: string }) => o.occurrenceId),
+		first.occurrences.map((o: { occurrenceId: string }) => o.occurrenceId),
+	);
+	// The kept recording (the HTTP span's, signal 1 of the batch) keeps the
+	// id it had before the dedupe: same content, same batch position.
+	const kept = first.occurrences[0];
+	assert.equal(
+		kept.occurrenceId,
+		occurrenceIdFor(
+			{ orgId: "org-e2e", repositoryId: "repo-e2e" },
+			{ ...kept, occurredAt: new Date(kept.occurredAt), sessionId: kept.sessionId ?? null } as RuntimeOccurrenceInput,
+			kept.fingerprint,
+			1,
+		),
+	);
+	const events = first.metrics.reduce((sum: number, p: { requestCount: number }) => sum + p.requestCount, 0);
+	assert.equal(events, 1);
 });

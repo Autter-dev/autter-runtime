@@ -294,6 +294,21 @@ Span-level:
 
 - Error occurrence emitted when span status is `ERROR`, or per `exception`
   event (`exception.type`, `exception.message`, `exception.stacktrace`).
+- One occurrence per thrown error (`trace-dedupe.ts`, per export batch).
+  Two `exception` events are one error, merged, when they share trace,
+  service, environment and release; sit on different spans, one an ancestor
+  of the other in the batch; have the same type (or one is OTel JS's
+  `recordException` reporting `error.code` as the type); the same normalised
+  message; in-app frames that are equal or a prefix/suffix of each other;
+  and are recorded within 5 s. Two events on one span, or on sibling spans,
+  stay separate (a retry loop recording each attempt). The merged occurrence
+  is the Autter SDK's recording (else the one with runtime-next's
+  `onRequestError` context, else the one nearest the root), keeps its id,
+  and takes what it lacks from the others (`autter.merged_recordings`
+  counts them). A status-only `HttpServerError` / `SpanError` is dropped
+  when an unhandled error-severity exception or failed outcome of the same
+  service sits on an ancestor or descendant span in the batch. Spans of one
+  trace exported in different batches are not compared.
 - `route` from `http.route`, falling back to `url.path` / `http.target`
   (query-stripped).
 - `status_code` from `http.response.status_code` / `http.status_code`.

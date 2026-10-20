@@ -5,6 +5,7 @@ import { scrubText } from "./redact.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { extractLlmCall } from "./llm.js";
 import { BREADCRUMBS_ATTRIBUTE, breadcrumbsField } from "./breadcrumbs.js";
+import { dedupeTraceSignals, hasAutterKey, hasNextContext, type TraceSignal } from "./trace-dedupe.js";
 import {
 	asSeverity,
 	type RuntimeLlmCall,
@@ -209,7 +210,13 @@ function severityOf(
 }
 
 export interface NormalizedTraces {
+	/** One per thrown error: duplicate recordings across a trace's spans are
+	 * merged and redundant status-only occurrences dropped (trace-dedupe.ts). */
 	occurrences: RuntimeOccurrenceInput[];
+	/** Each occurrence's position among every signal the batch recorded,
+	 * before deduplication: the batch index its deterministic id is derived
+	 * from, so a merge or a drop never shifts another occurrence's id. */
+	occurrenceBatchIndexes: number[];
 	spans: RuntimeSpanRow[];
 	metricPoints: RuntimeMetricPoint[];
 	llmCalls: RuntimeLlmCall[];
@@ -219,8 +226,10 @@ export interface NormalizedTraces {
 const MAX_SPANS_PER_REQUEST = 5000;
 
 export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
-	const occurrences: RuntimeOccurrenceInput[] = [];
-	const occurrenceSpanIds: string[] = [];
+	const signals: TraceSignal[] = [];
+	// Per signal: whether a server span's request rollup already counts it,
+	// and the route its own rollup keys on (before HTTP inheritance).
+	const signalRollups: Array<{ onRequestRollup: boolean; route: string }> = [];
 	const spans: RuntimeSpanRow[] = [];
 	const llmCalls: RuntimeLlmCall[] = [];
 	const rollups = new Map<string, RuntimeMetricPoint>();
@@ -267,42 +276,59 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					startedAt,
 				});
 
-				// Error occurrences: one per exception event; if the span is
+				// Error signals: one per exception event; if the span is
 				// errored without exception events, one from the span status.
-				const occurrencesBefore = occurrences.length;
+				// They become occurrences after the batch-wide dedupe below.
+				const traceId = span.traceId ?? "";
+				const spanId = span.spanId ?? "";
+				const rollup = {
+					onRequestRollup: kind === "server" && attrs.get("autter.tail_retained") !== "true",
+					route: route ?? "",
+				};
+				const spanAutter = attrs.has("autter.severity");
 				const exceptionEvents = (span.events ?? []).filter(
 					(event) => event.name === "exception",
 				);
 				for (const event of exceptionEvents) {
 					const eventAttrs = attrMap(event.attributes);
 					const handled = eventAttrs.get("autter.handled") === "true";
-					occurrenceSpanIds.push(span.spanId ?? "");
-					occurrences.push({
-						source: "server",
-						severity: severityOf(eventAttrs, attrs),
-						service: resource.service,
-						environment: resource.environment,
-						release: resource.release,
-						errorType: eventAttrs.get("exception.type") ?? "Error",
-						message:
-							eventAttrs.get("exception.message") ??
-							span.status?.message ??
-							span.name ??
-							"Unknown error",
-						stack: eventAttrs.get("exception.stacktrace") ?? null,
-						route,
-						method: methodOf(attrs),
-						statusCode,
-						traceId: span.traceId ?? null,
-						sessionId: null,
-						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
-							...(handled ? { "autter.handled": true, "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) }),
-						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
-						// Event attributes first: one span can carry several
-						// exceptions, each with its own code.
-						...liftErrorFields(eventAttrs, attrs),
-						...breadcrumbsField(eventAttrs.get(BREADCRUMBS_ATTRIBUTE), attrs.get(BREADCRUMBS_ATTRIBUTE)),
-						...fingerprintOverrideOf(eventAttrs.get("autter.fingerprint") ?? attrs.get("autter.fingerprint")),
+					const eventAutter = hasAutterKey(eventAttrs);
+					signalRollups.push(rollup);
+					signals.push({
+						traceId,
+						spanId,
+						signal: "exception",
+						autterCapture: eventAutter || spanAutter,
+						eventAutter,
+						nextContext: hasNextContext(eventAttrs, attrs),
+						handled,
+						occurrence: {
+							source: "server",
+							severity: severityOf(eventAttrs, attrs),
+							service: resource.service,
+							environment: resource.environment,
+							release: resource.release,
+							errorType: eventAttrs.get("exception.type") ?? "Error",
+							message:
+								eventAttrs.get("exception.message") ??
+								span.status?.message ??
+								span.name ??
+								"Unknown error",
+							stack: eventAttrs.get("exception.stacktrace") ?? null,
+							route,
+							method: methodOf(attrs),
+							statusCode,
+							traceId: span.traceId ?? null,
+							sessionId: null,
+							attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
+								...(handled ? { "autter.handled": true, "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) }),
+							occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
+							// Event attributes first: one span can carry several
+							// exceptions, each with its own code.
+							...liftErrorFields(eventAttrs, attrs),
+							...breadcrumbsField(eventAttrs.get(BREADCRUMBS_ATTRIBUTE), attrs.get(BREADCRUMBS_ATTRIBUTE)),
+							...fingerprintOverrideOf(eventAttrs.get("autter.fingerprint") ?? attrs.get("autter.fingerprint")),
+						},
 					});
 				}
 				const failedOutcomes = (span.events ?? []).filter((event) => {
@@ -312,40 +338,58 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				for (const event of failedOutcomes) {
 					const outcome = attrMap(event.attributes);
 					const name = (outcome.get("autter.outcome.name") ?? "operation").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 200);
-					occurrenceSpanIds.push(span.spanId ?? "");
-					occurrences.push({
-						source: "server", severity: "error", service: resource.service,
-						environment: resource.environment, release: resource.release,
-						errorType: "OutcomeFailure",
-						message: `${name}: ${(outcome.get("autter.outcome.message") ?? "failed").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 1000)}`,
-						stack: String(decodeOtlpAttributes(event.attributes)["autter.outcome.stack"] ?? "") || null, route, method: methodOf(attrs), statusCode,
-						traceId: span.traceId ?? null, sessionId: null,
-						attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }),
-						occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
-						...liftErrorFields(outcome, attrs),
+					signalRollups.push(rollup);
+					signals.push({
+						traceId,
+						spanId,
+						signal: "outcome",
+						autterCapture: true,
+						eventAutter: true,
+						nextContext: hasNextContext(outcome, attrs),
+						handled: false,
+						occurrence: {
+							source: "server", severity: "error", service: resource.service,
+							environment: resource.environment, release: resource.release,
+							errorType: "OutcomeFailure",
+							message: `${name}: ${(outcome.get("autter.outcome.message") ?? "failed").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 1000)}`,
+							stack: String(decodeOtlpAttributes(event.attributes)["autter.outcome.stack"] ?? "") || null, route, method: methodOf(attrs), statusCode,
+							traceId: span.traceId ?? null, sessionId: null,
+							attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }),
+							occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
+							...liftErrorFields(outcome, attrs),
+						},
 					});
 				}
 				if (exceptionEvents.length === 0 && failedOutcomes.length === 0 && isError) {
-					occurrenceSpanIds.push(span.spanId ?? "");
-					occurrences.push({
-						source: "server",
-						severity: severityOf(new Map(), attrs),
-						service: resource.service,
-						environment: resource.environment,
-						release: resource.release,
-						errorType: statusCode !== null && statusCode >= 500 ? "HttpServerError" : "SpanError",
-						message: span.status?.message || (statusCode !== null && statusCode >= 500
-							? `${methodOf(attrs) ?? "HTTP"} ${route ?? span.name ?? "request"} returned ${statusCode}`
-							: `${span.name ?? "span"} failed`),
-						stack: null,
-						route,
-						method: methodOf(attrs),
-						statusCode,
-						traceId: span.traceId ?? null,
-						sessionId: null,
-						attributes: decodeOtlpAttributes(span.attributes),
-						occurredAt: startedAt,
-						...liftErrorFields(attrs),
+					signalRollups.push(rollup);
+					signals.push({
+						traceId,
+						spanId,
+						signal: "status",
+						autterCapture: spanAutter,
+						eventAutter: false,
+						nextContext: hasNextContext(attrs),
+						handled: false,
+						occurrence: {
+							source: "server",
+							severity: severityOf(new Map(), attrs),
+							service: resource.service,
+							environment: resource.environment,
+							release: resource.release,
+							errorType: statusCode !== null && statusCode >= 500 ? "HttpServerError" : "SpanError",
+							message: span.status?.message || (statusCode !== null && statusCode >= 500
+								? `${methodOf(attrs) ?? "HTTP"} ${route ?? span.name ?? "request"} returned ${statusCode}`
+								: `${span.name ?? "span"} failed`),
+							stack: null,
+							route,
+							method: methodOf(attrs),
+							statusCode,
+							traceId: span.traceId ?? null,
+							sessionId: null,
+							attributes: decodeOtlpAttributes(span.attributes),
+							occurredAt: startedAt,
+							...liftErrorFields(attrs),
+						},
 					});
 				}
 
@@ -376,7 +420,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				// ships those at ~100% alongside a metrics pipeline that already
 				// counts every request, so folding them in would double-count
 				// erroring routes.
-				if (kind === "server" && attrs.get("autter.tail_retained") !== "true") {
+				if (rollup.onRequestRollup) {
 					addToRollup(rollups, {
 						service: resource.service,
 						environment: resource.environment,
@@ -388,36 +432,50 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						durationSumMs: durationMs,
 						sessionCount: 0,
 					});
-				} else {
-					// Occurrences on non-server spans (captureException's internal
-					// error spans, workers, consumers) have no request rollup to
-					// ride — count each as one event / one error event, or a
-					// service whose errors arrive outside HTTP handlers groups
-					// issues while every event counter stays 0. Server spans are
-					// excluded: their request rollup above already represents them.
-					for (const occ of occurrences.slice(occurrencesBefore)) {
-						addToRollup(rollups, {
-							service: occ.service,
-							environment: occ.environment,
-							release: occ.release,
-							route: occ.route ?? "",
-							bucketAt: minuteBucket(occ.occurredAt),
-							requestCount: 1,
-							errorCount:
-								occ.severity === "fatal" || occ.severity === "error" ? 1 : 0,
-							durationSumMs: 0,
-							sessionCount: 0,
-						});
-					}
 				}
 			}
 		}
 	}
 
-	inheritHttpFromParent(occurrences, occurrenceSpanIds, spans);
+	// One occurrence per thrown error: recordings of one error on several
+	// spans of a trace merge, and status-only occurrences an error on their
+	// span chain explains are dropped (trace-dedupe.ts).
+	const deduped = dedupeTraceSignals(signals, spans);
+	const occurrences = deduped.occurrences;
+
+	// Occurrences on non-server spans (captureException's internal error
+	// spans, workers, consumers) have no request rollup to ride — count each
+	// as one event / one error event, or a service whose errors arrive
+	// outside HTTP handlers groups issues while every event counter stays 0.
+	// Server spans are excluded: their request rollup above already
+	// represents them, and so does it for a merged error any of whose
+	// recordings sits on one. Counted after the dedupe, so each thrown error
+	// is one event; a dropped status-only occurrence is none.
+	deduped.members.forEach((members, i) => {
+		if (members.some((m) => signalRollups[m]!.onRequestRollup)) return;
+		const occ = occurrences[i]!;
+		addToRollup(rollups, {
+			service: occ.service,
+			environment: occ.environment,
+			release: occ.release,
+			route: signalRollups[deduped.sourceIndexes[i]!]!.route,
+			bucketAt: minuteBucket(occ.occurredAt),
+			requestCount: 1,
+			errorCount: occ.severity === "fatal" || occ.severity === "error" ? 1 : 0,
+			durationSumMs: 0,
+			sessionCount: 0,
+		});
+	});
+
+	inheritHttpFromParent(
+		occurrences,
+		deduped.sourceIndexes.map((index) => signals[index]!.spanId),
+		spans,
+	);
 
 	return {
 		occurrences,
+		occurrenceBatchIndexes: deduped.sourceIndexes,
 		spans,
 		metricPoints: [...rollups.values()],
 		llmCalls,

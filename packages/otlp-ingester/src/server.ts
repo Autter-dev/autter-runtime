@@ -335,10 +335,16 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	 * `fingerprint` / `fingerprintScheme` stay the legacy identity
 	 * (message-v1 or code-v1) byte-for-byte; `fingerprints` carries every
 	 * candidate (manual-v1, code-v1, frames-v3, message-v1) for the platform
-	 * to resolve the issue from. */
+	 * to resolve the issue from.
+	 *
+	 * `batchIndexes` (traces): each occurrence's position among the batch's
+	 * signals before the per-trace dedupe, so a merged occurrence keeps the
+	 * id of the recording it kept and a drop never shifts another's id.
+	 * Defaults to the position in `inputs`. */
 	async function fingerprintAll(
 		ctx: IngestContext,
 		inputs: RuntimeOccurrenceInput[],
+		batchIndexes?: number[],
 	): Promise<RuntimeOccurrence[]> {
 		return Promise.all(
 			inputs.map(async (raw, index) => {
@@ -355,7 +361,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				const { debugIds: _debugIds, ...stored } = input;
 				return {
 					...stored,
-					occurrenceId: occurrenceIdFor(ctx, input, fingerprint, index),
+					occurrenceId: occurrenceIdFor(ctx, input, fingerprint, batchIndexes?.[index] ?? index),
 					fingerprint,
 					fingerprintScheme: scheme,
 					...deriveFields(input),
@@ -483,9 +489,9 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		} else {
 			request = req.body as OtlpTraceRequest;
 		}
-		const { occurrences, spans, metricPoints, llmCalls } =
+		const { occurrences, occurrenceBatchIndexes, spans, metricPoints, llmCalls } =
 			normalizeTraces(request);
-		const fingerprinted = await fingerprintAll(ctx, occurrences);
+		const fingerprinted = await fingerprintAll(ctx, occurrences, occurrenceBatchIndexes);
 		// ClickHouse has no cross-table transaction, so these four inserts can
 		// partially commit. Recovery boundary: any failure → 503 → the exporter
 		// retries the whole batch. Deterministic occurrence ids make the retry

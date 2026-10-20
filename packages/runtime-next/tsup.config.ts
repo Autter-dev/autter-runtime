@@ -13,11 +13,24 @@ export default defineConfig([
 		external: ["next", "next/server"],
 	},
 	{
-		entry: { edge: "src/edge.ts" },
+		// Runtime-neutral entries: no Node modules at the top level. The
+		// default instrumentation build loads @autter/runtime-node lazily on
+		// the Node runtime only; instrumentation-edge never references it.
+		entry: {
+			edge: "src/edge.ts",
+			instrumentation: "src/instrumentation.ts",
+			"instrumentation-edge": "src/instrumentation-edge.ts",
+		},
 		format: ["esm", "cjs"],
 		dts: true,
 		target: "es2022",
 		platform: "neutral",
+		// CJS: load @autter/runtime-node with require(), like the CJS root
+		// entry does, so both reach the same module instance (and the same
+		// tracker started by registerAutter). ESM keeps import().
+		esbuildOptions(options, { format }) {
+			if (format === "cjs") options.supported = { ...options.supported, "dynamic-import": false };
+		},
 	},
 	{
 		entry: { client: "src/client.ts" },

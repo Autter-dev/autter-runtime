@@ -75,6 +75,35 @@ initAutterServer({
 Relay for your frontend: `app.post("/api/autter-runtime", createBrowserRelayHandler({ apiKey }))`.
 ESM-only apps need OTel's loader hook (see the package README).
 
+**Server errors with their stacks.** A framework turns a thrown error into a
+500, which on its own reaches Autter as a stackless `HttpServerError` grouped
+by route. Add the framework's hook and the error itself is recorded, stack
+included, on the request span; the framework then handles it exactly as
+before:
+
+| Framework | Hook |
+| --- | --- |
+| Express / Connect | `app.use(autterErrorHandler())` after your routes, before your own error handlers — calls `next(err)` unchanged |
+| Fastify 4/5 | `app.register(autterFastifyErrors)` or `autterFastifyErrors(app)` (`onError` hook; `autterFastify` already includes it) |
+| Koa 2/3 | `app.use(autterKoa())` first — records and rethrows |
+| Anything else (NestJS filters, hapi, …) | `captureRequestError(err)` from your error hook |
+
+They report errors with status ≥ 500 (or none), RuntimeErrors and coded
+errors; pass `{ capture: true }` for every error or a predicate. Each error is
+reported once, even if your handler already called `captureException`.
+
+**Unhandled promise rejections** are recorded as errors (severity `error`,
+`autter.unhandled_rejection: true`) without changing whether the process
+crashes. Adding an `unhandledRejection` listener would normally switch off
+Node's default crash, so when Node would have crashed (default
+`--unhandled-rejections=throw`, no other listener) the SDK rethrows the
+rejection on the next tick: the process still exits with code 1 and the crash
+is recorded as fatal, as before (your `uncaughtException` listeners see origin
+`"uncaughtException"` instead of `"unhandledRejection"`). With your own
+`unhandledRejection` listener, your listener decides. `warn-with-error-code`
+keeps its warning and exit code 1; `strict` crashes first and is recorded by
+the crash monitor. `captureUnhandledRejections: false` turns this off.
+
 Request summaries and coded errors (1.5.0, ingester 1.5.0 first):
 
 | Framework | Wiring |
@@ -112,6 +141,27 @@ secret binding. Next.js `middleware.ts`: import from `@autter/runtime-next/edge`
 route, client init + boundary). See the package README. Route handlers:
 `export const POST = withRuntimeRequest(handler)` (flush wired to `after()`);
 `middleware.ts`: `@autter/runtime-next/edge`.
+
+Errors Next catches itself (server components, server actions, route
+handlers, middleware) need Next 15's `onRequestError` hook, or they arrive as
+stackless 500s. In `instrumentation.ts`:
+
+```ts
+import { autterOnRequestError } from "@autter/runtime-next/instrumentation";
+
+// Node: recorded on the request span by the registerAutter tracker.
+// Edge: sent to /v1/logs with these options (no tracker runs on the edge).
+export const onRequestError = autterOnRequestError({
+  edge: { apiKey: process.env.AUTTER_RUNTIME_KEY, service: "web-app" },
+});
+```
+
+Node-only apps can `export { onRequestError } from "@autter/runtime-next/instrumentation"`.
+The subpath is safe on both runtimes: bundlers pick an edge-only build (no
+Node imports) through the `edge-light`/`worker` export conditions. It records
+the stack, `next.route_path`, `next.router_kind`, `next.route_type`,
+`next.render_source`, `next.digest`, the method and the path without its query
+string — never headers or cookies — and skips `redirect()`/`notFound()`.
 
 ## Go
 

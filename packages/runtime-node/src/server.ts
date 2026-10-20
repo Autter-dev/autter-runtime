@@ -77,6 +77,10 @@ import {
 } from "./requests.js";
 import { errorAttributes, errorInternal } from "@autter/runtime-core";
 import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
+import {
+	installUnhandledRejectionCapture,
+	recordedAsRejection,
+} from "./unhandled-rejections.js";
 
 /**
  * Curated OpenTelemetry setup for Autter Runtime — deliberately NOT the
@@ -140,8 +144,23 @@ export interface AutterServerOptions {
 	metricIntervalMs?: number;
 	/** Collect RSS, heap, limit, and GC signals per process instance. Default true. */
 	memoryMetrics?: boolean;
-	/** Capture crashing exceptions via process.uncaughtExceptionMonitor (default true). */
+	/**
+	 * Capture crashing exceptions via process.uncaughtExceptionMonitor, and
+	 * unhandled promise rejections (see `captureUnhandledRejections`).
+	 * Default true; false turns both off.
+	 */
 	captureGlobalErrors?: boolean;
+	/**
+	 * Record unhandled promise rejections as errors (severity "error",
+	 * `autter.unhandled_rejection: true`). Never changes whether the process
+	 * crashes: when Node would have crashed (the default
+	 * `--unhandled-rejections=throw` mode and no other `unhandledRejection`
+	 * listener), the rejection is rethrown on the next tick, so the process
+	 * still exits with code 1 and the crash is recorded as fatal like any
+	 * other. False restores 1.5.0 behaviour: a rejection is only seen when it
+	 * crashes the process. Default true.
+	 */
+	captureUnhandledRejections?: boolean;
 	/**
 	 * Flush all exporters when the process exits (`beforeExit`, SIGINT,
 	 * SIGTERM) so a forgotten `shutdown()` doesn't silently drop buffered
@@ -1070,17 +1089,28 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	});
 	hookRequests = options.logging?.requests === true;
 
+	let onCrash: ((err: unknown) => void) | null = null;
+	let uninstallRejections: (() => void) | null = null;
 	if (options.captureGlobalErrors !== false) {
 		// `uncaughtExceptionMonitor` observes crashes WITHOUT changing the
 		// process's exit semantics (unlike an `uncaughtException` listener).
 		// Best-effort: the batch may not fully flush before the process dies.
-		process.on("uncaughtExceptionMonitor", (err) => {
+		onCrash = (err) => {
+			// Already recorded as an unhandled rejection (an app listener
+			// rethrew it): one rejection stays one occurrence.
+			if (recordedAsRejection(err)) return;
 			captureException(err, { "autter.unhandled": true });
 			if (options.autoFlush === false) void Promise.resolve(flushTarget.forceFlush()).catch(() => {});
-		});
-		// In Node's default throw mode, an unhandled rejection reaches the
-		// uncaughtExceptionMonitor above. Installing an unhandledRejection
-		// listener would suppress that default crash, so leave it alone.
+		};
+		process.on("uncaughtExceptionMonitor", onCrash);
+		// Rejections Node does not crash on are recorded as errors; the ones
+		// it would crash on are rethrown so they still crash (and reach the
+		// monitor above). See unhandled-rejections.ts.
+		if (options.captureUnhandledRejections !== false) {
+			uninstallRejections = installUnhandledRejectionCapture((reason) =>
+				captureException(reason, { "autter.unhandled_rejection": true }),
+			);
+		}
 	}
 
 	// Everything that buffers telemetry in-process, reachable as one unit:
@@ -1125,6 +1155,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		shutdown: async () => {
 			const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
 			hookRequests = false;
+			if (onCrash) process.off("uncaughtExceptionMonitor", onCrash);
+			uninstallRejections?.();
 			stopMemoryMetrics?.();
 			active = null;
 			activeAlwaysOnProvider = null;
@@ -1184,7 +1216,7 @@ export function serverActive(): boolean {
 /** @internal Redacted structured-error span attributes (logger-only mode). */
 export { structuredErrorAttributes };
 
-setRequestExceptionCapturer((error) => captureException(error));
+setRequestExceptionCapturer((error, attributes) => captureException(error, attributes));
 
 /**
  * Module-level convenience — see AutterServer.withProcessSpan. Before

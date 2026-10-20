@@ -107,6 +107,29 @@ Also exported: `RuntimeError`, `defineRuntimeErrors`, `isRuntimeErrorLike`,
 `toClientError`, `CODE_PATTERN` — the same coded-error API as
 `@autter/runtime-node`, so one catalog module can serve both.
 
+## Errors outside a request handler
+
+`captureEdgeException(options, error, attributes?)` reports one exception
+without `withAutter` — a scheduled or queue handler, or Next.js
+`onRequestError` on the edge runtime (which `@autter/runtime-next/instrumentation`
+does for you). It takes the same options, sends one error record (stack
+included, promoted to an issue by the ingester) to `/v1/logs` straight away,
+and resolves when it was delivered or dropped. It never rejects, and an error
+`withAutter` already reported is skipped.
+
+```ts
+export default {
+  async scheduled(event, env, ctx) {
+    try {
+      await syncAccounts(env);
+    } catch (error) {
+      ctx.waitUntil(captureEdgeException({ apiKey: env.AUTTER_RUNTIME_KEY, service: "edge-cron" }, error,
+        { "job.name": "sync-accounts" }));
+    }
+  },
+};
+```
+
 ## Limits
 
 No tracing: records carry no trace ids, and there are no steps or child

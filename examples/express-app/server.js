@@ -6,7 +6,8 @@
  * (The local `docker compose up` ingester has no built-in key; see
  * docs/GETTING-STARTED.md for generating one.)
  *
- * - Server tracing/errors via @autter/runtime-node (OTel → /v1/traces)
+ * - Server tracing/errors via @autter/runtime-node (OTel → /v1/traces); thrown
+ *   errors keep their stack through autterErrorHandler
  * - One request summary per HTTP request via autterRequests (→ /v1/logs),
  *   echoed request ids, coded errors and client-safe error responses
  * - Browser errors via @autter/runtime-browser → same-origin relay → /v1/browser
@@ -14,10 +15,10 @@
 import {
 	initAutterServer,
 	createBrowserRelayHandler,
-	captureException,
 	withLlmCall,
 	emitLlmSelftestTrace,
 	autterRequests,
+	autterErrorHandler,
 	autterErrorResponse,
 	defineRuntimeErrors,
 	runtimeContext,
@@ -86,13 +87,10 @@ app.post("/api/checkout", express.json(), (req, res, next) => {
 	res.json({ ok: true, requestId: runtimeContext.requestId });
 });
 
-app.get("/api/boom", (_req, res) => {
-	try {
-		throw new TypeError("cannot read properties of undefined (reading 'total')");
-	} catch (err) {
-		captureException(err, { route: "/api/boom" });
-		res.status(500).json({ error: "boom" });
-	}
+// A plain bug: no try/catch, no manual captureException. autterErrorHandler
+// below records it with its stack on the request span.
+app.get("/api/boom", () => {
+	throw new TypeError("cannot read properties of undefined (reading 'total')");
 });
 
 // LLM tracing: withLlmCall records the call at 100% with tokens + cost.
@@ -115,8 +113,14 @@ app.get("/api/llm-selftest", async (_req, res) => {
 	res.json(await emitLlmSelftestTrace());
 });
 
-// Last: turns errors into client-safe JSON (never `internal`), records them on
-// the request summary and reports coded/5xx errors.
+// After the routes: records every 5xx/coded error, stack included, on the
+// request span, then calls next(err) unchanged. Keep your own error handler
+// after it; here that is autterErrorResponse.
+app.use(autterErrorHandler());
+
+// Last: turns errors into client-safe JSON (never `internal`) and records them
+// on the request summary. (It reports errors too; autterErrorHandler got there
+// first, so each error is reported once.)
 app.use(autterErrorResponse());
 
 app.listen(3000, () => {

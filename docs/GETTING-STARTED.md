@@ -135,10 +135,25 @@ node --require ./instrument.cjs server.js
 ```
 
 That alone gives you: every incoming HTTP request traced-and-sampled,
-request/error/duration rollups per route, crashes captured, and the full
-trace of any request that errors — erroring traces are retained even when
-the sampler wouldn't have kept them, so every issue keeps the trace that
-explains it. For handled errors:
+request/error/duration rollups per route, crashes and unhandled promise
+rejections captured (without changing whether your process crashes), and the
+full trace of any request that errors — erroring traces are retained even
+when the sampler wouldn't have kept them, so every issue keeps the trace that
+explains it.
+
+Add your framework's error hook so errors thrown in handlers keep their
+stack. Without it, the 500 the framework answers with is all Autter sees:
+
+```js
+const { autterErrorHandler, autterFastifyErrors, autterKoa } = require("@autter/runtime-node");
+
+app.use(autterErrorHandler());        // Express: after your routes, before your own error handlers
+app.register(autterFastifyErrors);    // Fastify
+app.use(autterKoa());                 // Koa: first
+```
+
+Each records the error on the request span and lets the framework handle it
+as before. For handled errors:
 
 ```js
 const { captureException } = require("@autter/runtime-node");
@@ -315,6 +330,19 @@ the error boundary — see the
 snippets (`instrumentation.ts`, `app/api/autter-runtime/route.ts`, and a
 client component). Wrap route handlers in `withRuntimeRequest` for request
 summaries; `middleware.ts` uses `@autter/runtime-next/edge`.
+
+Errors Next catches itself — in server components, server actions, route
+handlers and middleware — reach Autter with their stack through Next 15's
+`onRequestError`. Add it to `instrumentation.ts`, next to `register()`:
+
+```ts
+import { autterOnRequestError } from "@autter/runtime-next/instrumentation";
+
+export const onRequestError = autterOnRequestError({
+  // Only for errors on the edge runtime (middleware, edge routes):
+  edge: { apiKey: process.env.AUTTER_RUNTIME_KEY, service: "web-app" },
+});
+```
 
 Cloudflare Workers, Vercel Edge, Deno or Bun without Next.js:
 `npm install @autter/runtime-edge` and wrap the fetch handler in `withAutter`

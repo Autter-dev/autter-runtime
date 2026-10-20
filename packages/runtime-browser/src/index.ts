@@ -672,6 +672,9 @@ export function setContext(context: Record<string, unknown> | null): void {
 	globalContext = context ?? undefined;
 }
 
+/** Milliseconds since `from`, capped at two minutes. */
+const elapsed = (from: number) => Math.min(120000, Math.round(performance.now() - from));
+
 export function initAutterBrowser(options: AutterBrowserOptions): void {
 	if (initialized || typeof window === "undefined") return;
 	opts = options as typeof opts;
@@ -709,12 +712,12 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			const [traced, traceId] = (!isTelemetry && tracer?.fetch(target, input, init)) || [init];
 			return originalFetch(input, traced).then((response) => {
 				tracer?.settle(traceId);
-				if (!isTelemetry) crumbs?.add("request", method, path, response.status, performance.now() - started);
+				if (!isTelemetry) crumbs?.add("request", method, path, response.status, elapsed(started));
 				if (!isTelemetry && response.status >= 500) {
 					const event = baseEvent("request_failure", `Request returned ${response.status}`);
 					event.name = path;
 					event.errorType = "HttpRequestError";
-					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					event.durationMs = elapsed(started);
 					try { addRequestId(event, response.headers.get("x-request-id")); } catch { /* No headers. */ }
 					enqueue(event, true);
 				}
@@ -722,11 +725,11 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			}, (error: unknown) => {
 				tracer?.settle(traceId);
 				if (!isTelemetry) {
-					crumbs?.add("request", method, path, 0, performance.now() - started);
+					crumbs?.add("request", method, path, 0, elapsed(started));
 					const event = baseEvent("request_failure", "Request failed");
 					event.name = path;
 					event.errorType = "NetworkError";
-					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					event.durationMs = elapsed(started);
 					enqueue(event, true);
 				}
 				throw error;
@@ -751,18 +754,18 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				const record = (message: string, errorType: string, requestId?: string | null) => {
 					if (recorded) return;
 					recorded = true;
-					crumbs?.add("request", method, path, this.status, performance.now() - started);
+					crumbs?.add("request", method, path, this.status, elapsed(started));
 					const event = baseEvent("request_failure", message);
 					event.name = path;
 					event.errorType = errorType;
-					event.durationMs = Math.min(120000, Math.round(performance.now() - started));
+					event.durationMs = elapsed(started);
 					addRequestId(event, requestId);
 					enqueue(event, true);
 				};
 				const onError = () => record("Request failed", "NetworkError");
 				const onTimeout = () => record("Request timed out", "NetworkError");
 				this.addEventListener("loadend", () => {
-					if (this.status < 500 && !recorded) crumbs?.add("request", method, path, this.status, performance.now() - started);
+					if (this.status < 500 && !recorded) crumbs?.add("request", method, path, this.status, elapsed(started));
 					if (this.status >= 500) {
 						let requestId: string | null = null;
 						try { requestId = this.getResponseHeader("x-request-id"); } catch { /* Not exposed. */ }

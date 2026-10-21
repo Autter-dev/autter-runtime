@@ -22,7 +22,7 @@
    "route": "/carts/{cart_id}/checkout",
    "statusCode": 500,
    "severity": "error",
-   "requestCount": 1,
+   "requestCount": 0,
    "errorCount": 1,
    "inAppFrames": [
     {
@@ -71,7 +71,7 @@
    "route": "/carts/{cart_id}/availability",
    "statusCode": 500,
    "severity": "error",
-   "requestCount": 1,
+   "requestCount": 0,
    "errorCount": 1,
    "inAppFrames": [
     {

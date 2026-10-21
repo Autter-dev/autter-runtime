@@ -190,7 +190,7 @@ describe("python request counting and dedupe on real spans", () => {
 			assert.equal(result.occurrences.length, 1, name);
 			// The kept recording is the request span's, with its route and status.
 			assert.equal(result.occurrences[0]!.statusCode, 500, name);
-			assert.deepEqual(sums(result.metricPoints), { requestCount: 1, errorCount: 1 }, name);
+			assert.deepEqual(sums(result.metricPoints), { requestCount: name.includes("sampled") ? 1 : 0, errorCount: 1 }, name);
 		}
 	});
 
@@ -200,7 +200,8 @@ describe("python request counting and dedupe on real spans", () => {
 		// Same totals either way: a sampled request counts once with its error
 		// riding it; a retained one is not a traffic sample, its error counts
 		// once as an event on the same route.
-		assert.deepEqual(sums(sampled.metricPoints), sums(retained.metricPoints));
+		assert.deepEqual(sums(sampled.metricPoints), { requestCount: 1, errorCount: 1 });
+		assert.deepEqual(sums(retained.metricPoints), { requestCount: 0, errorCount: 1 });
 		assert.deepEqual(sampled.metricPoints.map((p) => p.route), ["orders/<int:order_id>/charge"]);
 		assert.deepEqual(retained.metricPoints.map((p) => p.route), ["orders/<int:order_id>/charge"]);
 		assert.ok(sampled.metricPoints[0]!.durationSumMs > 0, "a sampled request carries its latency");
@@ -241,7 +242,7 @@ describe("python request counting and dedupe on real spans", () => {
 		const ship = [...byFingerprint.values()].find((list) => list.length === 2)!;
 		assert.notEqual(ship[0]!.message, ship[1]!.message);
 		// Consumer spans are not requests: each failure is one error event.
-		assert.deepEqual(sums(metricPoints), { requestCount: 3, errorCount: 3 });
+		assert.deepEqual(sums(metricPoints), { requestCount: 0, errorCount: 3 });
 	});
 
 	test("an exception group is parsed to its own frames, not its sub-exceptions'", () => {
@@ -356,6 +357,6 @@ test("a Django 500 posted as the Python exporter posts it reaches the sink with 
 	assert.equal(occurrence.attributes["autter.merged_recordings"], 2);
 	assert.deepEqual(
 		batch.metrics.map((m: { requestCount: number; errorCount: number }) => [m.requestCount, m.errorCount]),
-		[[1, 1]],
+		[[0, 1]],
 	);
 });

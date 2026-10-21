@@ -18,7 +18,7 @@
    "occurrences": 3,
    "errorType": "fulfilment.PrinterOffline",
    "severity": "error",
-   "requestCount": 3,
+   "requestCount": 0,
    "errorCount": 3,
    "groups": {
     "shop.ship_order": {

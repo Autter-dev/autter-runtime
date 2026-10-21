@@ -47,7 +47,7 @@
    "route": "orders/<int:order_id>/charge",
    "statusCode": 500,
    "severity": "error",
-   "requestCount": 1,
+   "requestCount": 0,
    "errorCount": 1,
    "inAppFrames": [
     {

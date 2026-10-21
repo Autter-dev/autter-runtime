@@ -72,11 +72,11 @@ function span(spec: SpanSpec) {
 	};
 }
 
-function batch(spans: SpanSpec[], service = "web"): OtlpTraceRequest {
+function batch(spans: SpanSpec[], service = "web", resource: Record<string, Value> = {}): OtlpTraceRequest {
 	return {
 		resourceSpans: [
 			{
-				resource: { attributes: kv({ "service.name": service, "deployment.environment": "production" }) },
+				resource: { attributes: kv({ "service.name": service, "deployment.environment": "production", ...resource }) },
 				scopeSpans: [{ spans: spans.map(span) }],
 			},
 		],
@@ -159,7 +159,10 @@ function nextRouteError(): SpanSpec[] {
 }
 
 test("Next.js: the Autter capture and Next's recordException of one error are one occurrence", () => {
-	const { occurrences, occurrenceBatchIndexes, metricPoints } = normalizeTraces(batch(nextRouteError()));
+	// @autter/runtime-node's resource: its delta request metrics count requests.
+	const { occurrences, occurrenceBatchIndexes, metricPoints } = normalizeTraces(
+		batch(nextRouteError(), "web", { "autter.metrics_wired": true }),
+	);
 
 	assert.equal(occurrences.length, 1);
 	const [error] = occurrences;
@@ -181,9 +184,11 @@ test("Next.js: the Autter capture and Next's recordException of one error are on
 	assert.equal(error.attributes?.["next.router_kind"], "App Router");
 	assert.equal(error.attributes?.["next.span_type"], "AppRouteRouteHandlers.runHandler");
 	assert.equal(error.attributes?.["autter.merged_recordings"], 2);
-	// One error, one event (before: three — two exceptions and the
-	// BaseServer span's HttpServerError — each counted).
-	assert.deepEqual(totals(metricPoints), { requests: 1, errors: 1 });
+	// Nothing from the spans: tail retention exported them, so the metric
+	// feed counts this request and its 500 (before the dedupe: three events,
+	// two exceptions and the BaseServer span's HttpServerError; before EI-26:
+	// one event, also counted as a request).
+	assert.deepEqual(totals(metricPoints), { requests: 0, errors: 0 });
 });
 
 test("merging fills the kept recording's gaps, declared error fields included", () => {
@@ -260,10 +265,11 @@ test("express: a status-only 500 on the http span and the middleware's exception
 	assert.equal(occurrences[0]?.errorType, "Error");
 	assert.equal(occurrences[0]?.message, "Database Error");
 	assert.equal(occurrences[0]?.route, "/api/gmails");
-	// The request (1 request, 1 error) plus the exception's own event, as
-	// before; the dropped HttpServerError sat on the server span, which never
-	// added an event of its own.
-	assert.deepEqual(totals(metricPoints), { requests: 2, errors: 2 });
+	// One request, one error. The exception sits on a span inside the
+	// request the server span counts, so it rides that request instead of
+	// adding an event of its own (before EI-26: 2 requests, 2 errors for one
+	// request); the dropped HttpServerError never added one either.
+	assert.deepEqual(totals(metricPoints), { requests: 1, errors: 1 });
 });
 
 test("an errored ancestor without an event adds no stackless SpanError", () => {
@@ -279,7 +285,8 @@ test("an errored ancestor without an event adds no stackless SpanError", () => {
 		{ id: 1, name: "worker.tick", error: true },
 	]));
 	assert.deepEqual(occurrences.map((o) => o.errorType), ["QueryError"]);
-	assert.deepEqual(totals(metricPoints), { requests: 1, errors: 1 });
+	// A worker, no request: one error, no request (EI-26).
+	assert.deepEqual(totals(metricPoints), { requests: 0, errors: 1 });
 });
 
 test("a status-only error alone is kept", () => {
@@ -371,7 +378,8 @@ test("a retry loop capturing each attempt on one span keeps every attempt", () =
 		},
 	]));
 	assert.equal(occurrences.length, 3);
-	assert.deepEqual(totals(metricPoints), { requests: 3, errors: 3 });
+	// Three errors outside any request; no requests (EI-26).
+	assert.deepEqual(totals(metricPoints), { requests: 0, errors: 3 });
 });
 
 test("a retry loop with a span per attempt pairs each attempt with its own parent capture", () => {

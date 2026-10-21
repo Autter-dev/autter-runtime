@@ -5,9 +5,10 @@ import { normalizeTraces } from "./normalize-otlp.js";
 import type { RuntimeMetricPoint } from "./types.js";
 
 /**
- * Regression tests for "issues detected but event counts show 0": every
- * occurrence that can group into an issue must also land in the usage
- * rollups, so the dashboard's event counters agree with the issues list.
+ * Regression tests for "issues detected but error counts show 0": every
+ * error or fatal occurrence must also land in the usage rollups' error_count.
+ * `request_count` counts requests only (EI-26): an error outside a request
+ * adds to error_count alone, one inside a request makes it a failed request.
  */
 
 function sums(points: RuntimeMetricPoint[]) {
@@ -23,7 +24,7 @@ function sums(points: RuntimeMetricPoint[]) {
 
 const T = "2026-08-16T02:02:00.000Z";
 
-test("browser error events count into the usage rollups", () => {
+test("browser errors count in error_count, never as requests", () => {
 	const { occurrences, metricPoints } = normalizeBrowserPayload({
 		version: 1,
 		service: "test-html-page",
@@ -58,9 +59,10 @@ test("browser error events count into the usage rollups", () => {
 
 	assert.equal(occurrences.length, 6);
 	const totals = sums(metricPoints);
-	// 4 exceptions + 1 rejection + 1 warning + 1 track_event = 7 events;
-	// only fatal/error severity counts as an error event.
-	assert.equal(totals.requestCount, 7);
+	// 4 exceptions + 1 rejection are errors outside any request; the
+	// warning counts nothing; the track_event keeps its usage counter on
+	// `event:clicked` (before EI-26 every event was also a request: 7).
+	assert.equal(totals.requestCount, 1);
 	assert.equal(totals.errorCount, 5);
 	assert.equal(totals.sessionCount, 1);
 });
@@ -86,7 +88,7 @@ function otlpSpan(overrides: Record<string, unknown>) {
 
 const NANOS = "1755309720000000000";
 
-test("exceptions on internal spans (captureException, workers) count as events", () => {
+test("exceptions on internal spans (captureException, workers) count as errors outside a request", () => {
 	const { occurrences, metricPoints } = normalizeTraces(
 		otlpSpan({
 			traceId: "a".repeat(32),
@@ -111,7 +113,7 @@ test("exceptions on internal spans (captureException, workers) count as events",
 
 	assert.equal(occurrences.length, 1);
 	const totals = sums(metricPoints);
-	assert.equal(totals.requestCount, 1);
+	assert.equal(totals.requestCount, 0);
 	assert.equal(totals.errorCount, 1);
 });
 
@@ -208,7 +210,7 @@ test("exception spans inherit method, route, status, and duration from the HTTP 
 	assert.equal(error.attributes?.["http.server.duration_ms"], 120);
 });
 
-test("warning occurrences count as events but not error events", () => {
+test("warning occurrences outside a request count nothing", () => {
 	const { metricPoints } = normalizeTraces(
 		otlpSpan({
 			traceId: "a".repeat(32),
@@ -233,7 +235,5 @@ test("warning occurrences count as events but not error events", () => {
 		}),
 	);
 
-	const totals = sums(metricPoints);
-	assert.equal(totals.requestCount, 1);
-	assert.equal(totals.errorCount, 0);
+	assert.deepEqual(metricPoints, []);
 });

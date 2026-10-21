@@ -258,7 +258,11 @@ test("one error recorded on two spans reaches the sink once, with the same id wh
 		resourceSpans: [
 			{
 				resource: {
-					attributes: [{ key: "service.name", value: { stringValue: "next-app" } }],
+					attributes: [
+						{ key: "service.name", value: { stringValue: "next-app" } },
+						// @autter/runtime-node: its request metrics count requests.
+						{ key: "autter.metrics_wired", value: { boolValue: true } },
+					],
 				},
 				scopeSpans: [
 					{

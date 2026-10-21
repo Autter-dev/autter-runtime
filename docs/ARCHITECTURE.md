@@ -365,8 +365,13 @@ Span-level:
     (`@autter/runtime-node` 1.7.0+: its delta `http.server.duration`
     counts every request, and it marks each request span whose data point
     got the route), or
-  - carries `autter.tail_retained` (error-linked tail retention ships
-    such spans at ~100% next to that metric feed).
+  - carries `autter.tail_retained` on a resource with
+    `autter.metrics_wired` (runtime-node's error-linked tail retention
+    ships such spans at ~100% next to its metric feed).
+  A request that carries `autter.tail_retained` on a resource without a
+  metric feed (the Python retention in `adapters/python`) is counted by
+  neither: it was exported because it failed, so it is no sample of the
+  traffic, and adds only its failure, `error_count` 1, on its route.
   A metric-counted request adds no request from its spans; the metric
   already counted a 5xx as a failed request, so an error recorded in it
   adds nothing more, while an error recorded in a request the metric saw

@@ -157,6 +157,10 @@ interface ResourceInfo {
 	 * alone (runtime-node before 1.7.0, whose Next.js metrics have no route)
 	 * is not enough: its spans keep feeding per-route request counts. */
 	metricsCountRoutedRequests: boolean;
+	/** `autter.metrics_wired`: a metric feed counts this sender's requests
+	 * (and their 5xx), so a request its error-linked tail retention exported
+	 * is counted there. */
+	metricsWired: boolean;
 	/** One process: spans of different processes are never one request. */
 	process: string;
 }
@@ -175,6 +179,7 @@ function resourceInfo(resource: OtlpResource | undefined): ResourceInfo {
 		release,
 		metricsCountRoutedRequests:
 			attrs.get("autter.metrics_wired") === "true" && attrs.get("autter.metrics_routes") === "true",
+		metricsWired: attrs.get("autter.metrics_wired") === "true",
 		process: [service, environment, release ?? "", attrs.get("service.instance.id") ?? ""].join("\u0000"),
 	};
 }
@@ -301,16 +306,9 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				spanFacts.push({
 					process: resource.process,
 					routeQuality: routeQualityOf(attrs, route),
-					// Whether this span, as the outermost server span of its
-					// request, counts the request in the span-fed rollups. Not
-					// when the sender's metric feed counts it: a request whose
-					// data point carries its route (metricsCountRoutedRequests),
-					// and spans error-linked tail retention ships at ~100% next
-					// to that feed (`autter.tail_retained`).
-					countedBySpans: !(
-						(resource.metricsCountRoutedRequests && attrs.get("autter.metric_has_route") === "true") ||
-						attrs.get("autter.tail_retained") === "true"
-					),
+					// Who counts this span's request, as its outermost server
+					// span: see countedBy.
+					countedBy: countedBy(resource, attrs),
 					templateRoute: attrs.has("http.route") && route ? normalizeRoute(route) : "",
 				});
 
@@ -507,6 +505,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	});
 	for (const [root, request] of requests) {
 		const span = spans[root]!;
+		const failed = request.isError || request.hasErrorOccurrence;
 		const point = {
 			service: span.service,
 			environment: span.environment,
@@ -514,29 +513,35 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 			bucketAt: minuteBucket(span.startedAt),
 			sessionCount: 0,
 		};
-		if (spanFacts[root]!.countedBySpans) {
-			addToRollup(rollups, {
-				...point,
-				route: request.route,
-				requestCount: 1,
-				errorCount: request.isError || request.hasErrorOccurrence ? 1 : 0,
-				// The request's latency is its outermost span's.
-				durationSumMs: span.durationMs,
-			});
-			continue;
-		}
-		// Counted by the metric feed, which already made a 5xx response a
-		// failed request. A request it saw succeed that recorded an error
-		// adds that one error, on the route its data point carried.
-		const metricCountedFailure = span.statusCode !== null && span.statusCode >= 500;
-		if (request.hasErrorOccurrence && !metricCountedFailure) {
-			addToRollup(rollups, {
-				...point,
-				route: spanFacts[root]!.templateRoute,
-				requestCount: 0,
-				errorCount: 1,
-				durationSumMs: 0,
-			});
+		switch (spanFacts[root]!.countedBy) {
+			case "spans":
+				addToRollup(rollups, {
+					...point,
+					route: request.route,
+					requestCount: 1,
+					errorCount: failed ? 1 : 0,
+					// The request's latency is its outermost span's.
+					durationSumMs: span.durationMs,
+				});
+				break;
+			case "metrics": {
+				// The metric feed counted it, and already made a 5xx response
+				// a failed request. A request it saw succeed that recorded an
+				// error adds that one error, on the route its point carried.
+				const metricCountedFailure = span.statusCode !== null && span.statusCode >= 500;
+				if (request.hasErrorOccurrence && !metricCountedFailure) {
+					addToRollup(rollups, { ...point, route: spanFacts[root]!.templateRoute, requestCount: 0, errorCount: 1, durationSumMs: 0 });
+				}
+				break;
+			}
+			case "none":
+				// Exported because it failed, with no metric feed counting
+				// requests: not a sample of the traffic, so no request; its
+				// failure counts once.
+				if (failed) {
+					addToRollup(rollups, { ...point, route: request.route, requestCount: 0, errorCount: 1, durationSumMs: 0 });
+				}
+				break;
 		}
 	}
 	for (const error of errorsOutsideRequests) addToRollup(rollups, error);
@@ -557,13 +562,30 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	};
 }
 
+/**
+ * Who counts a request, decided on its outermost server span:
+ * - "metrics": the sender's metric feed. Its data point carries the route
+ *   (`autter.metric_has_route` on a resource with `autter.metrics_wired` and
+ *   `autter.metrics_routes`), or error-linked tail retention exported it
+ *   (`autter.tail_retained`) next to a metric feed (`autter.metrics_wired`).
+ * - "none": tail retention exported it and no metric feed counts requests
+ *   (the Python retention in adapters/python): not a sample of the traffic.
+ * - "spans": anything else; its server spans are the request count.
+ */
+type RequestCounter = "spans" | "metrics" | "none";
+
+function countedBy(resource: ResourceInfo, attrs: Map<string, string>): RequestCounter {
+	if (resource.metricsCountRoutedRequests && attrs.get("autter.metric_has_route") === "true") return "metrics";
+	if (attrs.get("autter.tail_retained") === "true") return resource.metricsWired ? "metrics" : "none";
+	return "spans";
+}
+
 interface SpanFacts {
 	/** The process the span was recorded in (request-spans.ts). */
 	process: string;
 	routeQuality: number;
-	/** As a request's outermost server span: its spans count the request
-	 * (else the sender's metric feed does). */
-	countedBySpans: boolean;
+	/** As a request's outermost server span: who counts the request. */
+	countedBy: RequestCounter;
 	/** Its `http.route`, normalized, else "": the route the HTTP
 	 * instrumentation also put on the request's metric data point. */
 	templateRoute: string;

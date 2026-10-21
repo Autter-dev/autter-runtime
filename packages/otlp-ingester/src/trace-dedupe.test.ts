@@ -72,11 +72,11 @@ function span(spec: SpanSpec) {
 	};
 }
 
-function batch(spans: SpanSpec[], service = "web"): OtlpTraceRequest {
+function batch(spans: SpanSpec[], service = "web", resource: Record<string, Value> = {}): OtlpTraceRequest {
 	return {
 		resourceSpans: [
 			{
-				resource: { attributes: kv({ "service.name": service, "deployment.environment": "production" }) },
+				resource: { attributes: kv({ "service.name": service, "deployment.environment": "production", ...resource }) },
 				scopeSpans: [{ spans: spans.map(span) }],
 			},
 		],
@@ -159,7 +159,10 @@ function nextRouteError(): SpanSpec[] {
 }
 
 test("Next.js: the Autter capture and Next's recordException of one error are one occurrence", () => {
-	const { occurrences, occurrenceBatchIndexes, metricPoints } = normalizeTraces(batch(nextRouteError()));
+	// @autter/runtime-node's resource: its delta request metrics count requests.
+	const { occurrences, occurrenceBatchIndexes, metricPoints } = normalizeTraces(
+		batch(nextRouteError(), "web", { "autter.metrics_wired": true }),
+	);
 
 	assert.equal(occurrences.length, 1);
 	const [error] = occurrences;

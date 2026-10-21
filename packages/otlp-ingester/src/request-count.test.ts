@@ -419,8 +419,31 @@ test("errors in a request the metric feed saw succeed add one error, on its rout
 test("tail-retained request spans add no request; their 500 is the metric feed's", () => {
 	const spans = nextRequest().map((s) => ({ ...s, attributes: { ...s.attributes, "autter.tail_retained": true } }));
 	spans[2] = { ...spans[2]!, error: true, attributes: { ...spans[2]!.attributes, "http.status_code": 500 } };
-	const { metricPoints } = normalizeTraces(batch(spans));
+	const { metricPoints } = normalizeTraces(batch(spans, "web", METRICS_WIRED_ONLY));
 	assert.deepEqual(metricPoints, []);
+});
+
+test("tail-retained without a metric feed (Python retention): no request, its failure once", () => {
+	// adapters/python marks the error traces it retains autter.tail_retained;
+	// nothing else counts that request, and the traffic sample excludes it.
+	const spans: SpanSpec[] = [
+		{ id: 2, parent: 1, name: "charge", error: true, attributes: { "autter.tail_retained": true }, events: [exception(5, "PaymentDeclined", "declined")] },
+		{ id: 3, parent: 1, name: "audit", error: true, attributes: { "autter.tail_retained": true }, events: [exception(6, "AuditError", "audit down")] },
+		{
+			id: 1,
+			name: "POST orders/<int:order_id>/charge",
+			kind: SERVER,
+			end: 40,
+			error: true,
+			attributes: { "http.route": "orders/<int:order_id>/charge", "http.status_code": 500, "autter.tail_retained": true },
+		},
+	];
+	const { occurrences, metricPoints } = normalizeTraces(batch(spans, "shop-django"));
+	assert.equal(occurrences.length, 2);
+	assert.deepEqual(
+		metricPoints.map((p) => [p.route, p.requestCount, p.errorCount, p.durationSumMs]),
+		[["orders/<int:order_id>/charge", 0, 1, 0]],
+	);
 });
 
 test("without the flags, server spans are the fallback request count", () => {

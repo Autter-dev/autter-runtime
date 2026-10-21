@@ -36,11 +36,11 @@ npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, B
 
 | Package | Version | Use it for |
 | --- | --- | --- |
-| `@autter/runtime-browser` | 1.6.0 | Browser errors + usage, coded-error duck typing, request-id capture |
-| `@autter/runtime-node` | 1.7.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
-| `@autter/runtime-next` | 1.7.0 | Next.js: server + client + `/edge` for `middleware.ts` |
-| `@autter/runtime-edge` | 1.1.0 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
-| `@autter/otlp-ingester` | 1.8.0 | Self-hosted ingest — upgrade it **before** the SDKs |
+| `@autter/runtime-browser` | 1.7.0 | Browser errors + usage, coded-error duck typing, request-id capture |
+| `@autter/runtime-node` | 1.8.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
+| `@autter/runtime-next` | 1.8.0 | Next.js: server + client + `/edge` for `middleware.ts` |
+| `@autter/runtime-edge` | 1.2.0 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
+| `@autter/otlp-ingester` | 1.9.0 | Self-hosted ingest — upgrade it **before** the SDKs |
 | `@autter/runtime-cli` | 1.2.0 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
 
 Prefer to have an AI agent set it up for you? Install the companion agent

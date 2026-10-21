@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [1.9.0] - 2026-10-21
 
 Packages: `otlp-ingester` 1.9.0, `runtime-browser` 1.7.0, `runtime-node` 1.8.0, `runtime-next` 1.8.0, `runtime-edge` 1.2.0; `runtime-cli` 1.2.0 is unchanged. Volume control set by the user (EI-38). Any deploy order works: an ingester before 1.9.0 ignores the suppression rules in the key validator's answer, older consumers of the sink ignore `count` (and count a collapsed sample once), and migration `0021` runs at boot.
 

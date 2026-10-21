@@ -1,0 +1,38 @@
+# Celery recipe: Celery + OpenTelemetry's Celery instrumentation. No broker service needed for the tests.
+# Pinned 2026-10-21 (pip freeze of a fresh install). Python 3.10+ (OpenTelemetry 1.45); tested on 3.14.
+# autter_tracing.py and redact.py come from adapters/python (copy them next to your code).
+amqp==5.4.1
+billiard==4.3.1
+celery==5.6.3
+certifi==2026.10.19
+charset-normalizer==3.5.2
+click==8.5.0
+click-didyoumean==0.3.1
+click-plugins==1.1.1.2
+click-repl==0.4.1
+googleapis-common-protos==1.75.5
+idna==3.20
+kombu==5.6.2
+opentelemetry-api==1.45.1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-instrumentation==0.66b1
+opentelemetry-instrumentation-celery==0.66b1
+opentelemetry-proto==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+packaging==26.3
+prompt_toolkit==3.0.53
+protobuf==7.36.2
+python-dateutil==2.9.0.post0
+requests==2.34.2
+six==1.17.0
+typing_extensions==4.16.0
+tzdata==2026.5
+tzlocal==5.4.4
+urllib3==2.8.0
+vine==5.1.0
+wcwidth==0.9.3
+wrapt==2.5.1

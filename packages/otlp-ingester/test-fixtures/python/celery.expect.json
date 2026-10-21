@@ -1,0 +1,79 @@
+{
+ "framework": "celery",
+ "captured": {
+  "python": "3.14.8",
+  "packages": {
+   "celery": "5.6.3",
+   "kombu": "5.6.2",
+   "opentelemetry-sdk": "1.45.1",
+   "opentelemetry-instrumentation-celery": "0.66b1",
+   "opentelemetry-exporter-otlp-proto-http": "1.45.1"
+  }
+ },
+ "scenarios": {
+  "task-failures": {
+   "fixture": "celery-task-failures",
+   "description": "prefork worker: ship_order(1001), ship_order(1002) and send_receipt(1001) fail in the same helper",
+   "tailRetained": true,
+   "occurrences": 3,
+   "errorType": "fulfilment.PrinterOffline",
+   "severity": "error",
+   "requestCount": 3,
+   "errorCount": 3,
+   "groups": {
+    "shop.ship_order": {
+     "occurrences": 2,
+     "inAppFrames": [
+      {
+       "function": "print_label",
+       "filename": "/srv/app/fulfilment.py",
+       "lineno": 10
+      },
+      {
+       "function": "ship_order",
+       "filename": "/srv/app/tasks.py",
+       "lineno": 50
+      }
+     ]
+    },
+    "shop.send_receipt": {
+     "occurrences": 1,
+     "inAppFrames": [
+      {
+       "function": "print_label",
+       "filename": "/srv/app/fulfilment.py",
+       "lineno": 10
+      },
+      {
+       "function": "send_receipt",
+       "filename": "/srv/app/tasks.py",
+       "lineno": 55
+      }
+     ]
+    }
+   }
+  },
+  "handled": {
+   "fixture": "celery-handled",
+   "description": "prefork worker: schedule_pickup records a handled CarrierTimeout and succeeds",
+   "tailRetained": true,
+   "occurrences": 1,
+   "errorType": "fulfilment.CarrierTimeout",
+   "message": "carrier booking for order 1001 timed out",
+   "severity": "error",
+   "handled": true,
+   "inAppFrames": [
+    {
+     "function": "book_courier",
+     "filename": "/srv/app/fulfilment.py",
+     "lineno": 14
+    },
+    {
+     "function": "schedule_pickup",
+     "filename": "/srv/app/tasks.py",
+     "lineno": 61
+    }
+   ]
+  }
+ }
+}

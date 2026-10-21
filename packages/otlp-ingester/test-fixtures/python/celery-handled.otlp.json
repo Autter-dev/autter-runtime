@@ -1,0 +1,173 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "53efb44f-c54c-4c23-a0d4-e61cd4e2ede3"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "deployment.environment",
+      "value": {
+       "stringValue": "test"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "shop-worker"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.celery",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "8a8fe365376fd57c63328399da3caa98",
+       "spanId": "c4f12b5398583e8e",
+       "name": "run/shop.schedule_pickup",
+       "kind": "SPAN_KIND_CONSUMER",
+       "startTimeUnixNano": "1792546272312566000",
+       "endTimeUnixNano": "1792546272312752000",
+       "attributes": [
+        {
+         "key": "celery.action",
+         "value": {
+          "stringValue": "run"
+         }
+        },
+        {
+         "key": "celery.state",
+         "value": {
+          "stringValue": "SUCCESS"
+         }
+        },
+        {
+         "key": "messaging.conversation_id",
+         "value": {
+          "stringValue": "65aaef83-0b26-46b3-80df-c3359e832bf5"
+         }
+        },
+        {
+         "key": "messaging.destination",
+         "value": {
+          "stringValue": "celery"
+         }
+        },
+        {
+         "key": "celery.delivery_info",
+         "value": {
+          "stringValue": "{'exchange': '', 'routing_key': 'celery', 'priority': 0, 'redelivered': False}"
+         }
+        },
+        {
+         "key": "messaging.message.id",
+         "value": {
+          "stringValue": "65aaef83-0b26-46b3-80df-c3359e832bf5"
+         }
+        },
+        {
+         "key": "celery.reply_to",
+         "value": {
+          "stringValue": "48c6969f-3a4c-3737-be21-57a0ebefe80e"
+         }
+        },
+        {
+         "key": "celery.hostname",
+         "value": {
+          "stringValue": "[redacted]"
+         }
+        },
+        {
+         "key": "celery.task_name",
+         "value": {
+          "stringValue": "shop.schedule_pickup"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546272312673000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "fulfilment.CarrierTimeout"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "carrier booking for order 1001 timed out"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/app/tasks.py\", line 61, in schedule_pickup\n    book_courier(order_id)  # frame: schedule_pickup\n    ~~~~~~~~~~~~^^^^^^^^^^\n  File \"/srv/app/fulfilment.py\", line 14, in book_courier\n    raise CarrierTimeout(f\"carrier booking for order {order_id} timed out\")  # frame: book_courier\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nfulfilment.CarrierTimeout: carrier booking for order 1001 timed out\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          },
+          {
+           "key": "autter.handled",
+           "value": {
+            "boolValue": true
+           }
+          }
+         ]
+        }
+       ],
+       "status": {},
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    }
+   ]
+  }
+ ]
+}

@@ -368,7 +368,11 @@ OTEL_TRACES_SAMPLER_ARG=0.01
 
 Errors become issues when spans record exceptions
 (`span.RecordError(err)` in Go, `record_exception` in Python, …) or carry
-`ERROR` status. Per-language snippets: [INTEGRATIONS.md](INTEGRATIONS.md).
+`ERROR` status. The ratio sampler above drops the errors of the traces it
+drops; Python services keep them with `adapters/python/autter_tracing.py`
+([Python](INTEGRATIONS.md#python-django-fastapi-flask-celery)), other SDKs as
+described in [INTEGRATIONS.md](INTEGRATIONS.md#java--ruby--net--anything-else).
+Per-language snippets: [INTEGRATIONS.md](INTEGRATIONS.md).
 
 LLM calls need no Autter package either: any OTel GenAI instrumentation
 (`gen_ai.*` spans — e.g. `opentelemetry-instrumentation-openai-v2` in

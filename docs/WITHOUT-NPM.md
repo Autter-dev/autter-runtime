@@ -40,7 +40,10 @@ OTEL_TRACES_SAMPLER_ARG=0.01
 Install that language's OTel SDK + OTLP exporter from its own package
 manager (`pip`, `gem`, `go get`, `cargo`, Maven/Gradle, NuGet, Composer, …)
 and enable its auto-instrumentation. Per-language snippets for Go, Rust,
-Python and friends live in [INTEGRATIONS.md](INTEGRATIONS.md).
+Python and friends live in [INTEGRATIONS.md](INTEGRATIONS.md). A ratio
+sampler drops the errors of the traces it does not keep: Python services keep
+them with two copied files and no package
+([recipes for Django, FastAPI, Flask and Celery](INTEGRATIONS.md#python-django-fastapi-flask-celery)).
 
 How the signals map:
 

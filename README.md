@@ -157,7 +157,8 @@ For endpoint latency detection and slow-request retention, see [endpoint regress
 | Next.js | `@autter/runtime-next` | server key |
 | Node (Express, Fastify, Koa, Nest) | `@autter/runtime-node` | server key |
 | Cloudflare Workers, Vercel Edge, Deno, Bun | `@autter/runtime-edge` | server key (secret binding) |
-| Go, Rust, Python, Java, .NET, … | any OTel SDK → OTLP/HTTP (protobuf **or** JSON) | server key |
+| Python (Django, FastAPI, Flask, Celery) | OTel SDK + framework instrumentation + [`autter_tracing.py`](adapters/python/autter_tracing.py) (errors of unsampled traces kept) → OTLP/HTTP | server key |
+| Go, Rust, Java, .NET, … | any OTel SDK → OTLP/HTTP (protobuf **or** JSON) | server key |
 
 Per-stack setup snippets: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
@@ -178,7 +179,7 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 ## Docs
 
 - **[Getting started](docs/GETTING-STARTED.md)** — zero to data flowing
-- [Stack integrations](docs/INTEGRATIONS.md) — React, Node, Next.js, Go, Rust, generic OTel
+- [Stack integrations](docs/INTEGRATIONS.md) — React, Node, Next.js, Python, Go, Rust, generic OTel
 - [Using Autter Runtime **without npm**](docs/WITHOUT-NPM.md) — any OTel SDK, an OTel Collector, or plain HTTP from any language
 - [Architecture & data model](docs/ARCHITECTURE.md)
 - [Operation logging and diagnostic context](docs/OPERATION-LOGGING.md)

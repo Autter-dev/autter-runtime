@@ -1,0 +1,85 @@
+{
+ "framework": "fastapi",
+ "captured": {
+  "python": "3.14.8",
+  "packages": {
+   "fastapi": "0.156.3",
+   "starlette": "1.9.0",
+   "uvicorn": "0.54.0",
+   "opentelemetry-sdk": "1.45.1",
+   "opentelemetry-instrumentation-fastapi": "0.66b1",
+   "opentelemetry-exporter-otlp-proto-http": "1.45.1"
+  }
+ },
+ "scenarios": {
+  "unhandled": {
+   "fixture": "fastapi-unhandled",
+   "description": "POST /carts/12/checkout \u2192 500; the request span records it, its http send span is errored without an exception",
+   "tailRetained": true,
+   "occurrences": 1,
+   "errorType": "inventory.OutOfStock",
+   "message": "sku-1: 2 requested, 0 left",
+   "route": "/carts/{cart_id}/checkout",
+   "statusCode": 500,
+   "severity": "error",
+   "requestCount": 1,
+   "errorCount": 1,
+   "inAppFrames": [
+    {
+     "function": "reserve",
+     "filename": "/srv/app/inventory.py",
+     "lineno": 17
+    },
+    {
+     "function": "checkout",
+     "filename": "/srv/app/app.py",
+     "lineno": 36
+    }
+   ]
+  },
+  "handled": {
+   "fixture": "fastapi-handled",
+   "description": "GET /carts/12/quote \u2192 200; a sync route records the handled exception",
+   "tailRetained": true,
+   "occurrences": 1,
+   "errorType": "inventory.PricingTimeout",
+   "message": "pricing for cart 12 timed out after 2.5s",
+   "route": "/carts/{cart_id}/quote",
+   "statusCode": 200,
+   "severity": "error",
+   "handled": true,
+   "inAppFrames": [
+    {
+     "function": "price",
+     "filename": "/srv/app/inventory.py",
+     "lineno": 21
+    },
+    {
+     "function": "quote",
+     "filename": "/srv/app/app.py",
+     "lineno": 43
+    }
+   ]
+  },
+  "exception-group": {
+   "fixture": "fastapi-exception-group",
+   "description": "GET /carts/12/availability \u2192 500; asyncio.TaskGroup raises an ExceptionGroup of two ConnectionErrors",
+   "tailRetained": true,
+   "occurrences": 1,
+   "errorType": "ExceptionGroup",
+   "message": "unhandled errors in a TaskGroup (2 sub-exceptions)",
+   "route": "/carts/{cart_id}/availability",
+   "statusCode": 500,
+   "severity": "error",
+   "requestCount": 1,
+   "errorCount": 1,
+   "inAppFrames": [
+    {
+     "function": "availability",
+     "filename": "/srv/app/app.py",
+     "lineno": 53
+    }
+   ]
+  }
+ }
+}

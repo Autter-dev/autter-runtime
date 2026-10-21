@@ -42,10 +42,25 @@ const DEFAULT_TUNING: SinkTuning = {
 	healthyConcurrency: 4,
 };
 
+/** A batch the sink gave up on (counted in runtime_ingest_drops, route "sink"). */
+export interface SinkDrop {
+	orgId: string;
+	repositoryId: string;
+	/** sink_overflow: buffer overflow, or a batch bigger than the buffer;
+	 * sink_rejected: the consumer answered a permanent 4xx;
+	 * sink_gave_up: SINK_MAX_ATTEMPTS deliveries failed. */
+	reason: "sink_overflow" | "sink_rejected" | "sink_gave_up";
+	/** Occurrences in the batch. */
+	occurrences: number;
+}
+
 interface QueuedBatch {
 	batchId: string;
 	/** Tenant that produced the batch — buffer pressure is charged per org. */
 	orgId: string;
+	repositoryId: string;
+	/** Occurrences inside (for drop counts). */
+	occurrences: number;
 	body: string;
 	bytes: number;
 	/** Enqueue order; the queue stays sorted by this so "oldest" is queue[0]. */
@@ -119,6 +134,9 @@ export class SinkForwarder {
 
 	private readonly tuning: SinkTuning;
 
+	/** Called for every batch given up on; must not throw (errors are swallowed). */
+	onDrop: ((drop: SinkDrop) => void) | null = null;
+
 	constructor(
 		private readonly config: IngesterConfig,
 		private readonly fetchImpl: typeof fetch = fetch,
@@ -151,6 +169,7 @@ export class SinkForwarder {
 			console.warn(
 				`sink batch ${batch.batchId} (org ${batch.orgId}) exceeds the buffer cap (${batch.bytes} bytes) — dropped; replay signals ${batch.signalsFrom ?? "?"} .. ${batch.signalsTo ?? "?"} from ClickHouse`,
 			);
+			this.noteDrop(batch, "sink_overflow");
 			return;
 		}
 		this.queue.push(batch);
@@ -174,6 +193,14 @@ export class SinkForwarder {
 			lastFailureReason: this.lastFailureReason,
 			oldestQueuedSince: oldest ? new Date(oldest).toISOString() : null,
 		};
+	}
+
+	private noteDrop(batch: QueuedBatch, reason: SinkDrop["reason"]): void {
+		try {
+			this.onDrop?.({ orgId: batch.orgId, repositoryId: batch.repositoryId, reason, occurrences: batch.occurrences });
+		} catch {
+			// Drop accounting must never affect delivery.
+		}
 	}
 
 	pendingCount(): number {
@@ -217,6 +244,8 @@ export class SinkForwarder {
 		return {
 			batchId,
 			orgId: ctx.orgId,
+			repositoryId: ctx.repositoryId,
+			occurrences: occurrences.length,
 			body,
 			bytes: Buffer.byteLength(body),
 			seq: ++this.seqCounter,
@@ -272,6 +301,7 @@ export class SinkForwarder {
 			console.warn(
 				`sink buffer overflow: dropped batch ${dropped.batchId} (org ${dropped.orgId}, signals ${dropped.signalsFrom ?? "?"} .. ${dropped.signalsTo ?? "?"}) — replay this range from ClickHouse`,
 			);
+			this.noteDrop(dropped, "sink_overflow");
 		}
 	}
 
@@ -387,6 +417,7 @@ export class SinkForwarder {
 			console.error(
 				`sink delivery gave up after ${batch.attempts} attempt(s) (${detail}): batch ${batch.batchId} (signals ${batch.signalsFrom ?? "?"} .. ${batch.signalsTo ?? "?"}) — replay this range from ClickHouse`,
 			);
+			this.noteDrop(batch, permanent ? "sink_rejected" : "sink_gave_up");
 			return;
 		}
 

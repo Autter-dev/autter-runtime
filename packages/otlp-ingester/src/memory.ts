@@ -32,14 +32,35 @@ function metricOf(name: string, attrs: Map<string, string>): MemoryMetric | null
 	}
 }
 
-export function normalizeMemoryMetrics(request: OtlpMetricsRequest): MemorySample[] {
+/** Memory/GC samples one metrics request may produce; past it, points are dropped and counted. */
+export const MAX_MEMORY_SAMPLES_PER_REQUEST = 5000;
+
+export interface MemoryNormalizeStats {
+	/** Memory/GC points with a value, timestamp or byte unit out of range, or on a resource without service.name and service.instance.id. */
+	invalid: number;
+	/** Memory/GC points past MAX_MEMORY_SAMPLES_PER_REQUEST. */
+	overLimit: number;
+}
+
+export function normalizeMemoryMetrics(request: OtlpMetricsRequest, stats?: MemoryNormalizeStats): MemorySample[] {
 	const out: MemorySample[] = [];
 	const now = Date.now();
 	for (const rm of request.resourceMetrics ?? []) {
 		const resource = attrsOf(rm.resource?.attributes);
 		const instanceId = resource.get("service.instance.id")?.slice(0, 128) ?? "";
 		const service = resource.get("service.name")?.slice(0, 200) ?? "";
-		if (!instanceId || !service) continue;
+		if (!instanceId || !service) {
+			// Samples are per instance: memory points of a resource without
+			// service.name and service.instance.id can't be stored.
+			if (stats) {
+				for (const scope of rm.scopeMetrics ?? []) for (const metric of scope.metrics ?? []) {
+					for (const point of metric.gauge?.dataPoints ?? metric.sum?.dataPoints ?? []) {
+						if (metricOf(metric.name ?? "", attrsOf(point.attributes))) stats.invalid += 1;
+					}
+				}
+			}
+			continue;
+		}
 		const environment = (resource.get("deployment.environment.name") ?? resource.get("deployment.environment") ?? "production").slice(0, 100);
 		const release = (resource.get("service.version") ?? "").slice(0, 200);
 		for (const scope of rm.scopeMetrics ?? []) for (const metric of scope.metrics ?? []) {
@@ -48,6 +69,10 @@ export function normalizeMemoryMetrics(request: OtlpMetricsRequest): MemorySampl
 			for (const point of points) {
 				const kind = metricOf(name, attrsOf(point.attributes));
 				if (!kind) continue;
+				if (out.length >= MAX_MEMORY_SAMPLES_PER_REQUEST) {
+					if (stats) stats.overLimit += 1;
+					continue;
+				}
 				const counter = kind === "gc_count" || kind === "gc_duration_ms";
 				const aggregation = metric.sum?.aggregationTemporality;
 				const temporality = counter && (aggregation === 2 || aggregation === "AGGREGATION_TEMPORALITY_CUMULATIVE")
@@ -55,17 +80,19 @@ export function normalizeMemoryMetrics(request: OtlpMetricsRequest): MemorySampl
 				const value = Number(point.asDouble ?? point.asInt);
 				let observedMs = 0;
 				try { observedMs = Number(BigInt(String(point.timeUnixNano ?? "0")) / 1_000_000n); }
-				catch { continue; }
-				if (!Number.isFinite(value) || value < 0 || value > 1e15 || observedMs < now - 30 * 86400_000 || observedMs > now + 300_000) continue;
+				catch { if (stats) stats.invalid += 1; continue; }
 				const isBytes = kind === "rss" || kind === "heap_used" || kind === "heap_limit" || kind === "memory_limit" || kind === "heap_after_gc";
 				const unit = metric.unit ?? "By";
-				if (isBytes && !["By", "byte", "bytes", "KiBy", "MiBy"].includes(unit)) continue;
+				if (!Number.isFinite(value) || value < 0 || value > 1e15 || observedMs < now - 30 * 86400_000 || observedMs > now + 300_000
+					|| (isBytes && !["By", "byte", "bytes", "KiBy", "MiBy"].includes(unit))) {
+					if (stats) stats.invalid += 1;
+					continue;
+				}
 				// Standard OTel runtimes report GC duration in seconds; Autter uses ms.
 				out.push({ service, environment, release, instanceId, metric: kind,
 					value: isBytes ? value * (unit === "KiBy" ? 1024 : unit === "MiBy" ? 1048576 : 1)
 						: kind === "gc_duration_ms" && unit === "s" ? value * 1000 : value,
 					observedAt: new Date(observedMs), temporality });
-				if (out.length >= 5000) return out;
 			}
 		}
 	}

@@ -75,7 +75,10 @@ const browserEventSchema = z.object({
 	traceId: z.string().regex(/^(?!0{32})[0-9a-f]{32}$/).optional().catch(undefined),
 });
 
-export const browserPayloadSchema = z.object({
+/** Events past this in one payload are dropped and counted (events_over_limit). */
+export const MAX_BROWSER_EVENTS = 50;
+
+const browserEnvelope = {
 	version: z.literal(1),
 	sessionId: z.string().max(100).optional(),
 	service: z.string().min(1).max(200),
@@ -83,10 +86,69 @@ export const browserPayloadSchema = z.object({
 	release: z.string().max(200).optional(),
 	/** @autter/runtime-browser version (1.4+); recorded for compatibility checks. */
 	sdk: z.string().regex(/^\d{1,6}\.\d{1,6}\.\d{1,6}[0-9A-Za-z.+-]{0,20}$/).optional().catch(undefined),
-	events: z.array(browserEventSchema).max(50),
+};
+
+/** A whole payload, every event valid: what normalizeBrowserPayload takes. */
+export const browserPayloadSchema = z.object({
+	...browserEnvelope,
+	events: z.array(browserEventSchema).max(MAX_BROWSER_EVENTS),
 });
 
 export type BrowserPayload = z.infer<typeof browserPayloadSchema>;
+
+const browserEnvelopeSchema = z.object({ ...browserEnvelope, events: z.array(z.unknown()) });
+
+export interface ParsedBrowserPayload {
+	/** The envelope with its valid events (at most MAX_BROWSER_EVENTS). */
+	payload: BrowserPayload;
+	/** Events dropped because they failed validation (invalid_event). */
+	invalidEvents: number;
+	/** Events past MAX_BROWSER_EVENTS, not looked at (events_over_limit). */
+	overLimitEvents: number;
+	/** The first validation issues of the dropped events; `path` starts with ["events", index]. */
+	issues: z.ZodIssue[];
+}
+
+/**
+ * Validate a browser payload event by event (1.8.0). The envelope (version,
+ * service, environment) must be valid or the payload is refused; an event
+ * that fails validation — a type this ingester doesn't know, a bad
+ * timestamp, an oversized field — is dropped on its own and counted, so it
+ * no longer costs the errors sent in the same beacon. Events past
+ * MAX_BROWSER_EVENTS are dropped and counted unread.
+ */
+export function parseBrowserPayload(
+	body: unknown,
+): { success: true; data: ParsedBrowserPayload } | { success: false; issues: z.ZodIssue[] } {
+	const envelope = browserEnvelopeSchema.safeParse(body);
+	if (!envelope.success) return { success: false, issues: envelope.error.issues.slice(0, 5) };
+	const raw = envelope.data.events;
+	const considered = raw.slice(0, MAX_BROWSER_EVENTS);
+	const events: BrowserPayload["events"] = [];
+	const issues: z.ZodIssue[] = [];
+	let invalidEvents = 0;
+	considered.forEach((candidate, index) => {
+		const parsed = browserEventSchema.safeParse(candidate);
+		if (parsed.success) {
+			events.push(parsed.data);
+			return;
+		}
+		invalidEvents += 1;
+		for (const issue of parsed.error.issues) {
+			if (issues.length >= 5) break;
+			issues.push({ ...issue, path: ["events", index, ...issue.path] });
+		}
+	});
+	return {
+		success: true,
+		data: {
+			payload: { ...envelope.data, events },
+			invalidEvents,
+			overLimitEvents: raw.length - considered.length,
+			issues,
+		},
+	};
+}
 
 const TYPE_TO_ERROR_TYPE: Record<string, string> = {
 	exception: "Error",

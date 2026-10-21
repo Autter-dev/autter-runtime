@@ -68,7 +68,24 @@ export interface OtlpLogsRequest {
 	}>;
 }
 
-export function normalizeLogs(request: OtlpLogsRequest): RuntimeLogRecord[] {
+/**
+ * Log records one request may carry. From 1.8.0 the ones past it are
+ * rejected on their own (counted in `stats.overLimit`, answered in the OTLP
+ * `partialSuccess`); before, the whole request got a 400.
+ */
+export const MAX_LOG_RECORDS_PER_REQUEST = 2000;
+
+export interface NormalizeLogsStats {
+	/** Records past MAX_LOG_RECORDS_PER_REQUEST: not read, not stored. */
+	overLimit: number;
+}
+
+/**
+ * Throws on a structurally invalid request (the caller answers 400); more
+ * than 128 resources or scopes is invalid too. Records past
+ * MAX_LOG_RECORDS_PER_REQUEST are skipped and counted, not refused.
+ */
+export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsStats): RuntimeLogRecord[] {
 	if (!request || !Array.isArray(request.resourceLogs))
 		throw new Error("resourceLogs must be an array");
 	const rows: RuntimeLogRecord[] = [];
@@ -86,9 +103,12 @@ export function normalizeLogs(request: OtlpLogsRequest): RuntimeLogRecord[] {
 			if (!scope || (scope.logRecords && !Array.isArray(scope.logRecords)))
 				throw new Error("invalid log records");
 			for (const record of scope.logRecords ?? []) {
+				if (rows.length >= MAX_LOG_RECORDS_PER_REQUEST) {
+					if (stats) stats.overLimit += 1;
+					continue;
+				}
 				if (!record || typeof record !== "object")
 					throw new Error("invalid log record");
-				if (rows.length >= 2000) throw new Error("too many log records");
 				const attrs = decodeOtlpAttributes(record.attributes);
 				let event: Record<string, unknown> = {};
 				const decodedBody = decodeOtlpAttributes([

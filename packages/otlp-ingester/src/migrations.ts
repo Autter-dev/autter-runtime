@@ -48,7 +48,8 @@ import {
 	requestRollupViewDDL,
 } from "./logs.js";
 import { memoryTableDDL, platformEventTableDDL } from "./memory.js";
-import { ingesterInfoTableDDL, sdkVersionTableDDL } from "./sdk-versions.js";
+import { ingesterInfoTableDDL, SDK_VERSION_VIA_COLUMN, sdkVersionTableDDL } from "./sdk-versions.js";
+import { ingestDropsTableDDL } from "./ingest-drops.js";
 
 /** Migration 0013 columns — shared with the baseline DDL in clickhouse.ts. */
 export const OCCURRENCE_CODE_COLUMNS: string[] = [
@@ -75,6 +76,18 @@ export const OCCURRENCE_REQUEST_ID_INDEX =
 export const OCCURRENCE_GROUPING_COLUMNS: string[] = [
 	"frames String DEFAULT '' CODEC(ZSTD(3))",
 	"fingerprints Array(String) DEFAULT []",
+];
+
+/**
+ * Migration 0020 columns — shared with the baseline DDL in clickhouse.ts.
+ * In-app browser JS frames a source map resolved / left unresolved at
+ * ingest (symbolicate.ts inAppFrameResolution); 0 and 0 for server
+ * occurrences, browser ones with no in-app JS frame, and rows written
+ * before 0020.
+ */
+export const OCCURRENCE_FRAME_RESOLUTION_COLUMNS: string[] = [
+	"in_app_frames_resolved UInt16 DEFAULT 0",
+	"in_app_frames_unresolved UInt16 DEFAULT 0",
 ];
 
 export interface Migration {
@@ -234,6 +247,25 @@ export const MIGRATIONS: Migration[] = [
 			),
 			`ALTER TABLE {db}.runtime_source_maps ADD ${SOURCE_MAP_DEBUG_ID_INDEX.replace("INDEX ", "INDEX IF NOT EXISTS ")}`,
 		],
+	},
+	// Rejections and drops per tenant, minute, route and reason (EI-27):
+	// what the ingester refused or did not store, so a repository's missing
+	// telemetry has a reason (ingest-drops.ts).
+	{ id: "0018-runtime-ingest-drops", statements: [ingestDropsTableDDL("{db}")] },
+	// How each service's telemetry arrived: an OpenTelemetry Collector, an
+	// SDK exporter directly, or the browser relay (sdk-versions.ts).
+	{
+		id: "0019-sdk-versions-via",
+		statements: [`ALTER TABLE {db}.runtime_sdk_versions ADD COLUMN IF NOT EXISTS ${SDK_VERSION_VIA_COLUMN}`],
+	},
+	// Resolved and unresolved in-app browser frames per occurrence, after
+	// symbolication — the share the EI-14 source map rule reads.
+	{
+		id: "0020-occurrence-frame-resolution",
+		statements: OCCURRENCE_FRAME_RESOLUTION_COLUMNS.map(
+			(column) =>
+				`ALTER TABLE {db}.runtime_error_occurrences ADD COLUMN IF NOT EXISTS ${column}`,
+		),
 	},
 ];
 

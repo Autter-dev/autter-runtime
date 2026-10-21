@@ -180,6 +180,33 @@ test("browser frames are symbolicated at ingest, stored and forwarded with every
 	assert.deepEqual(JSON.parse(String(stored.frames)), occurrence!.frames);
 	assert.deepEqual(stored.fingerprints, occurrence!.fingerprints.map((c: { fingerprint: string }) => c.fingerprint));
 	assert.equal(stored.fingerprint, legacy);
+	// Both in-app frames were resolved by the map (migration 0020); the
+	// counts are stored, not forwarded (the sink has the frames themselves).
+	assert.equal(stored.in_app_frames_resolved, 2);
+	assert.equal(stored.in_app_frames_unresolved, 0);
+	assert.equal("inAppFramesResolved" in occurrence!, false);
+});
+
+test("browser frames no map resolves are counted unresolved per occurrence", async () => {
+	const seen = sinkBatches.length;
+	const res = await fetch(`${ingestUrl}/v1/browser`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: "Bearer test-key" },
+		body: JSON.stringify({ version: 1, service: "web-app", environment: "production", release: "rel-without-maps", events: [{
+			type: "exception",
+			timestamp: new Date().toISOString(),
+			message: "Cannot read properties of undefined (reading 'total')",
+			errorType: "TypeError",
+			stack: STACK,
+		}] }),
+	});
+	assert.equal(res.status, 202);
+	const batch = await nextBatch(seen);
+	const [occurrence] = batch.occurrences as Array<Record<string, any>>;
+	assert.deepEqual(occurrence!.frames.map((f: { resolved: boolean }) => f.resolved), [false, false]);
+	const stored = inserts.filter((i) => /runtime_error_occurrences/.test(i.query)).at(-1)!.rows[0]!;
+	assert.equal(stored.in_app_frames_resolved, 0);
+	assert.equal(stored.in_app_frames_unresolved, 2);
 });
 
 test("a server error without a stack carries [frames-v3, message-v1] and no frames", async () => {
@@ -213,4 +240,7 @@ test("a server error without a stack carries [frames-v3, message-v1] and no fram
 	assert.deepEqual(occurrence!.fingerprintRecord.parts, ["Error", "boom"]);
 	const stored = inserts.filter((i) => /runtime_error_occurrences/.test(i.query)).at(-1)!.rows[0]!;
 	assert.equal(stored.frames, "");
+	// Server frames are never symbolicated: no resolution counts.
+	assert.equal(stored.in_app_frames_resolved, 0);
+	assert.equal(stored.in_app_frames_unresolved, 0);
 });

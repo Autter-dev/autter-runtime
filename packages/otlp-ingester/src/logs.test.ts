@@ -133,21 +133,29 @@ test("serialized context and path queries are scrubbed and excess batches fail e
 		attempts: 2,
 	});
 	assert.equal(row!.attributes.path, "/checkout");
+	// Past 2000 records the rest are skipped and counted (1.8.0: partial
+	// success), not a 400 for the whole request.
+	const stats = { overLimit: 0 };
+	const rows = normalizeLogs(
+		{
+			resourceLogs: [
+				{
+					scopeLogs: [
+						{
+							logRecords: Array.from({ length: 2003 }, () => ({
+								body: { stringValue: "x" },
+							})),
+						},
+					],
+				},
+			],
+		},
+		stats,
+	);
+	assert.equal(rows.length, 2000);
+	assert.equal(stats.overLimit, 3);
 	assert.throws(
-		() =>
-			normalizeLogs({
-				resourceLogs: [
-					{
-						scopeLogs: [
-							{
-								logRecords: Array.from({ length: 2001 }, () => ({
-									body: { stringValue: "x" },
-								})),
-							},
-						],
-					},
-				],
-			}),
-		/too many log records/,
+		() => normalizeLogs({ resourceLogs: Array.from({ length: 129 }, () => ({})) }),
+		/too many log resources/,
 	);
 });

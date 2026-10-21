@@ -59,6 +59,8 @@ Three key scopes separate frontend, backend and CI credentials:
 | `runtime_llm_calls` | MergeTree | `(org_id, repository_id, started_at)` | 90 d |
 | `runtime_profile_samples` | MergeTree | `(org_id, repository_id, service, environment, release, observed_at, profile_id)` | 7 d |
 | `runtime_source_maps` | ReplacingMergeTree (`debug_id`, `content_hash` since 0016) | `(org_id, repository_id, release, filename)` | 30 d |
+| `runtime_sdk_versions` | ReplacingMergeTree(`last_seen`) (`via` since 0019) | `(org_id, repository_id, service, environment, sdk_name, sdk_version)` | 90 d (`METRICS_TTL_DAYS`) |
+| `runtime_ingest_drops` | SummingMergeTree(`requests`, `records`) (0018) | `(org_id, repository_id, minute, route, reason, kind, status, key_hash)` | 30 d |
 
 Profile uploads are server key authenticated, limited to 1 MiB, and decoded
 from symbolized pprof into at most 1,000 stack samples. Source map uploads
@@ -158,6 +160,7 @@ stacks or routes in SQL:
 | `request_id` | `autter.request.id` (exception spans inherit it from their server span; browser failures read `x-request-id`) | join to the request summary; bloom index `idx_occ_request_id` |
 | `frames` | structured frames as JSON, innermost first, ≤ 50 (`''` when the stack had none); browser JS frames resolved through source maps (migration 0016) | stack view, RCA without re-symbolicating |
 | `fingerprints` (Array) | every identity candidate, highest precedence first: `manual-v1`, `code-v1`, `frames-v3`, `message-v1` (migration 0016) | find an issue's rows whatever scheme keys it: `(fingerprint = X OR has(fingerprints, X))` |
+| `in_app_frames_resolved` / `in_app_frames_unresolved` (UInt16) | browser only, after symbolication: in-app frames a source map resolved, and in-app `.js`/`.mjs`/`.cjs` frames it left as parsed (no map, no release or debug id, no mapping there); `0`/`0` for server occurrences and rows before migration 0020 | the share of unresolved frames per release or issue (over 30%: upload source maps) |
 
 Severity is deliberately **not** part of the fingerprint: the same defect
 reported as a warning in one code path and an error in another stays one
@@ -173,6 +176,140 @@ idempotent migrations (`packages/otlp-ingester/src/migrations.ts`) tracked
 in `<db>.schema_migrations` for existing ones. Deploying a new ingester
 version *is* the schema deployment. Readers (dashboards, the Autter
 backend) should treat columns as additive-only within a major version.
+
+## Rejections and drops
+
+The ingester counts everything it refuses or does not store, per tenant,
+per minute, by route and reason, in `runtime_ingest_drops` (ingester 1.8.0,
+migration `0018-runtime-ingest-drops`, compat feature `ingest_drop_counts`),
+so a repository's missing telemetry has a reason. Columns: `org_id`,
+`repository_id`, `minute`, `route`, `reason`, `kind`, `status` (the HTTP
+status answered), `key_hash`, `requests`, `records`. It is a
+SummingMergeTree: read it with `sum(requests)`, `sum(records)` and
+`GROUP BY`.
+
+`kind` says what was lost:
+
+- `rejected`: the request got a non-2xx answer and nothing from it was
+  stored. OTLP exporters retry 429 and 503, so those records usually arrive
+  later; 400, 401, 403, 404, 413 and 415 are not retried.
+- `dropped`: the request was accepted, but these records were not stored.
+  OTLP answers name them in `partial_success` (below).
+- `truncated`: the records were stored with attribute values cut or left
+  out by the attribute bounds (strings past 2,048 characters, or 32,000 for
+  stack keys; lists past 64 items; maps past 128 keys; nesting past 6
+  levels; the 512-value budget). `records` counts the values cut. It is
+  approximate: an error span's attributes are bounded once for its span row
+  and again for its occurrence. Redaction and query-string stripping are
+  not truncation.
+- `unforwarded`: stored in ClickHouse, but the sink webhook gave up on the
+  batch (route `sink`, `records` = occurrences, `requests` = batches). The
+  consumer recovers it by replaying ClickHouse (see the sink below).
+
+| Reason | Kind | Status | When |
+| --- | --- | --- | --- |
+| `missing_key` | rejected | 401 | no key in `Authorization`, `x-autter-key` or `?key=` |
+| `unknown_key` | rejected | 401 | not a configured key, and the validator did not accept it (revoked, mistyped, another deployment's) |
+| `key_unverified` | rejected | 401 | the key validator could not answer (unreachable, timed out, 5xx) and no earlier answer was cached |
+| `upload_key_not_allowed` | rejected | 403 | an upload key (`autter_rtu_…`) on a telemetry route |
+| `client_key_not_allowed` | rejected | 403 | a client key (`autter_rtc_…`) on an OTLP or source map route |
+| `origin_not_allowed` | rejected | 403 | a client key from an origin missing from its allow-list |
+| `key_scope_not_allowed` | rejected | 403 | a key scope this ingester does not know (never yielded today) |
+| `rate_limited` | rejected | 429 | past the key's requests a minute |
+| `invalid_payload` | rejected | 400 | malformed JSON or protobuf, an invalid browser envelope, platform event, profile or source map, or values the normaliser can't read (a timestamp that is not an integer) |
+| `request_aborted` | rejected | 400 | the client went away before its body arrived |
+| `payload_too_large` | rejected | 413 | body over `MAX_BODY_BYTES` after gzip is inflated, or a source map over 32 MiB |
+| `unsupported_media_type` | rejected | 415 | an OTLP body that is neither `application/json` nor `application/x-protobuf`, a profile that is not `application/x-pprof`, or a `zstd`/`br` content encoding |
+| `unknown_route` | rejected | 404 | a POST to a path the ingester does not serve (route `other`), e.g. a collector endpoint ending in `/v1/traces` |
+| `internal_error` | rejected | 500 | an unexpected error |
+| `storage_unavailable` | rejected | 503 | a ClickHouse write failed |
+| `spans_over_limit` | dropped | 200 | spans past 5,000 in one request |
+| `log_records_over_limit` | dropped | 200 | log records past 2,000 in one request (1.8.0; before, a 400 for the whole request) |
+| `cumulative_histogram` | dropped | 200 | data points of cumulative `http.server.duration` / `http.server.request.duration` histograms: only delta is summable, so request counts come from server spans instead |
+| `memory_point_invalid` | dropped | 200 | memory/GC points with a value, timestamp or byte unit out of range, or on a resource without `service.name` and `service.instance.id` |
+| `memory_points_over_limit` | dropped | 200 | memory/GC points past 5,000 in one request |
+| `invalid_event` | dropped | 202 | browser events that failed validation (an unknown type, a bad timestamp, an oversized field) |
+| `events_over_limit` | dropped | 202 | browser events past 50 in one payload |
+| `profile_samples_over_limit` | dropped | 202 | profile samples past the first 1,000 |
+| `attributes_truncated` | truncated | 200/202 | see above |
+| `sink_overflow` | unforwarded | 0 | the sink retry buffer overflowed, or one batch was bigger than all of it |
+| `sink_rejected` | unforwarded | 0 | the sink consumer answered a permanent 4xx |
+| `sink_gave_up` | unforwarded | 0 | `SINK_MAX_ATTEMPTS` deliveries failed |
+
+`route` is the ingest route (`/v1/traces`, `/v1/logs`, `/v1/metrics`,
+`/v1/browser`, `/v1/profiles`, `/v1/platform-events`, `/v1/sourcemaps`,
+`/v1/sourcemaps/check`), `other` for unknown paths, `sink` for the webhook.
+`records` is spans, log records, data points or browser events on those
+routes; profile samples on `/v1/profiles` (0 for a refused profile, which
+was never decoded); 1 per source map upload or platform event; 0 for a
+source map check. For a refused request it is what the body held, where
+that can be known: the parsed JSON is walked, a protobuf body is counted
+from its wire format without being decoded, and a body that was never read
+(413, a bad encoding) or not understood counts 0.
+
+**The null tenant.** A key that does not resolve (401) has no tenant. Those
+requests are counted with `org_id = ''` and `repository_id = ''` rather than
+skipped: they are the commonest silent failure (a rotated key still
+deployed, a validator outage), and skipping them would leave nothing to
+show. When the key has an Autter prefix (`autter_rt_`, `autter_rtc_`,
+`autter_rtu_`), `key_hash` is its sha256 in hex, the same hash Autter keeps
+for every key it issues, revoked ones included, so the platform can tell a
+repository that one of its keys is still sending after it was revoked while
+the ingester never learns whose key it was. Any other token is never hashed
+or stored. Without ClickHouse (the `storage not configured` 503) nothing is
+counted: there is nowhere to count it.
+
+**Never at ingest's expense.** Counting is a synchronous in-memory update.
+Rows are written in one batch every 5 s; a failed or stalled (30 s) write is
+logged (once a minute at most) and its rows dropped, never retried. The
+buffer holds at most 10,000 rows and 1,000 distinct key hashes between
+writes; past that a new row is not counted (logged at the next write) and a
+new key hash is counted without one. Shutdown writes what is buffered.
+
+Not counted, because nothing is lost: metrics the ingester has no use for
+(anything but the HTTP server duration histograms and the memory/GC
+instruments) are ignored; recordings of one error merged by the trace
+dedupe, status-only occurrences it drops, and log records not promoted
+because their trace already produced an occurrence are deduplication. The
+browser SDK's own 200-events-per-session cap is applied in the browser and
+never reaches the ingester.
+
+**OTLP partial success.** When an accepted OTLP request had records
+dropped, the answer carries `partial_success` per the OTLP spec, so the
+OpenTelemetry Collector (and SDKs that read it) log the loss and why:
+
+```json
+{ "partialSuccess": { "rejectedSpans": "3", "errorMessage": "3 spans rejected: one request takes at most 5000 spans; send smaller batches (OTel Collector: batch processor send_batch_max_size)." } }
+```
+
+`rejectedLogRecords` and `rejectedDataPoints` for logs and metrics (int64 as
+a decimal string, the proto3 JSON form). Protobuf requests get the
+`Export*ServiceResponse` message with `partial_success` set; when nothing
+was dropped they still get an empty body, and JSON requests
+`{"partialSuccess":{}}`. Spans past the limit, log records past the limit,
+cumulative HTTP histogram points and invalid or excess memory points are
+reported this way; truncation is not (the records were accepted). Browser
+answers report dropped events as `{"accepted": n, "rejected": m, "issues":
+[…]}`, with the first validation issues and their event index.
+
+**Reading it** (the Autter platform's Runtime coverage panel):
+
+```sql
+-- What this repository lost in 24 h, by route and reason
+SELECT route, reason, any(kind) AS kind, any(status) AS status,
+       sum(requests) AS requests, sum(records) AS records, max(minute) AS last_at
+FROM runtime_ingest_drops
+WHERE org_id = {org:String} AND repository_id = {repo:String}
+  AND minute >= now() - INTERVAL 24 HOUR
+GROUP BY route, reason ORDER BY records DESC, requests DESC
+
+-- Its revoked or unknown keys still sending (hashes from the key store)
+SELECT key_hash, reason, sum(requests) AS requests, sum(records) AS records, max(minute) AS last_at
+FROM runtime_ingest_drops
+WHERE org_id = '' AND repository_id = '' AND key_hash IN {hashes:Array(String)}
+  AND minute >= now() - INTERVAL 24 HOUR
+GROUP BY key_hash, reason
+```
 
 ## Fingerprinting
 
@@ -321,6 +458,9 @@ Span-level:
   when an unhandled error-severity exception or failed outcome of the same
   service sits on an ancestor or descendant span in the batch. Spans of one
   trace exported in different batches are not compared.
+- At most 5,000 spans per request; the rest are dropped, answered in
+  `partial_success` and counted (`spans_over_limit`, see
+  [Rejections and drops](#rejections-and-drops)).
 - `route` from `http.route`, falling back to `url.path` / `http.target`
   (query-stripped).
 - `status_code` from `http.response.status_code` / `http.status_code`.
@@ -340,7 +480,9 @@ Span-level:
   head-sampled, the metric feed is exact. And only **delta**-temporality
   histograms fold into rollups: cumulative points repeat lifetime totals
   every export, which a SummingMergeTree would re-add each minute;
-  cumulative senders are covered by the span-fed fallback instead.
+  cumulative senders are covered by the span-fed fallback instead. From
+  1.8.0 those points are answered as rejected in `partial_success` and
+  counted (`cumulative_histogram`).
 - GenAI spans (`gen_ai.*` attributes; Vercel AI SDK inner `.doGenerate` /
   `.doStream` / `.doEmbed` spans) additionally produce a `runtime_llm_calls`
   row — provider, model, operation, token counts, and cost
@@ -415,6 +557,15 @@ Event types: `exception`, `unhandled_rejection`, `session_start`, and
 `track_event` (carries a `name`; counted into `runtime_metrics_1m` as
 `request_count` on the synthetic route `event:<name>` — coarse usage
 counters, not an analytics event store).
+
+Validation (1.8.0): the envelope (`version`, `service`, `environment`, …)
+must be valid or the payload gets a 400; each event is then validated on
+its own, and one that fails (a type this ingester doesn't know, a bad
+timestamp, an oversized field) is dropped alone and counted
+(`invalid_event`), so it no longer costs the errors in the same beacon.
+Events past 50 are dropped and counted (`events_over_limit`). The 202
+answer adds `rejected` and the first `issues` when any were dropped. Before
+1.8.0 one invalid event, or more than 50, rejected the whole payload.
 
 Forbidden at the schema level (rejected/stripped): full URLs with query
 strings, cookies, DOM content, form values, request headers/bodies, emails.

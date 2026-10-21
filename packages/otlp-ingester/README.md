@@ -60,6 +60,19 @@ The validator webhook may return the same extra fields:
 `{ orgId, repositoryId, scope?, allowedOrigins? }`, with `scope` one of
 `server`, `client`, `upload`.
 
+### Rejections and drops (1.8.0)
+
+Everything the ingester refuses (401, 403, 404, 413, 415, 429, 400, 503) or
+does not store from an accepted request (spans past 5,000, log records past
+2,000, cumulative HTTP histograms, invalid browser events, …) is counted per
+repository, minute, route and reason in `runtime_ingest_drops`; keys that
+don't resolve count against an empty tenant with the sha256 of the key when
+it is an Autter key. OTLP answers name dropped records in `partial_success`
+(JSON and protobuf), so collectors log them. Counts are written every 5 s in
+one batch, bounded in memory, and a failed write is logged and dropped:
+counting never slows or fails ingest. Reasons and queries:
+[docs/ARCHITECTURE.md § Rejections and drops](../../docs/ARCHITECTURE.md#rejections-and-drops).
+
 ### Version compatibility
 
 `GET /v1/compat` (public, no tenant data) returns this ingester's version,
@@ -67,9 +80,10 @@ its ClickHouse schema state, and which features from
 `src/compat-manifest.json` it supports. Add
 `?features=operation_logging&sdk=@autter/runtime-node@1.3.0` to get the evaluated
 incompatibilities. Every response carries `x-autter-ingester-version`. The
-ingester records the SDK name and version each service sends with
-(`runtime_sdk_versions`) and its own version (`runtime_ingester_info`), and
-the Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md).
+ingester records the SDK name and version each service sends with, and
+whether it came through an OpenTelemetry Collector (`runtime_sdk_versions`,
+`via` from 1.8.0), and its own version (`runtime_ingester_info`), and the
+Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md).
 
 ## Configuration
 

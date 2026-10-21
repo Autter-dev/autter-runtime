@@ -20,10 +20,13 @@ import {
 	sdkVersionTableDDL,
 	type SdkVersionRow,
 } from "./sdk-versions.js";
+import { ingestDropsTableDDL, type IngestDropRow } from "./ingest-drops.js";
+import { inAppFrameResolution } from "./symbolicate.js";
 import type { SchemaStatus } from "./compat.js";
 import {
 	MIGRATIONS,
 	OCCURRENCE_CODE_COLUMNS,
+	OCCURRENCE_FRAME_RESOLUTION_COLUMNS,
 	OCCURRENCE_GROUPING_COLUMNS,
 	OCCURRENCE_REQUEST_ID_INDEX,
 	migrationsTableDDL,
@@ -53,6 +56,15 @@ const INSERT_SETTINGS: ClickHouseSettings = {
 /** Source maps above this go in with a plain insert (below ClickHouse's
  * default async_insert_max_data_size of 10 MiB). */
 const ASYNC_INSERT_MAX_MAP_CHARS = 8 * 1024 * 1024;
+
+/** Migration 0020 columns: browser occurrences only (server frames are not symbolicated). */
+function occurrenceFrameResolution(o: RuntimeOccurrence): { in_app_frames_resolved: number; in_app_frames_unresolved: number } {
+	const counts = o.source === "browser" ? inAppFrameResolution(o.frames) : { resolved: 0, unresolved: 0 };
+	return {
+		in_app_frames_resolved: Math.min(65_535, counts.resolved),
+		in_app_frames_unresolved: Math.min(65_535, counts.unresolved),
+	};
+}
 
 /** "YYYY-MM-DD hh:mm:ss.sss" (UTC) — the DateTime64 query-parameter form. */
 function chDateTime(date: Date): string {
@@ -110,6 +122,7 @@ export class ClickHouseStore {
 			requestRollupTableDDL(db),
 			sdkVersionTableDDL(db, metricsTtlDays),
 			ingesterInfoTableDDL(db),
+			ingestDropsTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -137,6 +150,7 @@ export class ClickHouseStore {
 				ingested_at        DateTime64(3, 'UTC') DEFAULT now64(3),
 				${OCCURRENCE_CODE_COLUMNS.join(",\n\t\t\t\t")},
 				${OCCURRENCE_GROUPING_COLUMNS.join(",\n\t\t\t\t")},
+				${OCCURRENCE_FRAME_RESOLUTION_COLUMNS.join(",\n\t\t\t\t")},
 				${OCCURRENCE_REQUEST_ID_INDEX}
 			)
 			ENGINE = MergeTree
@@ -369,6 +383,30 @@ export class ClickHouseStore {
 				sdk_language: row.sdkLanguage,
 				ingester_version: row.ingesterVersion,
 				last_seen: row.seenAt.toISOString(),
+				via: row.via,
+			})),
+		});
+	}
+
+	/** Rejection and drop counts (ingest-drops.ts); rows carry their own tenant. */
+	async insertIngestDrops(rows: IngestDropRow[]): Promise<void> {
+		if (!rows.length || !this.configured) return;
+		await this.ensureSchema();
+		await this.getClient().insert({
+			table: this.table("runtime_ingest_drops"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: rows.map((row) => ({
+				org_id: row.orgId,
+				repository_id: row.repositoryId,
+				minute: row.minute.toISOString(),
+				route: row.route,
+				reason: row.reason,
+				kind: row.kind,
+				status: row.status,
+				key_hash: row.keyHash,
+				requests: row.requests,
+				records: row.records,
 			})),
 		});
 	}
@@ -407,6 +445,7 @@ export class ClickHouseStore {
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
 			values: occurrences.map((o) => ({
+				...occurrenceFrameResolution(o),
 				org_id: ctx.orgId,
 				repository_id: ctx.repositoryId,
 				occurrence_id: o.occurrenceId,

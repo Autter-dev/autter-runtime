@@ -115,3 +115,12 @@ export {
 	splitFingerprint,
 	type FingerprintInput,
 } from "./fingerprint-override.js";
+export {
+	createErrorFilter,
+	effectiveSampleRate,
+	isIgnoredError,
+	type ErrorFilter,
+	type ErrorFilterInput,
+	type ErrorFilterOptions,
+	type IgnoreErrorPattern,
+} from "./error-filter.js";

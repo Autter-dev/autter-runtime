@@ -449,8 +449,11 @@ export class SinkForwarder {
  * 1.6.0 adds `frames` (innermost first, ≤ 50), `fingerprints` (every
  * identity candidate, highest precedence first, ending with the legacy
  * `fingerprint`) and `fingerprintRecord`; `fingerprint`/`fingerprintScheme`
- * keep their legacy meaning. Older consumers ignore unknown keys, so the
- * version stays 1.
+ * keep their legacy meaning. 1.9.0 adds `count`: the occurrences this
+ * record stands for, sent only when above 1 (a loop-collapse sample:
+ * 1 + collapsedCount, see loop-collapse.ts); consumers add `count ?? 1` to
+ * their event counts. Older consumers ignore unknown keys, so the version
+ * stays 1.
  */
 export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 	const {
@@ -470,6 +473,7 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		fingerprintRecord,
 		// Input-only: locates source maps, never leaves the ingester.
 		debugIds: _debugIds,
+		collapsedCount,
 		...rest
 	} = o;
 	return {
@@ -490,6 +494,8 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		...(frames?.length ? { frames } : {}),
 		...(fingerprints?.length ? { fingerprints } : {}),
 		...(fingerprintRecord ? { fingerprintRecord } : {}),
+		// 1.9.0: a collapsed sample stands for 1 + collapsedCount occurrences.
+		...(collapsedCount && collapsedCount > 0 ? { count: 1 + collapsedCount } : {}),
 	};
 }
 

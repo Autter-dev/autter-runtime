@@ -44,11 +44,16 @@ Three key scopes separate frontend, backend and CI credentials:
   `403 upload_key_not_allowed`. A leaked upload key can at worst upload source
   maps for one repo.
 
+A key resolves to its tenant and, from ingester 1.9.0, to the repository's
+suppression rules (see [Volume control](#volume-control)): the validator's
+answer carries `suppression`, and a static `AUTTER_INGEST_KEYS` entry can
+name its own.
+
 ## ClickHouse tables
 
 | Table | Engine | Order by | TTL |
 | --- | --- | --- | --- |
-| `runtime_error_occurrences` | MergeTree | `(org_id, repository_id, fingerprint, occurred_at)` | 14 d |
+| `runtime_error_occurrences` | MergeTree (`collapsed_count` since 0021) | `(org_id, repository_id, fingerprint, occurred_at)` | 14 d |
 | `runtime_spans` | MergeTree | `(org_id, repository_id, trace_id, started_at)` | 7 d |
 | `runtime_logs` | ReplacingMergeTree | `(org_id, repository_id, occurred_at, event_id)` | `LOG_TTL_DAYS` (14 d) |
 | `runtime_request_1m` | AggregatingMergeTree (fed by `runtime_request_1m_mv`) | `(org_id, repository_id, service, environment, route, method, bucket_at)` | 90 d |
@@ -206,6 +211,15 @@ SummingMergeTree: read it with `sum(requests)`, `sum(records)` and
 - `unforwarded`: stored in ClickHouse, but the sink webhook gave up on the
   batch (route `sink`, `records` = occurrences, `requests` = batches). The
   consumer recovers it by replaying ClickHouse (see the sink below).
+- `collapsed` (1.9.0): occurrences of a looping error folded into the
+  minute's sample; their count is on the sample (`collapsed_count`), their
+  payloads were not stored. `records` = payloads not stored.
+- `suppressed` (1.9.0): occurrences a suppression rule set by the user
+  dropped or sampled out. Not stored, not forwarded, not counted in issues.
+
+`collapsed` and `suppressed` rows have `requests` = 0: no request was
+refused (a dashboard older than 1.9.0 that reads an unknown kind as a
+rejection finds nothing refused in the last hour).
 
 | Reason | Kind | Status | When |
 | --- | --- | --- | --- |
@@ -236,6 +250,8 @@ SummingMergeTree: read it with `sum(requests)`, `sum(records)` and
 | `sink_overflow` | unforwarded | 0 | the sink retry buffer overflowed, or one batch was bigger than all of it |
 | `sink_rejected` | unforwarded | 0 | the sink consumer answered a permanent 4xx |
 | `sink_gave_up` | unforwarded | 0 | `SINK_MAX_ATTEMPTS` deliveries failed |
+| `collapsed` | collapsed | 200/202 | a looping error past `LOOP_COLLAPSE_AFTER` occurrences in its minute (counted on the sample when the minute's sample is stored) |
+| `suppressed` | suppressed | 200/202 | a suppression rule's `drop`, or a `sample` rule's sampled-out share |
 
 `route` is the ingest route (`/v1/traces`, `/v1/logs`, `/v1/metrics`,
 `/v1/browser`, `/v1/profiles`, `/v1/platform-events`, `/v1/sourcemaps`,
@@ -311,6 +327,103 @@ WHERE org_id = '' AND repository_id = '' AND key_hash IN {hashes:Array(String)}
   AND minute >= now() - INTERVAL 24 HOUR
 GROUP BY key_hash, reason
 ```
+
+## Volume control
+
+Two ways the ingester keeps volume down without losing what an error
+count means (1.9.0, EI-38). Both run after fingerprinting and before
+anything is stored; the request and error-rate rollups (`runtime_metrics_1m`)
+are computed before them and still count every error.
+
+### Loop collapse
+
+An error that repeats in a loop is stored as its first occurrences of the
+minute plus one sample with an exact count. Compat feature `loop_collapse`,
+migration `0021-occurrence-collapsed-count`.
+
+- **Identical** means the same tenant, ingest route and arrival minute, and
+  the same: legacy `fingerprint` and every `fingerprints` candidate;
+  service, environment, release, source, severity and `expected`; error
+  type and declared code; normalised message (`message_normalized`) and
+  normalised top frames (`top_frames`); and session id (an error hitting
+  many sessions is volume, not a loop, and each session must still count
+  as a user). Trace, request and occurrence ids, route, timestamps,
+  attributes and breadcrumbs may differ.
+- The first `LOOP_COLLAPSE_AFTER` (default 10; `0` turns collapse off)
+  occurrences of each window are stored and forwarded as they arrive. Every
+  later one is folded: counted, not stored.
+- When the minute is over (checked every 5 s), the window's newest folded
+  occurrence is stored and forwarded as the sample with `collapsed_count` =
+  folded − 1, so stored rows + Σ `collapsed_count` is exactly the number of
+  occurrences accepted. A loop of 10,000 a minute is 11 rows and one sink
+  record of `count: 9990`. The folded payloads are counted as `collapsed`
+  drops.
+- **Exact under retries.** A request's folds count only once its ClickHouse
+  writes succeed; a request answered 503 gives them back, so the exporter's
+  retry is planned the same. Ids already seen in the window are recognised,
+  so a batch retried after a lost 2xx is not counted twice. A window is
+  stored once no request still holds it (or four minutes after its minute,
+  as a safety net; a fold committed after that is carried into the next
+  write). A failed write of the samples is kept and retried every 5 s.
+- **Shutdown stores every window** (SIGTERM), the minute in progress too, so
+  a deploy loses nothing; the sink is already stopped by then, so the
+  consumer picks those samples up from ClickHouse. Only a crash loses the
+  folded counts of the minute in progress (the first occurrences of the
+  minute are already stored).
+- **Bounded memory** (safety, not a work cap): windows live for their
+  minute; past 100,000 windows a minute or 5,000 held samples, occurrences of
+  new identities pass through uncollapsed (stored as before, never lost),
+  and past 500,000 folded ids a minute retry recognition stops for new
+  folds. `/healthz` shows `collapse` counters (`windows`, `heldSamples`,
+  `folded`, `samplesFlushed`, `overflow`, `failedFlushes`).
+- Windows are per ingester process: N replicas behind a load balancer store
+  up to N samples (and N × `LOOP_COLLAPSE_AFTER` occurrences) a minute per
+  identity; the count stays exact.
+
+Reading an exact count from ClickHouse: per distinct `occurrence_id` (an
+exporter retry can store a row twice), `1 + collapsed_count`:
+
+```sql
+SELECT sum(1 + c) AS events
+FROM (SELECT occurrence_id, max(collapsed_count) AS c
+      FROM runtime_error_occurrences
+      WHERE org_id = {org:String} AND repository_id = {repo:String} AND fingerprint = {fp:String}
+      GROUP BY occurrence_id)
+```
+
+### Suppression rules
+
+Rules set by the user per repository in Autter (or on a static key) drop or
+sample matching occurrences at ingest. Compat feature `ingest_suppression`.
+
+```json
+[
+  { "id": "rsr_1", "action": "drop",
+    "filters": [{ "key": "errorType", "op": "equals", "value": "AbortError" }] },
+  { "id": "rsr_2", "action": "sample", "sampleRate": 0.1,
+    "filters": [{ "key": "message", "op": "matches", "value": "ResizeObserver loop*" },
+                { "key": "source", "op": "equals", "value": "browser" }] }
+]
+```
+
+- Filter keys: `errorType`, `message`, `service`, `environment`, `route`,
+  `release`, `source` (`browser` or `server`); a missing route or release is
+  the empty string. Operators, all case-insensitive: `equals`, `contains`,
+  `starts_with`, `matches` (a glob over the whole value, `*` = any run of
+  characters, matched segment by segment in linear time: no user pattern can
+  stall ingest). Values are at most 500 characters.
+- All filters of a rule must match. Rules are tried in order and the first
+  match decides: `drop` leaves the occurrence out; `sample` keeps
+  `sampleRate` (0 < rate < 1) of them, chosen by occurrence id (so a retried
+  batch keeps the same ones) and never samples out a `fatal` one.
+- Delivery: the key validator's answer (`POST` to `AUTTER_KEY_VALIDATOR_URL`)
+  carries `suppression: [...]`, cached with the key for 60 s, so a change
+  applies within a minute. A static key entry takes the same array:
+  `{"key": "…", "orgId": "…", "repositoryId": "…", "suppression": [ … ]}`.
+  Invalid rules are left out on their own (a static key's are logged at
+  startup); older ingesters ignore the field.
+- Suppressed occurrences are not stored or forwarded and are counted as
+  `suppressed` drops.
 
 ## Fingerprinting
 
@@ -715,6 +828,12 @@ candidate, highest precedence first, always ending with the legacy one) and
 `fingerprintRecord` (`{ scheme: "frames-v3", parts }`: what went into the
 frames-v3 fingerprint). `fingerprint` and `fingerprintScheme` keep their
 legacy meaning, so an older consumer groups exactly as before.
+
+1.9.0 adds `count`: the occurrences the record stands for, sent only when
+above 1, on a loop-collapse sample (`1 + collapsed_count`; see
+[Loop collapse](#loop-collapse)). Consumers add `count ?? 1` to event counts
+(issue counts, rate buckets) and treat the record as one sample for
+everything else. A replay from ClickHouse reads it from `collapsed_count`.
 
 Batches also carry `metrics` (1-minute usage rollup points) and `llmCalls`
 (per-call LLM usage — provider, model, tokens, `costUsd`, `costSource`,

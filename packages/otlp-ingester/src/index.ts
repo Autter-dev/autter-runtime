@@ -3,7 +3,7 @@ import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
 
 const config = loadConfig();
-const { app, store, sink, reportIngesterInfo, drops } = createIngesterApp(config);
+const { app, store, sink, reportIngesterInfo, drops, collapse } = createIngesterApp(config);
 
 const server = app.listen(config.port, () => {
 	console.log(
@@ -36,10 +36,14 @@ async function shutdown(signal: string) {
 		}
 	}
 	server.close(() => {
-		// Write the rejection/drop counts still buffered (best effort: a
-		// failed write is logged, never retried).
-		void drops
+		// Store every loop-collapse window's sample (the minute in progress
+		// too), so a deploy loses no folded count; the sink is stopped, so
+		// the consumer picks them up from ClickHouse. Then write the
+		// rejection/drop counts still buffered (best effort: a failed write
+		// is logged, never retried).
+		void collapse
 			.stop()
+			.finally(() => drops.stop())
 			.finally(() => store.close())
 			.finally(() => process.exit(0));
 	});
@@ -53,6 +57,26 @@ export { createIngesterApp } from "./server.js";
 export { loadConfig } from "./config.js";
 export * from "./compat.js";
 export { SinkForwarder, type SinkDrop, type SinkStats, type SinkTuning } from "./sink.js";
+export {
+	collapseIdentity,
+	LoopCollapser,
+	type CollapsedSample,
+	type CollapsePlan,
+	type LoopCollapseOptions,
+	type LoopCollapseStats,
+} from "./loop-collapse.js";
+export {
+	applySuppression,
+	globMatch,
+	parseSuppressionRules,
+	SUPPRESSION_OPERATORS,
+	SUPPRESSION_PROPERTIES,
+	type SuppressionAction,
+	type SuppressionFilter,
+	type SuppressionOperator,
+	type SuppressionProperty,
+	type SuppressionRule,
+} from "./suppression.js";
 export {
 	DROP_REASONS,
 	IngestDropCounter,

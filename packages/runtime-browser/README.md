@@ -236,6 +236,47 @@ Access-Control-Expose-Headers: x-request-id
 
 Only list APIs you control and whose CORS configuration allows it.
 
+## Sample, ignore and deny: `/filters` (1.7.0, opt-in)
+
+`sampleRate`, `ignoreErrors` and `denyUrls` live in
+`@autter/runtime-browser/filters` (the main tracker has no room left in its
+5 KB budget; this adds about 0.35 KB brotlied and nothing to apps that don't
+import it). `withFilters` takes your init options plus the three filters and
+installs them as `beforeSend`; your own `beforeSend` still runs, after them:
+
+```ts
+import { initAutterBrowser } from "@autter/runtime-browser";
+import { withFilters } from "@autter/runtime-browser/filters";
+
+initAutterBrowser(withFilters({
+  endpoint: "/api/autter-runtime",
+  service: "web-app",
+  sampleRate: 0.25,                                          // a quarter of errors
+  ignoreErrors: ["ResizeObserver loop", /^AbortError$/],     // type or message
+  denyUrls: [/^(chrome|moz|safari-web)-extension:/, "googletagmanager.com"],
+}));
+```
+
+- `sampleRate` (0..1, default 1): the share of errors sent: exceptions,
+  unhandled rejections, outcomes, failed requests, CSP violations and
+  error-level messages. Never a `fatal` message; warnings, info, usage
+  events and timings are never sampled.
+- `ignoreErrors`: a string matches when the error's type or message contains
+  it (case-sensitive); a RegExp is tested against the type, the message and
+  `"<type>: <message>"`. Applies to every error event, warnings included. It
+  sees the message as sent, after secret/PII scrubbing.
+- `denyUrls`: errors from these scripts are never sent. The script is the
+  error event's file (`window.onerror`), else the URL of the innermost stack
+  frame that has one, so an app error passing through a third-party callback
+  is still sent. Strings match when the URL contains them; RegExps are tested
+  against it.
+- `createFilter(filters, next?)` returns the bare `beforeSend` hook.
+
+What these leave out never leaves the page and is counted nowhere, and it
+applies to this app's browsers only. Suppression rules in Autter (Runtime
+settings, ingester 1.9.0) drop or sample at ingest for every SDK, and the
+coverage panel shows how many they left out.
+
 ## API
 
 | Function | Notes |
@@ -254,6 +295,7 @@ Only list APIs you control and whose CORS configuration allows it.
 | `redactContext(ctx)` | Mask secrets/PII in a context bag, nested (applied to every event automatically) |
 | `scrubText(text)` | Mask secrets/PII inside a string (applied to every message, stack and name automatically) |
 | `enableBreadcrumbs(options?)`, `addBreadcrumb(crumb)`, `clearBreadcrumbs()` | From `@autter/runtime-browser/breadcrumbs` — see above |
+| `withFilters(options)`, `createFilter(filters, next?)` | From `@autter/runtime-browser/filters`: `sampleRate`, `ignoreErrors`, `denyUrls`, see [above](#sample-ignore-and-deny-filters-170-opt-in) |
 
 ## Batching & delivery
 
@@ -261,7 +303,9 @@ Events queue and flush at 10 events / 5 s / page hidden / `pagehide` /
 manually; errors trigger a fast flush (500 ms). Delivery uses
 `navigator.sendBeacon` (JSON blob) with a `fetch(keepalive)` fallback, so
 events survive page navigation. A hard cap of 200 events per session
-prevents error loops from flooding.
+prevents error loops from flooding (events left out by `beforeSend` or the
+filters do not count toward it); the ingester also collapses a looping error
+into one sample a minute with an exact count (1.9.0).
 
 ## What is never sent
 

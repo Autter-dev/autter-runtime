@@ -115,7 +115,11 @@ own stack, `next.router_kind` `Pages Router` and `next.route_path` such as
 `registerAutter` passes options straight to `initAutterServer`, so the
 server SDK's defaults apply out of the box: exporters are flushed on
 process exit (`autoFlush`) and custom attributes are scrubbed for PII
-before export (`redactAttributes`). See the `@autter/runtime-node` README
+before export (`redactAttributes`). The same goes for `sampleRate` and
+`ignoreErrors` (1.8.0); in the browser, `@autter/runtime-next/client`
+re-exports `withFilters` for `sampleRate`, `ignoreErrors` and `denyUrls`
+(`initAutterBrowser(withFilters({ endpoint, service, sampleRate: 0.5 }))`),
+and the edge options of `autterOnRequestError` take `ignoreErrors`. See the `@autter/runtime-node` README
 for every option; `makeSafeCapture`, `installAutterAutoFlush`, and
 `redactAttributes` are also re-exported from this package.
 

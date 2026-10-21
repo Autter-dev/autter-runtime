@@ -52,6 +52,8 @@ import {
 } from "./memory.js";
 import { SOURCE_MAP_MAX_BODY_BYTES, validateSourceMap, validateSourceMapCheck } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
+import { LoopCollapser } from "./loop-collapse.js";
+import { applySuppression } from "./suppression.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
 import {
 	buildCompatReport,
@@ -84,6 +86,8 @@ export interface IngesterApp {
 	reportIngesterInfo: () => Promise<void>;
 	/** Rejection and drop counts per tenant (runtime_ingest_drops); `stop()` writes what is buffered. */
 	drops: IngestDropCounter;
+	/** Loop collapse (1.9.0): `stop()` stores every window's sample (call it before `drops.stop()`). */
+	collapse: LoopCollapser;
 }
 
 /** The only routes an upload key (`autter_rtu_…`, scope "upload") may call. */
@@ -155,6 +159,49 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				records: drop.occurrences,
 			});
 	}
+	// Loop collapse (1.9.0, loop-collapse.ts): a looping error past its first
+	// LOOP_COLLAPSE_AFTER occurrences of the minute is stored as one sample a
+	// minute with an exact count. The minute's samples are written here, then
+	// forwarded; a failed write is kept and retried by the collapser.
+	const collapse = new LoopCollapser(
+		async (ctx, samples) => {
+			const occurrences = samples.map((entry) => entry.sample);
+			await store.insertOccurrences(ctx, occurrences);
+			sink?.enqueue(ctx, occurrences);
+			for (const entry of samples) {
+				// Payloads not stored: every folded occurrence but the sample itself.
+				if (entry.folded > 1) {
+					drops.record({ tenant: ctx, route: entry.route, reason: "collapsed", requests: 0, records: entry.folded - 1 });
+				}
+			}
+		},
+		{ after: config.loopCollapseAfter ?? 10 },
+	);
+	if (store.configured) collapse.start();
+
+	/**
+	 * Volume control on a request's fingerprinted occurrences (1.9.0): the
+	 * tenant's suppression rules first, then loop collapse. `kept` is what to
+	 * store and forward now. `commit()` once the request's writes succeeded
+	 * (folds and suppressions are counted then), `rollback()` when they
+	 * failed (the exporter retries, and must find the same windows).
+	 */
+	function admit(ctx: IngestContext, req: Request, occurrences: RuntimeOccurrence[]) {
+		const route = dropRoute(req.path);
+		const { kept, suppressed } = applySuppression(occurrences, ctx.suppression);
+		const plan = collapse.plan(ctx, route, kept);
+		return {
+			kept: plan.kept,
+			commit(): void {
+				plan.commit();
+				if (suppressed > 0) drops.record({ tenant: ctx, route, reason: "suppressed", requests: 0, records: suppressed });
+			},
+			rollback(): void {
+				plan.rollback();
+			},
+		};
+	}
+
 	const allMigrationIds = MIGRATIONS.map((migration) => migration.id);
 	const compatReport = () => {
 		const schema = store.schemaStatus();
@@ -336,7 +383,11 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	});
 
 	app.get("/healthz", async (_req, res) => {
-		const sinkStats = sink ? { sink: sink.stats() } : {};
+		const sinkStats = {
+			...(sink ? { sink: sink.stats() } : {}),
+			// Counters only (no tenant data): /healthz is public.
+			...(collapse.enabled ? { collapse: collapse.stats() } : {}),
+		};
 		if (!store.configured) {
 			res.status(200).json({ ok: true, clickhouse: "unconfigured", ...sinkStats });
 			return;
@@ -725,6 +776,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}
 		const { occurrences, occurrenceBatchIndexes, spans, metricPoints, llmCalls } = normalized;
 		const fingerprinted = await fingerprintAll(ctx, occurrences, occurrenceBatchIndexes);
+		const admitted = admit(ctx, req, fingerprinted);
 		// ClickHouse has no cross-table transaction, so these four inserts can
 		// partially commit. Recovery boundary: any failure → 503 → the exporter
 		// retries the whole batch. Deterministic occurrence ids make the retry
@@ -735,16 +787,18 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		// ClickHouse reconciliation instead.
 		try {
 			await Promise.all([
-				store.insertOccurrences(ctx, fingerprinted),
+				store.insertOccurrences(ctx, admitted.kept),
 				store.insertSpans(ctx, spans),
 				store.insertMetricPoints(ctx, metricPoints),
 				store.insertLlmCalls(ctx, llmCalls),
 			]);
 		} catch (err) {
+			admitted.rollback();
 			storageError(req, res, ctx, err, totalSpans);
 			return;
 		}
-		sink?.enqueue(ctx, fingerprinted, metricPoints, llmCalls);
+		admitted.commit();
+		sink?.enqueue(ctx, admitted.kept, metricPoints, llmCalls);
 		recordSdks(ctx, request, req);
 		// normalizeTraces stops at SPANS_PER_REQUEST; the rest were not read.
 		const overLimit = Math.max(0, totalSpans - normalized.spanCount);
@@ -780,18 +834,22 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		// edge SDKs mark span-less error records `autter.capture.mode = "log"`,
 		// and those are promoted to occurrences here — see log-promotion.ts.
 		const promoted = await promoteLogs(ctx, logs);
+		// Rollups count every promoted error, collapsed or suppressed ones too.
 		const metricPoints = promotionRollups(promoted);
+		const admitted = admit(ctx, req, promoted);
 		try {
 			await Promise.all([
 				store.insertLogs(ctx, logs),
-				store.insertOccurrences(ctx, promoted),
+				store.insertOccurrences(ctx, admitted.kept),
 				store.insertMetricPoints(ctx, metricPoints),
 			]);
 		} catch (err) {
+			admitted.rollback();
 			storageError(req, res, ctx, err, logs.length + stats.overLimit);
 			return;
 		}
-		sink?.enqueue(ctx, promoted, metricPoints);
+		admitted.commit();
+		sink?.enqueue(ctx, admitted.kept, metricPoints);
 		recordSdks(ctx, logsRequest, req);
 		otlpSuccess(req, res, "logs", partialSuccess([
 			{ rejected: stats.overLimit, message: PARTIAL_MESSAGES.logRecords(stats.overLimit, MAX_LOG_RECORDS_PER_REQUEST) },
@@ -901,16 +959,19 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}
 		const { occurrences, metricPoints } = normalized;
 		const fingerprinted = await fingerprintAll(ctx, occurrences);
+		const admitted = admit(ctx, req, fingerprinted);
 		try {
 			await Promise.all([
-				store.insertOccurrences(ctx, fingerprinted),
+				store.insertOccurrences(ctx, admitted.kept),
 				store.insertMetricPoints(ctx, metricPoints),
 			]);
 		} catch (err) {
+			admitted.rollback();
 			storageError(req, res, ctx, err, payload.events.length + invalidEvents + overLimitEvents);
 			return;
 		}
-		sink?.enqueue(ctx, fingerprinted, metricPoints);
+		admitted.commit();
+		sink?.enqueue(ctx, admitted.kept, metricPoints);
 		if (payload.sdk) {
 			void sdkVersions.observe(ctx, [{
 				service: payload.service,
@@ -970,5 +1031,5 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		},
 	);
 
-	return { app, store, sink, reportIngesterInfo, drops };
+	return { app, store, sink, reportIngesterInfo, drops, collapse };
 }

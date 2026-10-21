@@ -90,6 +90,19 @@ export const OCCURRENCE_FRAME_RESOLUTION_COLUMNS: string[] = [
 	"in_app_frames_unresolved UInt16 DEFAULT 0",
 ];
 
+/**
+ * Migration 0021 column — shared with the baseline DDL in clickhouse.ts.
+ * Loop collapse (1.9.0, loop-collapse.ts): the identical occurrences a
+ * minute's collapsed sample stands for besides itself, whose payloads were
+ * not stored; 0 on every other row. An exact occurrence count is, per
+ * distinct `occurrence_id` (an exporter retry can store a row twice),
+ * 1 + collapsed_count: `SELECT sum(1 + c) FROM (SELECT occurrence_id,
+ * max(collapsed_count) AS c … GROUP BY occurrence_id)`. A metadata-only
+ * ALTER with a constant default: rows written before it, and by older
+ * replicas during a rolling deploy, read 0.
+ */
+export const OCCURRENCE_COLLAPSE_COLUMNS: string[] = ["collapsed_count UInt32 DEFAULT 0"];
+
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
 	id: string;
@@ -263,6 +276,14 @@ export const MIGRATIONS: Migration[] = [
 	{
 		id: "0020-occurrence-frame-resolution",
 		statements: OCCURRENCE_FRAME_RESOLUTION_COLUMNS.map(
+			(column) =>
+				`ALTER TABLE {db}.runtime_error_occurrences ADD COLUMN IF NOT EXISTS ${column}`,
+		),
+	},
+	// Loop collapse (1.9.0): the count a minute's collapsed sample carries.
+	{
+		id: "0021-occurrence-collapsed-count",
+		statements: OCCURRENCE_COLLAPSE_COLUMNS.map(
 			(column) =>
 				`ALTER TABLE {db}.runtime_error_occurrences ADD COLUMN IF NOT EXISTS ${column}`,
 		),

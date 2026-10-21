@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-browser",
-	"version": "1.6.0",
+	"version": "1.7.0",
 	"description": "Tiny, dependency-free browser error and usage tracker for Autter Runtime (<5 KB gzipped)",
 	"license": "MIT",
 	"type": "module",
@@ -23,6 +23,11 @@
 			"types": "./dist/tracing.d.ts",
 			"import": "./dist/tracing.js",
 			"default": "./dist/tracing.js"
+		},
+		"./filters": {
+			"types": "./dist/filters.d.ts",
+			"import": "./dist/filters.js",
+			"default": "./dist/filters.js"
 		}
 	},
 	"files": [
@@ -34,7 +39,7 @@
 		"directory": "packages/runtime-browser"
 	},
 	"scripts": {
-		"build": "tsup src/index.ts src/breadcrumbs.ts src/tracing.ts --format esm --dts --target es2020 --clean",
+		"build": "tsup src/index.ts src/breadcrumbs.ts src/tracing.ts src/filters.ts --format esm --dts --target es2020 --clean",
 		"test": "npm run build && node --test \"test/*.test.mjs\"",
 		"size": "size-limit"
 	},
@@ -58,6 +63,14 @@
 				"dist/tracing.js": "{ enableTracePropagation, disableTracePropagation }"
 			},
 			"limit": "5.6 KB"
+		},
+		{
+			"name": "dist/index.js + dist/filters.js",
+			"import": {
+				"dist/index.js": "{ initAutterBrowser, captureException, captureMessage, captureOutcome, trackEvent, setUser, setContext, flush, autterErrorFromResponse, scrubText, redactContext }",
+				"dist/filters.js": "{ withFilters, createFilter }"
+			},
+			"limit": "5.4 KB"
 		}
 	],
 	"devDependencies": {

@@ -132,6 +132,8 @@ copy that a test keeps identical.
 | Rejected and dropped records per repository (`ingest_drop_counts`) | 1.8.0 | `0018-runtime-ingest-drops` | | |
 | How each service's telemetry arrives (`telemetry_sender_via`) | 1.8.0 | `0019-sdk-versions-via` | | |
 | Resolved and unresolved browser frames per occurrence (`frame_resolution_counts`) | 1.8.0 | `0020-occurrence-frame-resolution` | | |
+| Suppression rules: drop or sample matching errors at ingest (`ingest_suppression`) | 1.9.0 | | | |
+| Loop collapse: a looping error stored as one sample a minute with an exact count (`loop_collapse`) | 1.9.0 | `0021-occurrence-collapsed-count` | | |
 
 Notes:
 
@@ -152,6 +154,13 @@ Notes:
   `partial_success` instead of a 400 for the whole request; and a value the
   normaliser can't read (a non-integer timestamp) is a 400 instead of
   stopping the process.
+- `ingest_suppression` and `loop_collapse` list no SDK: they act on
+  whatever arrives (see [Volume control](ARCHITECTURE.md#volume-control)).
+  An ingester before 1.9.0 ignores the suppression rules in the key
+  validator's answer and stores every occurrence. The SDK options
+  `sampleRate` / `ignoreErrors` (`runtime-node`/`runtime-next` 1.8.0,
+  `runtime-edge` 1.2.0) and `sampleRate` / `ignoreErrors` / `denyUrls`
+  (`@autter/runtime-browser/filters`, 1.7.0) need no ingester support.
 - Ingesters older than 1.6.0 accept a browser event's `traceId` but drop it
   (the event itself is stored), so browser errors are not linked to server
   traces until the ingester is upgraded. The relay warns once.

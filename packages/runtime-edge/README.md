@@ -102,6 +102,8 @@ then an `expected` coded error → `degraded`, a thrown error or status ≥ 500 
 | `console` | `false` | Also print records as JSON lines |
 | `redactAttributes` | `true` | Same redaction as runtime-node (emails, tokens, sensitive keys) |
 | `maxQueue` | `200` | Records buffered per isolate (1 MiB cap); overflow is dropped |
+| `sampleRate` | `1` | Share of `rt.captureException` errors reported (1.2.0). An error thrown out of the handler, and `captureEdgeException`, are never sampled out. The request summary still records the failure |
+| `ignoreErrors` | `[]` | Errors never reported as issues (1.2.0): a string matches when the type or message contains it, a RegExp is tested against the type, the message and `"<type>: <message>"`. Also applies to `captureEdgeException` |
 
 Also exported: `RuntimeError`, `defineRuntimeErrors`, `isRuntimeErrorLike`,
 `toClientError`, `CODE_PATTERN` — the same coded-error API as

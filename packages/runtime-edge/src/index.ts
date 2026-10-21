@@ -26,6 +26,7 @@ import {
 	boundContext,
 	buildOtlpLogsRequest,
 	compileIgnore,
+	createErrorFilter,
 	createInlineLogState,
 	createRuntimeEvent,
 	isSummary,
@@ -43,6 +44,7 @@ import {
 	toClientError,
 	toOtlpLogRecord,
 	userContext,
+	type IgnoreErrorPattern,
 	type OtlpLogRecord,
 	type RedactOptions,
 	type RuntimeLogContext,
@@ -94,6 +96,21 @@ export interface AutterEdgeOptions {
 	redactAttributes?: boolean | RedactOptions;
 	/** Max records buffered per isolate. Default 200. */
 	maxQueue?: number;
+	/**
+	 * Share of `rt.captureException` errors reported, 0..1 (default 1).
+	 * An error thrown out of the handler (and `captureEdgeException`, which
+	 * reports unhandled errors) is never sampled out. Same semantics as
+	 * runtime-node; not counted anywhere (use suppression rules in Autter
+	 * for counted volume control).
+	 */
+	sampleRate?: number;
+	/**
+	 * Errors never reported as occurrences: strings match when the error's
+	 * type or message contains them, RegExps are tested against the type,
+	 * the message and `"<type>: <message>"`. The request summary still
+	 * records the failed outcome.
+	 */
+	ignoreErrors?: IgnoreErrorPattern[];
 	/** @internal Override fetch (tests). */
 	fetch?: typeof fetch;
 }
@@ -353,7 +370,7 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 		} catch (error) {
 			thrown = error;
 			runtime.noteError(error, true);
-			runtime.rt.captureException(error);
+			runtime.captureThrown(error);
 			if (opts.errorResponse) {
 				status = responseStatusOf(error);
 				response = new Response(JSON.stringify(toClientError(error, runtime.rt.requestId)), {
@@ -470,6 +487,9 @@ export async function captureEdgeException(
 		const redact = makeRedactor(options.redactAttributes ?? true);
 		const isErr = isError(error);
 		const message = isErr ? error.message : safeString(error);
+		// Unhandled errors: ignoreErrors applies, sampleRate never does.
+		const reportable = createErrorFilter({ ignoreErrors: options.ignoreErrors });
+		if (!reportable({ type: isErr ? String(error.name ?? "") : "Error", message, crash: true })) return;
 		const user = userContext(
 			{
 				...safeAttributes(attributes),
@@ -583,6 +603,33 @@ function buildRuntime(
 		if (thrownOut) errorThrown = true;
 	};
 	const captured = new WeakSet<object>();
+	const reportable = createErrorFilter({ ignoreErrors: opts.ignoreErrors, sampleRate: opts.sampleRate });
+	const capture = (err: unknown, attrs: RuntimeLogContext | undefined, crash: boolean) => {
+		if (sealed) return;
+		if (err && typeof err === "object") {
+			if (captured.has(err)) return;
+			captured.add(err);
+			capturedErrors().add(err);
+		}
+		noteError(err);
+		const isErr = isError(err);
+		const message = isErr ? err.message : String(err);
+		// Decided once per value (it is marked captured either way above).
+		if (!reportable({ type: isErr ? String(err.name ?? "") : "Error", message, crash })) return;
+		appendInlineLog(inline, "error", message, undefined, redact);
+		const split = splitFingerprint(safeAttributes(attrs));
+		record(
+			"error",
+			message,
+			{
+				...split.attributes,
+				"exception.type": isErr ? err.name : "Error",
+				"exception.message": message,
+				"exception.stacktrace": (isErr && err.stack) || new Error(message).stack || "",
+			},
+			{ "autter.capture.mode": "log", ...errorAttributes(err), ...fingerprintEventAttributes(split.fingerprint) },
+		);
+	};
 	const rt: EdgeRuntime = {
 		set(context) {
 			if (!sealed) attributes = mergeContext(attributes, context, redact);
@@ -610,28 +657,7 @@ function buildRuntime(
 		},
 		requestId,
 		captureException(err, attrs) {
-			if (sealed) return;
-			if (err && typeof err === "object") {
-				if (captured.has(err)) return;
-				captured.add(err);
-				capturedErrors().add(err);
-			}
-			noteError(err);
-			const isErr = isError(err);
-			const message = isErr ? err.message : String(err);
-			appendInlineLog(inline, "error", message, undefined, redact);
-			const split = splitFingerprint(safeAttributes(attrs));
-			record(
-				"error",
-				message,
-				{
-					...split.attributes,
-					"exception.type": isErr ? err.name : "Error",
-					"exception.message": message,
-					"exception.stacktrace": (isErr && err.stack) || new Error(message).stack || "",
-				},
-				{ "autter.capture.mode": "log", ...errorAttributes(err), ...fingerprintEventAttributes(split.fingerprint) },
-			);
+			capture(err, attrs, false);
 		},
 	};
 	const finish = (status: number, aborted: boolean) => {
@@ -667,5 +693,7 @@ function buildRuntime(
 		sealed = true;
 		return emitted;
 	};
-	return { rt, finish, noteError };
+	/** An error thrown out of the handler: never sampled out. */
+	const captureThrown = (err: unknown) => capture(err, undefined, true);
+	return { rt, finish, noteError, captureThrown };
 }

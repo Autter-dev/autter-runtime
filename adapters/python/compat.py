@@ -266,6 +266,22 @@ MANIFEST: dict[str, Any] = json.loads(
                 "0020-occurrence-frame-resolution"
             ],
             "sdks": {}
+        },
+        {
+            "id": "ingest_suppression",
+            "title": "Suppression rules: drop or sample matching errors at ingest",
+            "ingester": "1.9.0",
+            "migrations": [],
+            "sdks": {}
+        },
+        {
+            "id": "loop_collapse",
+            "title": "Loop collapse: a looping error stored as one sample a minute with an exact count",
+            "ingester": "1.9.0",
+            "migrations": [
+                "0021-occurrence-collapsed-count"
+            ],
+            "sdks": {}
         }
     ]
 }

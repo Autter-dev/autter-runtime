@@ -7,6 +7,10 @@
  *   import { initAutterBrowser, AutterErrorBoundary } from "@autter/runtime-next/client";
  *
  *   initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
+ *
+ * `sampleRate`, `ignoreErrors` and `denyUrls` (1.8.0) wrap the options:
+ *
+ *   initAutterBrowser(withFilters({ endpoint: "/api/autter-runtime", service: "web-app", sampleRate: 0.5 }));
  */
 
 export {
@@ -39,6 +43,15 @@ export {
 	disableTracePropagation,
 	type TracePropagationOptions,
 } from "@autter/runtime-browser/tracing";
+// Opt-in client-side volume control (EI-38): sampleRate, ignoreErrors and
+// denyUrls as a beforeSend filter, outside the main tracker's bundle.
+//   initAutterBrowser(withFilters({ endpoint, service, sampleRate: 0.5, ignoreErrors: [/ResizeObserver/] }));
+export {
+	withFilters,
+	createFilter,
+	type AutterFilterOptions,
+	type FilterPattern,
+} from "@autter/runtime-browser/filters";
 export {
 	AutterErrorBoundary,
 	type AutterErrorBoundaryProps,

@@ -21,12 +21,25 @@ import type { IngestContext } from "./types.js";
  * - `unforwarded`: stored in ClickHouse, but the sink webhook gave up on
  *   the batch; the consumer recovers it by replaying ClickHouse.
  *
+ * And two kinds of records left out on purpose (1.9.0, EI-38), counted so
+ * the dashboard can explain why stored rows are fewer than records sent:
+ * - `collapsed`: a looping error past its first occurrences of the minute
+ *   (loop-collapse.ts); its payload was not stored, its count is, on the
+ *   minute's collapsed sample (`collapsed_count`). `records` counts payloads
+ *   not stored.
+ * - `suppressed`: occurrences a suppression rule set by the user dropped or
+ *   sampled out (suppression.ts).
+ *
+ * Both are recorded with `requests` 0: no request was refused, and a
+ * dashboard before 1.9.0 (which reads an unknown kind as a rejection)
+ * finds nothing refused in the last hour.
+ *
  * Counting never slows or fails ingest: `record()` is a synchronous map
  * update, rows are written in batches every few seconds, a failed write is
  * logged and dropped (never retried), and the buffer is bounded.
  */
 
-export type DropKind = "rejected" | "dropped" | "truncated" | "unforwarded";
+export type DropKind = "rejected" | "dropped" | "truncated" | "unforwarded" | "collapsed" | "suppressed";
 
 /** Every reason, its kind, and (for rejections) the HTTP status it answers with. */
 export const DROP_REASONS = {
@@ -85,6 +98,12 @@ export const DROP_REASONS = {
 	sink_rejected: { kind: "unforwarded" },
 	/** SINK_MAX_ATTEMPTS deliveries failed. */
 	sink_gave_up: { kind: "unforwarded" },
+	// ── collapsed: counted on the minute's sample, payload not stored (1.9.0) ──
+	/** Occurrences of a looping error past the first LOOP_COLLAPSE_AFTER of the minute. */
+	collapsed: { kind: "collapsed" },
+	// ── suppressed: a suppression rule set by the user left them out (1.9.0) ──
+	/** Occurrences a `drop` rule matched, or a `sample` rule sampled out. */
+	suppressed: { kind: "suppressed" },
 } as const satisfies Record<string, { kind: DropKind; status?: number }>;
 
 export type DropReason = keyof typeof DROP_REASONS;

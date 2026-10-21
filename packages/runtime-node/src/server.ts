@@ -80,7 +80,15 @@ import {
 	setRequestSpanAnnotator,
 	startHookRequest,
 } from "./requests.js";
-import { errorAttributes, errorInternal, fingerprintEventAttributes, isError, splitFingerprint } from "@autter/runtime-core";
+import {
+	createErrorFilter,
+	errorAttributes,
+	errorInternal,
+	fingerprintEventAttributes,
+	isError,
+	splitFingerprint,
+	type IgnoreErrorPattern,
+} from "@autter/runtime-core";
 import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
 import {
 	installUnhandledRejectionCapture,
@@ -166,6 +174,25 @@ export interface AutterServerOptions {
 	release?: string;
 	/** Head-sampling ratio for regular traces. Default 0.01 (1%). */
 	traceSampleRate?: number;
+	/**
+	 * Share of captured errors reported, 0..1 (default 1: all). Applies to
+	 * `captureException`, error-severity `captureMessage` and `reportOutcome`.
+	 * Never samples out a fatal message, a crash (uncaught exception) or an
+	 * unhandled rejection; warnings and info are never sampled. One thrown
+	 * value is decided once, however many hooks report it. What is sampled
+	 * out is not counted anywhere: for counted volume control use
+	 * suppression rules in Autter (ingester 1.9.0). Not `traceSampleRate`,
+	 * which samples healthy traces.
+	 */
+	sampleRate?: number;
+	/**
+	 * Errors never reported: strings match when the error's type or message
+	 * contains them (case-sensitive), RegExps are tested against the type,
+	 * the message and `"<type>: <message>"`. Applies to every capture path,
+	 * crashes included. A request that failed still records its failed
+	 * span and summary: leave those out with a suppression rule in Autter.
+	 */
+	ignoreErrors?: IgnoreErrorPattern[];
 	/**
 	 * Keep the FULL trace whenever it contains an error: an ERROR-status
 	 * span (e.g. a 5xx request), a recorded exception, or a
@@ -955,6 +982,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		"autter.metrics_routes": true,
 	});
 
+	// ignoreErrors / sampleRate (1.8.0, EI-38), decided once per capture.
+	const errorFilter = createErrorFilter({ ignoreErrors: options.ignoreErrors, sampleRate: options.sampleRate });
 	const rootSampler = new TraceIdRatioBasedSampler(options.traceSampleRate ?? 0.01);
 	const headSampler = new ParentBasedSampler({
 		root: rootSampler,
@@ -1055,6 +1084,18 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const llmTracer = alwaysOnProvider.getTracer("autter-llm");
 
 	function captureException(error: unknown, attributes?: Attributes): void {
+		const isErrValue = isError(error);
+		const reported = errorFilter({
+			type: isErrValue ? String(error.name ?? "") : "Error",
+			message: isErrValue ? String(error.message ?? "") : String(error),
+			crash: attributes?.["autter.unhandled"] === true || attributes?.["autter.unhandled_rejection"] === true,
+		});
+		if (!reported) {
+			// Decided once: a later hook reporting the same value (request
+			// error middleware, onRequestError) finds it already captured.
+			markCaptured(error);
+			return;
+		}
 		// A captured error makes the surrounding trace worth keeping in full.
 		errorTraceBuffer?.retainActiveTrace();
 		telemetryStats.markCaptured();
@@ -1150,6 +1191,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		severity: AutterSeverity = "warning",
 		attributes?: Attributes,
 	): void {
+		if (!errorFilter({ type: "Message", message: String(message), severity })) return;
 		// Error-severity messages rescue their trace like exceptions do;
 		// warnings/info are too chatty to justify exporting whole traces.
 		if (severity === "error" || severity === "fatal") {
@@ -1180,6 +1222,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	}
 
 	function reportOutcome(name: string, message: string, attributes?: Attributes): void {
+		if (!errorFilter({ type: "OutcomeFailure", message: `${name}: ${message}` })) return;
 		errorTraceBuffer?.retainActiveTrace();
 		telemetryStats.markCaptured();
 		const activeSpan = trace.getActiveSpan();

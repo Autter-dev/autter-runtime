@@ -1,4 +1,5 @@
 import type { Breadcrumb } from "./breadcrumbs.js";
+import type { SuppressionRule } from "./suppression.js";
 
 export type RuntimeSource = "browser" | "server";
 
@@ -159,6 +160,13 @@ export interface RuntimeOccurrence extends RuntimeOccurrenceInput {
 	topFrames: string[];
 	/** topFrames[0] — single-column GROUP BY for "where did this come from". */
 	firstFrame: string;
+	/**
+	 * Loop collapse (1.9.0, loop-collapse.ts): the minute's collapsed sample
+	 * stands for itself plus this many identical occurrences whose payloads
+	 * were not stored. Stored as `collapsed_count`, sent to the sink as
+	 * `count` (1 + collapsedCount). Absent (0) on every other occurrence.
+	 */
+	collapsedCount?: number;
 }
 
 export interface RuntimeSpanRow {
@@ -245,4 +253,10 @@ export interface IngestContext {
 	scope: IngestKeyScope;
 	/** client keys only: exact origins allowed to send (empty = any). */
 	allowedOrigins: string[];
+	/**
+	 * Suppression rules set by the user for this repository (1.9.0): from the
+	 * key validator's `suppression` answer (cached with the key, 60 s) or a
+	 * static key's `suppression` entry. Absent or empty: nothing suppressed.
+	 */
+	suppression?: SuppressionRule[];
 }

@@ -57,8 +57,28 @@ AUTTER_INGEST_KEYS='[
 ```
 
 The validator webhook may return the same extra fields:
-`{ orgId, repositoryId, scope?, allowedOrigins? }`, with `scope` one of
-`server`, `client`, `upload`.
+`{ orgId, repositoryId, scope?, allowedOrigins?, suppression? }`, with
+`scope` one of `server`, `client`, `upload`, and `suppression` the
+repository's suppression rules (1.9.0, below); a static entry takes
+`"suppression": [ … ]` too.
+
+### Volume control (1.9.0)
+
+- **Loop collapse.** Per tenant and identity (fingerprints, service,
+  environment, release, source, severity, error type and code, normalised
+  message and top frames, session), the first `LOOP_COLLAPSE_AFTER`
+  occurrences of a minute are stored as usual; the rest of the minute is
+  stored as ONE sample whose `collapsed_count` makes the count exact, and
+  forwarded to the sink with `count`. A loop of 10,000 a minute is 11 rows,
+  not 10,000. Shutdown stores the minute in progress.
+- **Suppression rules** set per repository in Autter: `drop` or `sample`
+  (keep `sampleRate`, never a fatal one) the occurrences whose error type,
+  message, service, environment, route, release or source match. Delivered
+  with the key, applied before anything is stored.
+
+Folded and suppressed occurrences are counted in `runtime_ingest_drops`
+(`collapsed`, `suppressed`); request and error-rate rollups still count
+every error. Details: [docs/ARCHITECTURE.md § Volume control](../../docs/ARCHITECTURE.md#volume-control).
 
 ### Rejections and drops (1.8.0)
 
@@ -93,8 +113,8 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `CLICKHOUSE_URL` | — | e.g. `http://localhost:8123`; unset = ingest returns 503 |
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / empty | |
 | `CLICKHOUSE_DATABASE` | `autter_runtime` | Created automatically |
-| `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` |
-| `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId}` (60 s cache) |
+| `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` (optional `scope`, `allowedOrigins`, `suppression`) |
+| `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId, scope?, allowedOrigins?, suppression?}` (60 s cache) |
 | `AUTTER_KEY_VALIDATOR_TOKEN` | — | Bearer token sent to the validator |
 | `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once (`docs/ARCHITECTURE.md`) |
 | `AUTTER_SINK_TOKEN` | — | Bearer token sent to the sink |
@@ -103,6 +123,7 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `SINK_MAX_BUFFERED_MB` | `64` | Sink retry buffer cap (memory) |
 | `SOURCE_MAP_CACHE_MB` | `64` | Memory budget (decoded size, function scope tables included) for parsed source maps used to symbolicate browser frames at ingest; least recently used maps are evicted, and a map that needs more than half of it is used without being kept |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
+| `LOOP_COLLAPSE_AFTER` | `10` | Identical occurrences stored per minute before the rest of the minute is collapsed into one sample with an exact count; `0` turns loop collapse off |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |
 | `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
 | `PROMOTION_LOOKUPS_PER_MINUTE` | `30` | Per-tenant ClickHouse dedupe lookups for `/v1/logs` error promotion; over budget, records are promoted with in-batch dedupe only |

@@ -242,6 +242,40 @@ when the error was already reported). Errors from another JavaScript realm
 message and stack. `autterErrorResponse()` reports the same way and also
 answers the request.
 
+### Sample and ignore errors (1.8.0)
+
+```ts
+initAutterServer({
+  ...,
+  sampleRate: 0.5,                                        // half of captured errors
+  ignoreErrors: ["ECONNRESET", /^AbortError$/, /^billing\.declined/],
+});
+```
+
+- `sampleRate` (0..1, default 1): the share of captured errors reported:
+  `captureException`, error-level `captureMessage` and `reportOutcome`.
+  Never a fatal message, a crash (uncaught exception) or an unhandled
+  rejection (which may be one); warnings and info are never sampled. Not
+  `traceSampleRate`, which samples healthy traces.
+- `ignoreErrors`: never reported. A string matches when the error's type
+  (`error.name`) or message contains it (case-sensitive); a RegExp is tested
+  against the type, the message and `"<type>: <message>"`. Every capture
+  path, crashes included.
+- A value filtered out is marked captured, so a later hook (error
+  middleware, `onRequestError`) does not report it either. A request that
+  failed still exports its failed span, which the ingester turns into a
+  stackless `HttpServerError` for a 5xx; leave those out with a
+  suppression rule.
+- `initAutterLogging` takes the same two options; `registerAutter`
+  (`@autter/runtime-next`) passes them through.
+
+What the SDK filters never leaves the process and is counted nowhere. For
+volume control that is counted, applies to every SDK and service at once and
+is changed without a deploy, use **suppression rules** in Autter's Runtime
+settings (drop or sample by error type, message, service, environment,
+route, release or source; ingester 1.9.0). The ingester also collapses a
+looping error into one sample a minute with an exact count.
+
 ### Unhandled promise rejections
 
 Recorded as errors (severity `error`, `autter.unhandled_rejection: true`, not

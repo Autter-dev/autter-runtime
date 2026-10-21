@@ -4,7 +4,14 @@ import {
 	type Attributes,
 	type Span,
 } from "@opentelemetry/api";
-import { errorAttributes, fingerprintEventAttributes, isError, splitFingerprint } from "@autter/runtime-core";
+import {
+	createErrorFilter,
+	errorAttributes,
+	fingerprintEventAttributes,
+	isError,
+	splitFingerprint,
+	type IgnoreErrorPattern,
+} from "@autter/runtime-core";
 import {
 	captureExceptionAsLog,
 	configureRuntimeLogger,
@@ -77,6 +84,10 @@ export interface AutterLoggingOptions {
 	 * (use when the app's own spans are not exported to Autter).
 	 */
 	exceptions?: "auto" | "log";
+	/** Same semantics as initAutterServer: share of captured errors reported (crashes never sampled). */
+	sampleRate?: number;
+	/** Same semantics as initAutterServer: errors never reported (type or message). */
+	ignoreErrors?: IgnoreErrorPattern[];
 }
 
 export interface AutterLogging {
@@ -108,8 +119,17 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 	const mode = options.exceptions ?? "auto";
 	debugLog(`initialising logger-only service=${options.service} endpoint=${endpoint}`);
 
+	const errorFilter = createErrorFilter({ ignoreErrors: options.ignoreErrors, sampleRate: options.sampleRate });
+
 	function captureException(error: unknown, attributes?: Attributes): void {
 		markCaptured(error);
+		const isErrValue = isError(error);
+		const reported = errorFilter({
+			type: isErrValue ? String(error.name ?? "") : "Error",
+			message: isErrValue ? String(error.message ?? "") : String(error),
+			crash: attributes?.["autter.unhandled"] === true || attributes?.["autter.unhandled_rejection"] === true,
+		});
+		if (!reported) return;
 		const split = splitFingerprint(attributes);
 		const fingerprint = fingerprintEventAttributes(split.fingerprint, redact.text);
 		const redacted = redact(split.attributes);

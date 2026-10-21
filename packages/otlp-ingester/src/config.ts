@@ -32,6 +32,13 @@ export interface StaticIngestKey {
 	scope?: IngestKeyScope;
 	/** client keys: exact origins allowed to send (e.g. https://app.example.com). */
 	allowedOrigins?: string[];
+	/**
+	 * Suppression rules for this key's repository (1.9.0, suppression.ts):
+	 * `[{ "id": "…", "action": "drop" | "sample", "sampleRate"?: 0.1,
+	 * "filters": [{ "key": "errorType", "op": "equals", "value": "…" }] }]`.
+	 * Invalid rules are left out (logged once at startup).
+	 */
+	suppression?: unknown[];
 }
 
 export interface IngesterConfig {
@@ -87,6 +94,19 @@ export interface IngesterConfig {
 	 * A map that needs more than half of it is used without being kept.
 	 */
 	sourceMapCacheMb?: number;
+	/**
+	 * Loop collapse (1.9.0, loop-collapse.ts): identical occurrences stored
+	 * per minute before the rest are folded into one sample with an exact
+	 * count (LOOP_COLLAPSE_AFTER, default 10; 0 turns it off).
+	 */
+	loopCollapseAfter?: number;
+}
+
+/** LOOP_COLLAPSE_AFTER: a whole number ≥ 0 (0 = off); anything else is the default, 10. */
+export function loopCollapseAfterEnv(raw: string | undefined): number {
+	if (raw === undefined || raw.trim() === "") return 10;
+	const value = Number(raw);
+	return Number.isInteger(value) && value >= 0 ? value : 10;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -167,6 +187,7 @@ export function loadConfig(): IngesterConfig {
 		redactValuePatterns: patternListEnv("AUTTER_REDACT_VALUE_PATTERNS"),
 		redactKeyPatterns: patternListEnv("AUTTER_REDACT_KEY_PATTERNS"),
 		sourceMapCacheMb: intEnv("SOURCE_MAP_CACHE_MB", 64),
+		loopCollapseAfter: loopCollapseAfterEnv(process.env.LOOP_COLLAPSE_AFTER),
 	};
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {
 		throw new Error(

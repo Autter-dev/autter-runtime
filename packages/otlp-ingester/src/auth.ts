@@ -2,6 +2,7 @@ import type { Request } from "express";
 import { INGESTER_VERSION_HEADER } from "./compat.js";
 import { defaultScopeFor, isIngestKeyScope, type IngesterConfig } from "./config.js";
 import { ingesterVersion } from "./sdk-versions.js";
+import { parseSuppressionRules } from "./suppression.js";
 import type { IngestContext } from "./types.js";
 
 /**
@@ -14,6 +15,11 @@ import type { IngestContext } from "./types.js";
  * entry or validator answer names no scope gets defaultScopeFor(key); one
  * that names a scope this ingester doesn't know is refused, never treated
  * as a server key.
+ *
+ * Suppression rules (1.9.0) come with the key: the validator's
+ * `suppression` array, or a static entry's, parsed by suppression.ts and
+ * cached with the key, so a rule change reaches the ingester within the
+ * cache TTL (60 s). Validators before 1.9.0 send none: nothing suppressed.
  */
 
 interface CacheEntry {
@@ -44,11 +50,18 @@ export class KeyResolver {
 		for (const entry of config.ingestKeys) {
 			const scope = entry.scope ?? defaultScopeFor(entry.key);
 			if (!isIngestKeyScope(scope)) continue;
+			const suppression = parseSuppressionRules(entry.suppression);
+			if (Array.isArray(entry.suppression) && suppression.length < entry.suppression.length) {
+				console.error(
+					`AUTTER_INGEST_KEYS: ${entry.suppression.length - suppression.length} invalid suppression rule(s) for repository ${entry.repositoryId} ignored`,
+				);
+			}
 			this.staticKeys.set(entry.key, {
 				orgId: entry.orgId,
 				repositoryId: entry.repositoryId,
 				scope,
 				allowedOrigins: entry.allowedOrigins ?? [],
+				...(suppression.length ? { suppression } : {}),
 			});
 		}
 	}
@@ -105,14 +118,17 @@ export class KeyResolver {
 					repositoryId?: string;
 					scope?: unknown;
 					allowedOrigins?: string[];
+					suppression?: unknown;
 				};
 				const scope = body.scope === undefined || body.scope === null ? defaultScopeFor(key) : body.scope;
 				if (body.orgId && body.repositoryId && isIngestKeyScope(scope)) {
+					const suppression = parseSuppressionRules(body.suppression);
 					ctx = {
 						orgId: body.orgId,
 						repositoryId: body.repositoryId,
 						scope,
 						allowedOrigins: body.allowedOrigins ?? [],
+						...(suppression.length ? { suppression } : {}),
 					};
 				}
 			} else if (response.status >= 500) {

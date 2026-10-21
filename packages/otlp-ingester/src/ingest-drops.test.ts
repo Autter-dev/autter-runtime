@@ -172,7 +172,7 @@ test("the timer writes on its own and stop() writes what is left; a disabled cou
 
 test("every reason has a kind; rejections carry their status, drops their route's success status", () => {
 	for (const [reason, info] of Object.entries(DROP_REASONS)) {
-		assert.ok(["rejected", "dropped", "truncated", "unforwarded"].includes(info.kind), reason);
+		assert.ok(["rejected", "dropped", "truncated", "unforwarded", "collapsed", "suppressed"].includes(info.kind), reason);
 		assert.equal("status" in info, info.kind === "rejected", `${reason}: only rejections name a status`);
 	}
 	assert.equal(dropStatus("payload_too_large", "/v1/traces"), 413);
@@ -181,6 +181,11 @@ test("every reason has a kind; rejections carry their status, drops their route'
 	assert.equal(dropStatus("spans_over_limit", "/v1/traces"), 200);
 	assert.equal(dropStatus("invalid_event", "/v1/browser"), 202);
 	assert.equal(dropStatus("sink_overflow", "sink"), 0);
+	// 1.9.0: left out on purpose, inside accepted requests.
+	assert.equal(DROP_REASONS.collapsed.kind, "collapsed");
+	assert.equal(DROP_REASONS.suppressed.kind, "suppressed");
+	assert.equal(dropStatus("collapsed", "/v1/traces"), 200);
+	assert.equal(dropStatus("suppressed", "/v1/browser"), 202);
 	assert.equal(dropRoute("/v1/traces"), "/v1/traces");
 	assert.equal(dropRoute("/V1/Traces/"), "/v1/traces");
 	assert.equal(dropRoute("/v1/traces/v1/traces"), "other");
@@ -447,13 +452,14 @@ test("sink batches given up on are reported with their tenant and occurrence cou
 
 test("migrations 0018-0020 follow 0017, are idempotent, and the baseline matches them", async () => {
 	const ids = MIGRATIONS.map((m) => m.id);
-	assert.deepEqual(ids.slice(-4), [
+	const from = ids.indexOf("0017-source-maps-debug-id");
+	assert.deepEqual(ids.slice(from, from + 4), [
 		"0017-source-maps-debug-id",
 		"0018-runtime-ingest-drops",
 		"0019-sdk-versions-via",
 		"0020-occurrence-frame-resolution",
 	]);
-	for (const migration of MIGRATIONS.slice(-3)) {
+	for (const migration of MIGRATIONS.slice(from + 1, from + 4)) {
 		assert.ok(migration.statements.length > 0, migration.id);
 		for (const statement of migration.statements) assert.match(statement, /IF NOT EXISTS/, migration.id);
 	}
@@ -471,7 +477,7 @@ test("migrations 0018-0020 follow 0017, are idempotent, and the baseline matches
 	const store = new ClickHouseStore({ ...loadConfig(), clickhouseUrl: "http://clickhouse.test" });
 	(store as unknown as { getClient: () => unknown }).getClient = () => ({
 		command: async ({ query }: { query: string }) => void sent.push(query),
-		query: async () => ({ json: async () => MIGRATIONS.slice(0, -3).map((m) => ({ id: m.id })) }),
+		query: async () => ({ json: async () => MIGRATIONS.slice(0, from + 1).map((m) => ({ id: m.id })) }),
 		insert: async ({ values }: { values: Array<{ id: string }> }) => void sent.push(`applied ${values[0]!.id}`),
 	});
 	await store.ensureSchema();
@@ -481,11 +487,12 @@ test("migrations 0018-0020 follow 0017, are idempotent, and the baseline matches
 	const occurrences = sent.find((q) => /CREATE TABLE IF NOT EXISTS autter_runtime\.runtime_error_occurrences/.test(q))!;
 	assert.match(occurrences, /in_app_frames_resolved UInt16 DEFAULT 0/);
 	assert.match(occurrences, /in_app_frames_unresolved UInt16 DEFAULT 0/);
-	// Only the three unapplied migrations run, in order, each recorded.
+	// Only the unapplied migrations run, in order, each recorded.
 	assert.deepEqual(sent.filter((q) => q.startsWith("applied ")), [
 		"applied 0018-runtime-ingest-drops",
 		"applied 0019-sdk-versions-via",
 		"applied 0020-occurrence-frame-resolution",
+		...ids.slice(from + 4).map((id) => `applied ${id}`),
 	]);
 	assert.ok(sent.some((q) => q === ingestDropsTableDDL("autter_runtime")));
 	assert.equal(store.schemaStatus().status, "ready");

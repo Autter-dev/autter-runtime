@@ -26,6 +26,7 @@ import type { SchemaStatus } from "./compat.js";
 import {
 	MIGRATIONS,
 	OCCURRENCE_CODE_COLUMNS,
+	OCCURRENCE_COLLAPSE_COLUMNS,
 	OCCURRENCE_FRAME_RESOLUTION_COLUMNS,
 	OCCURRENCE_GROUPING_COLUMNS,
 	OCCURRENCE_REQUEST_ID_INDEX,
@@ -151,6 +152,7 @@ export class ClickHouseStore {
 				${OCCURRENCE_CODE_COLUMNS.join(",\n\t\t\t\t")},
 				${OCCURRENCE_GROUPING_COLUMNS.join(",\n\t\t\t\t")},
 				${OCCURRENCE_FRAME_RESOLUTION_COLUMNS.join(",\n\t\t\t\t")},
+				${OCCURRENCE_COLLAPSE_COLUMNS.join(",\n\t\t\t\t")},
 				${OCCURRENCE_REQUEST_ID_INDEX}
 			)
 			ENGINE = MergeTree
@@ -478,6 +480,8 @@ export class ClickHouseStore {
 				fingerprint_scheme: o.fingerprintScheme,
 				frames: o.frames?.length ? JSON.stringify(o.frames) : "",
 				fingerprints: (o.fingerprints ?? []).map((candidate) => candidate.fingerprint),
+				// Migration 0021: only collapsed samples name the column.
+				...(o.collapsedCount ? { collapsed_count: Math.min(0xffff_ffff, Math.max(0, Math.round(o.collapsedCount))) } : {}),
 			})),
 		});
 	}

@@ -260,10 +260,11 @@ test("express: a status-only 500 on the http span and the middleware's exception
 	assert.equal(occurrences[0]?.errorType, "Error");
 	assert.equal(occurrences[0]?.message, "Database Error");
 	assert.equal(occurrences[0]?.route, "/api/gmails");
-	// The request (1 request, 1 error) plus the exception's own event, as
-	// before; the dropped HttpServerError sat on the server span, which never
-	// added an event of its own.
-	assert.deepEqual(totals(metricPoints), { requests: 2, errors: 2 });
+	// One request, one error. The exception sits on a span inside the
+	// request the server span counts, so it rides that request instead of
+	// adding an event of its own (before EI-26: 2 requests, 2 errors for one
+	// request); the dropped HttpServerError never added one either.
+	assert.deepEqual(totals(metricPoints), { requests: 1, errors: 1 });
 });
 
 test("an errored ancestor without an event adds no stackless SpanError", () => {

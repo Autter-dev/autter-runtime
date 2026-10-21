@@ -316,23 +316,55 @@ Span-level:
 - `route` from `http.route`, falling back to `url.path` / `http.target`
   (query-stripped).
 - `status_code` from `http.response.status_code` / `http.status_code`.
-- Server spans aggregate into 1-minute usage rollups: `request_count`,
-  `error_count` (status ≥ 500 or span error), `duration_sum_ms`. Rollup
-  rows key on the **normalized** route (id-like path segments → `:id`), so
-  span-fed and metric-fed rows for the same endpoint sum together and the
-  SummingMergeTree key space stays bounded; `runtime_metrics_1m` route
+- Server spans aggregate into 1-minute usage rollups, one count per
+  request: `request_count`, `error_count` (status ≥ 500 or span error),
+  `duration_sum_ms`. Rollup rows key on the **normalized** route (id-like
+  path segments → `:id`), so span-fed and metric-fed rows for the same
+  endpoint sum together and the SummingMergeTree key space stays bounded;
+  `runtime_metrics_1m` route
   values are templates, never raw paths. (Metric-fed rollups get their
   route from `http.route` on `http.server.duration` /
   `http.server.request.duration` data points — OTel never puts raw URL
   paths on metrics, so the SDK must set the route template;
   `@autter/runtime-node` does this for Express out of the box.)
+- One request is its **outermost** server span (`request-spans.ts`, per
+  export batch). Walking up a span's parent links in the batch, its request
+  is the highest server span reached in the same process (service,
+  environment, release, `service.instance.id`); the walk stops at a parent
+  missing from the batch, at another process, and where a server/consumer
+  span's parent is a client/producer span (a call over the wire, even from
+  a service to itself). A server span nested in another — Next.js's
+  `BaseServer.handleRequest` under the HTTP instrumentation's span, some
+  NestJS/Fastify setups, gRPC gateways serving in-process — adds no
+  request: the request takes the best route among its server spans (an
+  `http.route` template over a `url.path` / `http.target` raw path; on a
+  tie the outermost span's), the outermost span's latency and minute, and
+  is an error when any of its server spans is. A server span whose parent
+  is not in the batch counts as a request, so when an exporter splits one
+  request's spans across batches, each batch counts it once.
+- Occurrences in the rollups, counted after the dedupe: one recorded in a
+  request the span-fed rollups count (on its server spans or any span below
+  them in the batch) rides that request — an error/fatal one makes it an
+  errored request — and adds nothing. Any other (captureException's
+  always-on spans, workers, consumers, a request whose spans feed no
+  rollups) is one event: `request_count` 1, `error_count` 1 if error/fatal,
+  no duration. For a request counted by its metric feed, that event comes
+  on top of the feed's count of the same request.
 - Double-count guards on `runtime_metrics_1m`: resources marked
   `autter.metrics_wired` (set by `@autter/runtime-node`, which always
-  exports request metrics) do NOT get span-fed rollups — their spans are
-  head-sampled, the metric feed is exact. And only **delta**-temporality
-  histograms fold into rollups: cumulative points repeat lifetime totals
-  every export, which a SummingMergeTree would re-add each minute;
-  cumulative senders are covered by the span-fed fallback instead.
+  exports delta request metrics) get no span-fed request counts — their
+  spans are head-sampled, the metric feed is exact. Any OTel sender that
+  exports delta `http.server.request.duration` / `http.server.duration`
+  histograms can set it (`OTEL_RESOURCE_ATTRIBUTES=autter.metrics_wired=true`);
+  without it, its sampled server spans add to the metric counts. Spans
+  exported by error-linked tail retention (`autter.tail_retained`) feed no
+  request counts either. Only **delta**-temporality histograms fold into
+  rollups: cumulative points repeat lifetime totals every export, which a
+  SummingMergeTree would re-add each minute; cumulative senders are covered
+  by the span-fed fallback instead (so they must not set the flag). A
+  resource that sends both instruments (OTel's
+  `OTEL_SEMCONV_STABILITY_OPT_IN=http/dup`) is counted from
+  `http.server.request.duration` only, as the latency histograms are.
 - GenAI spans (`gen_ai.*` attributes; Vercel AI SDK inner `.doGenerate` /
   `.doStream` / `.doEmbed` spans) additionally produce a `runtime_llm_calls`
   row — provider, model, operation, token counts, and cost

@@ -317,11 +317,12 @@ silent loss. While wiring things up, set `debug: true` (or `AUTTER_DEBUG=1`)
 to see `[autter] exported N span(s)` lines on stderr as batches leave.
 
 Note on usage rollups: requests are counted from the `http.server.duration`
-metric (100% accurate) and additionally from sampled server spans. At the
-default 1% sampling the span contribution is negligible; if you set
-`traceSampleRate: 1` in development, expect request counts roughly doubled.
-Tail-retained error traces don't distort this: their spans carry
-`autter.tail_retained` and the ingester keeps them out of span-fed rollups.
+metric (100% accurate), never from sampled server spans: the SDK marks its
+resource `autter.metrics_wired` and the ingester keeps its spans out of the
+span-fed rollups, whatever `traceSampleRate` is. Ingesters up to 1.7.0
+ignored the mark and also counted sampled server spans (at
+`traceSampleRate: 1`, about twice the requests); they did skip
+tail-retained error traces, whose spans carry `autter.tail_retained`.
 
 ### Privacy: secrets and PII are scrubbed before they leave the process
 

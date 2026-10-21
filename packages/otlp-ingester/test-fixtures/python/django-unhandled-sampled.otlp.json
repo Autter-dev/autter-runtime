@@ -1,0 +1,243 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "b8a75890-2d81-46d4-9f49-481b7bef3eab"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "deployment.environment",
+      "value": {
+       "stringValue": "test"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "shop-django"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.django",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "7b9207a6c37a48064a3f3143a2ff2298",
+       "spanId": "9756c03d36c7f704",
+       "name": "GET orders/<int:order_id>/charge",
+       "kind": "SPAN_KIND_SERVER",
+       "startTimeUnixNano": "1792546180137758000",
+       "endTimeUnixNano": "1792546180139746000",
+       "attributes": [
+        {
+         "key": "http.method",
+         "value": {
+          "stringValue": "GET"
+         }
+        },
+        {
+         "key": "http.server_name",
+         "value": {
+          "stringValue": "1.0.0.127.in-addr.arpa"
+         }
+        },
+        {
+         "key": "http.scheme",
+         "value": {
+          "stringValue": "http"
+         }
+        },
+        {
+         "key": "net.host.name",
+         "value": {
+          "stringValue": "127.0.0.1:51931"
+         }
+        },
+        {
+         "key": "http.host",
+         "value": {
+          "stringValue": "127.0.0.1:51931"
+         }
+        },
+        {
+         "key": "net.host.port",
+         "value": {
+          "intValue": "51931"
+         }
+        },
+        {
+         "key": "http.url",
+         "value": {
+          "stringValue": "http://127.0.0.1:51931/orders/4821/charge"
+         }
+        },
+        {
+         "key": "net.peer.ip",
+         "value": {
+          "stringValue": "127.0.0.1"
+         }
+        },
+        {
+         "key": "http.user_agent",
+         "value": {
+          "stringValue": "Python-urllib/3.14"
+         }
+        },
+        {
+         "key": "http.flavor",
+         "value": {
+          "stringValue": "1.1"
+         }
+        },
+        {
+         "key": "http.route",
+         "value": {
+          "stringValue": "orders/<int:order_id>/charge"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "500"
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546180139740000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "shop.payments.PaymentDeclined"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "card declined for order 4821"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/app/shop/payments.py\", line 31, in charge_card\n    return _call_gateway(order_id)\n  File \"/srv/app/shop/payments.py\", line 23, in _call_gateway\n    raise GatewayError(f\"https://[redacted]@pay.example.com answered 402 for order {order_id}\")  # frame: _call_gateway\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nshop.payments.GatewayError: https://[redacted]@pay.example.com answered 402 for order 4821\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/srv/venv/lib/python3.14/site-packages/opentelemetry/trace/__init__.py\", line 602, in use_span\n    yield span\n  File \"/srv/venv/lib/python3.14/site-packages/django/core/handlers/exception.py\", line 56, in inner\n    response = get_response(request)\n  File \"/srv/venv/lib/python3.14/site-packages/django/core/handlers/base.py\", line 199, in _get_response\n    response = wrapped_callback(request, *callback_args, **callback_kwargs)\n  File \"/srv/app/shop/views.py\", line 14, in charge\n    receipt = charge_card(order_id)  # frame: charge\n  File \"/srv/app/shop/payments.py\", line 33, in charge_card\n    raise PaymentDeclined(f\"card declined for order {order_id}\") from err  # frame: charge_card\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nshop.payments.PaymentDeclined: card declined for order 4821\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "message": "PaymentDeclined: card declined for order 4821",
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    },
+    {
+     "scope": {
+      "name": "shop.payments"
+     },
+     "spans": [
+      {
+       "traceId": "7b9207a6c37a48064a3f3143a2ff2298",
+       "spanId": "29bd23a06cb87cb2",
+       "parentSpanId": "9756c03d36c7f704",
+       "name": "payments.charge_card",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1792546180137869000",
+       "endTimeUnixNano": "1792546180138868000",
+       "attributes": [
+        {
+         "key": "order.id",
+         "value": {
+          "intValue": "4821"
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546180138860000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "shop.payments.PaymentDeclined"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "card declined for order 4821"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/app/shop/payments.py\", line 31, in charge_card\n    return _call_gateway(order_id)\n  File \"/srv/app/shop/payments.py\", line 23, in _call_gateway\n    raise GatewayError(f\"https://[redacted]@pay.example.com answered 402 for order {order_id}\")  # frame: _call_gateway\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nshop.payments.GatewayError: https://[redacted]@pay.example.com answered 402 for order 4821\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/srv/venv/lib/python3.14/site-packages/opentelemetry/trace/__init__.py\", line 602, in use_span\n    yield span\n  File \"/srv/venv/lib/python3.14/site-packages/opentelemetry/sdk/trace/__init__.py\", line 1136, in start_as_current_span\n    yield span\n  File \"/srv/venv/lib/python3.14/site-packages/opentelemetry/trace/__init__.py\", line 441, in start_as_current_span\n    yield span\n  File \"/srv/app/shop/payments.py\", line 33, in charge_card\n    raise PaymentDeclined(f\"card declined for order {order_id}\") from err  # frame: charge_card\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nshop.payments.PaymentDeclined: card declined for order 4821\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "message": "PaymentDeclined: card declined for order 4821",
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,253 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "2cea23e2-7e08-4e2a-83ab-a0d708efcf4b"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "deployment.environment",
+      "value": {
+       "stringValue": "test"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "shop-fastapi"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.fastapi",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "841fef061dde8dec3f87c62d799003f0",
+       "spanId": "6ab06c7baaf87106",
+       "parentSpanId": "3ce31cd26cbfe76a",
+       "name": "GET /carts/{cart_id}/quote http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1792546183331709000",
+       "endTimeUnixNano": "1792546183331722000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.start"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "200"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {},
+       "flags": 256
+      },
+      {
+       "traceId": "841fef061dde8dec3f87c62d799003f0",
+       "spanId": "339b829cf0fcef34",
+       "parentSpanId": "3ce31cd26cbfe76a",
+       "name": "GET /carts/{cart_id}/quote http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1792546183331866000",
+       "endTimeUnixNano": "1792546183331872000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.body"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {},
+       "flags": 256
+      },
+      {
+       "traceId": "841fef061dde8dec3f87c62d799003f0",
+       "spanId": "3ce31cd26cbfe76a",
+       "name": "GET /carts/{cart_id}/quote",
+       "kind": "SPAN_KIND_SERVER",
+       "startTimeUnixNano": "1792546183324706000",
+       "endTimeUnixNano": "1792546183331912000",
+       "attributes": [
+        {
+         "key": "http.scheme",
+         "value": {
+          "stringValue": "http"
+         }
+        },
+        {
+         "key": "http.host",
+         "value": {
+          "stringValue": "127.0.0.1:51964"
+         }
+        },
+        {
+         "key": "net.host.port",
+         "value": {
+          "intValue": "51964"
+         }
+        },
+        {
+         "key": "http.flavor",
+         "value": {
+          "stringValue": "1.1"
+         }
+        },
+        {
+         "key": "http.target",
+         "value": {
+          "stringValue": "/carts/12/quote"
+         }
+        },
+        {
+         "key": "http.url",
+         "value": {
+          "stringValue": "http://127.0.0.1:51964/carts/12/quote"
+         }
+        },
+        {
+         "key": "http.method",
+         "value": {
+          "stringValue": "GET"
+         }
+        },
+        {
+         "key": "http.server_name",
+         "value": {
+          "stringValue": "127.0.0.1:51964"
+         }
+        },
+        {
+         "key": "http.user_agent",
+         "value": {
+          "stringValue": "Python-urllib/3.14"
+         }
+        },
+        {
+         "key": "net.peer.ip",
+         "value": {
+          "stringValue": "127.0.0.1"
+         }
+        },
+        {
+         "key": "net.peer.port",
+         "value": {
+          "intValue": "51972"
+         }
+        },
+        {
+         "key": "http.route",
+         "value": {
+          "stringValue": "/carts/{cart_id}/quote"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "200"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546183331597000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "inventory.PricingTimeout"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "pricing for cart 12 timed out after 2.5s"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/app/app.py\", line 43, in quote\n    return {\"cart\": cart_id, \"total\": price(cart_id)}  # frame: quote\n                                      ~~~~~^^^^^^^^^\n  File \"/srv/app/inventory.py\", line 21, in price\n    raise PricingTimeout(f\"pricing for cart {cart_id} timed out after 2.5s\")  # frame: price\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ninventory.PricingTimeout: pricing for cart 12 timed out after 2.5s\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          },
+          {
+           "key": "autter.handled",
+           "value": {
+            "boolValue": true
+           }
+          }
+         ]
+        }
+       ],
+       "status": {},
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    }
+   ]
+  }
+ ]
+}

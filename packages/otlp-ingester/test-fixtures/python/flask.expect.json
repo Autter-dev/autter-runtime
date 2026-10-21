@@ -1,0 +1,65 @@
+{
+ "framework": "flask",
+ "captured": {
+  "python": "3.14.8",
+  "packages": {
+   "flask": "3.1.3",
+   "werkzeug": "3.1.9",
+   "gunicorn": "26.2.0",
+   "opentelemetry-sdk": "1.45.1",
+   "opentelemetry-instrumentation-flask": "0.66b1",
+   "opentelemetry-exporter-otlp-proto-http": "1.45.1"
+  }
+ },
+ "scenarios": {
+  "unhandled": {
+   "fixture": "flask-unhandled",
+   "description": "GET /invoices/31/summary \u2192 500; ZeroDivisionError recorded by the Flask instrumentation",
+   "tailRetained": true,
+   "occurrences": 1,
+   "errorType": "ZeroDivisionError",
+   "message": "division by zero",
+   "route": "/invoices/<int:invoice_id>/summary",
+   "statusCode": 500,
+   "severity": "error",
+   "requestCount": 1,
+   "errorCount": 1,
+   "inAppFrames": [
+    {
+     "function": "render_invoice",
+     "filename": "/srv/app/billing.py",
+     "lineno": 6
+    },
+    {
+     "function": "summary",
+     "filename": "/srv/app/app.py",
+     "lineno": 36
+    }
+   ]
+  },
+  "handled": {
+   "fixture": "flask-handled",
+   "description": "GET /invoices/31/late-fee \u2192 422; the view records the handled KeyError",
+   "tailRetained": true,
+   "occurrences": 1,
+   "errorType": "KeyError",
+   "message": "'XYZ'",
+   "route": "/invoices/<int:invoice_id>/late-fee",
+   "statusCode": 422,
+   "severity": "error",
+   "handled": true,
+   "inAppFrames": [
+    {
+     "function": "late_fee",
+     "filename": "/srv/app/billing.py",
+     "lineno": 11
+    },
+    {
+     "function": "fee",
+     "filename": "/srv/app/app.py",
+     "lineno": 42
+    }
+   ]
+  }
+ }
+}

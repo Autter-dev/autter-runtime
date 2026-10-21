@@ -1,0 +1,90 @@
+{
+ "framework": "django",
+ "captured": {
+  "python": "3.14.8",
+  "packages": {
+   "django": "6.1.2",
+   "opentelemetry-sdk": "1.45.1",
+   "opentelemetry-instrumentation-django": "0.66b1",
+   "opentelemetry-exporter-otlp-proto-http": "1.45.1"
+  }
+ },
+ "scenarios": {
+  "unhandled-sampled": {
+   "fixture": "django-unhandled-sampled",
+   "description": "the same 500 on a head-sampled trace",
+   "tailRetained": false,
+   "occurrences": 1,
+   "mergedRecordings": 2,
+   "errorType": "shop.payments.PaymentDeclined",
+   "message": "card declined for order 4821",
+   "route": "orders/<int:order_id>/charge",
+   "statusCode": 500,
+   "severity": "error",
+   "requestCount": 1,
+   "errorCount": 1,
+   "inAppFrames": [
+    {
+     "function": "charge_card",
+     "filename": "/srv/app/shop/payments.py",
+     "lineno": 33
+    },
+    {
+     "function": "charge",
+     "filename": "/srv/app/shop/views.py",
+     "lineno": 14
+    }
+   ]
+  },
+  "unhandled": {
+   "fixture": "django-unhandled",
+   "description": "GET /orders/4821/charge \u2192 500 on an unsampled trace; recorded on the request span and on payments.charge_card",
+   "tailRetained": true,
+   "occurrences": 1,
+   "mergedRecordings": 2,
+   "errorType": "shop.payments.PaymentDeclined",
+   "message": "card declined for order 4821",
+   "route": "orders/<int:order_id>/charge",
+   "statusCode": 500,
+   "severity": "error",
+   "requestCount": 1,
+   "errorCount": 1,
+   "inAppFrames": [
+    {
+     "function": "charge_card",
+     "filename": "/srv/app/shop/payments.py",
+     "lineno": 33
+    },
+    {
+     "function": "charge",
+     "filename": "/srv/app/shop/views.py",
+     "lineno": 14
+    }
+   ]
+  },
+  "handled": {
+   "fixture": "django-handled",
+   "description": "GET /orders/4821/refund \u2192 202; the view records the handled exception",
+   "tailRetained": true,
+   "occurrences": 1,
+   "errorType": "shop.payments.RefundPending",
+   "message": "refund for order 4821 is still settling",
+   "route": "orders/<int:order_id>/refund",
+   "statusCode": 202,
+   "severity": "error",
+   "handled": true,
+   "inAppFrames": [
+    {
+     "function": "refund_card",
+     "filename": "/srv/app/shop/payments.py",
+     "lineno": 40
+    },
+    {
+     "function": "refund",
+     "filename": "/srv/app/shop/views.py",
+     "lineno": 20
+    }
+   ]
+  }
+ }
+}

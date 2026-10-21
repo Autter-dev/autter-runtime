@@ -1,0 +1,6 @@
+# For test_autter_tracing.py (the other adapter tests are stdlib only). Pinned 2026-10-21.
+# autter_tracing.py itself is tested with opentelemetry-sdk 1.20, 1.27, 1.41 and 1.45.
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+typing_extensions==4.16.0

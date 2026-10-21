@@ -172,6 +172,224 @@ without its query string — never headers or cookies — and skips
 `redirect()`/`notFound()`. Next never calls the hook inside an edge route
 handler; under `next start` the Node server reports those errors instead.
 
+## Python (Django, FastAPI, Flask, Celery)
+
+There is no Autter package for Python. Use OpenTelemetry's SDK, its OTLP/HTTP
+exporter and its instrumentation for your framework, plus two files from
+[`adapters/python`](../adapters/python) that you copy into your project:
+
+- `autter_tracing.py`: always-on error spans (below) and `init_tracing()`,
+  which builds the tracer provider from the standard `OTEL_*` variables;
+- `redact.py`: the secret and PII scrubbing `@autter/runtime-node` does
+  (stdlib only).
+
+Tested recipes: [`examples/python`](../examples/python) has Django
+(runserver), FastAPI (uvicorn), Flask (gunicorn) and a Celery prefork
+worker, each with pinned requirements and a test that starts the app,
+triggers an unhandled and a handled exception, and checks what was exported.
+
+```bash
+pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http \
+  opentelemetry-instrumentation-django   # or -fastapi, -flask, -celery
+curl -fsSO https://raw.githubusercontent.com/Autter-dev/autter-runtime/main/adapters/python/autter_tracing.py
+curl -fsSO https://raw.githubusercontent.com/Autter-dev/autter-runtime/main/adapters/python/redact.py
+```
+
+Configuration is environment variables only:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.autter.dev            # the exporter adds /v1/traces
+OTEL_EXPORTER_OTLP_HEADERS=x-autter-key=${AUTTER_RUNTIME_KEY}   # the server key
+OTEL_SERVICE_NAME=shop
+OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment=production
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.1   # 10% of healthy traces; errors are always exported
+```
+
+`authorization=Bearer%20${AUTTER_RUNTIME_KEY}` works as well: header values
+in `OTEL_EXPORTER_OTLP_HEADERS` are URL-encoded, and `x-autter-key` needs no
+space. `service.version` is the release.
+
+Call `init_tracing()` once in each process that serves requests or runs
+tasks, at startup, before the framework instrumentation:
+
+| Framework | Where | What |
+| --- | --- | --- |
+| Django | `wsgi.py` / `asgi.py`, before `get_wsgi_application()` | `init_tracing()`, `DjangoInstrumentor().instrument()` |
+| FastAPI | the module that creates the app | `init_tracing()` first, then `FastAPIInstrumentor.instrument_app(app)` |
+| Flask | the app module | `init_tracing()`, `app = Flask(__name__)`, `FlaskInstrumentor().instrument_app(app)` |
+| Celery | the worker's `worker_process_init` signal | `init_tracing()`, `CeleryInstrumentor().instrument()` |
+
+Django, in full:
+
+```python
+# shop/wsgi.py: runserver and gunicorn import it in the process that serves requests
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "shop.settings")
+
+from autter_tracing import init_tracing
+from opentelemetry.instrumentation.django import DjangoInstrumentor
+
+init_tracing()
+DjangoInstrumentor().instrument()
+
+from django.core.wsgi import get_wsgi_application
+
+application = get_wsgi_application()
+```
+
+```python
+# shop/settings.py
+MIDDLEWARE = [
+    # ...your middleware...
+    "shop.middleware.ClientErrorResponses",  # from examples/python/django: 404s are not errors
+]
+```
+
+Prefork servers: gunicorn imports the WSGI module in each worker; with
+`--preload` it imports it once before forking, and the exporter thread and
+the error buffer restart in each worker. A Celery worker sets up tracing in
+each pool child, as OpenTelemetry's Celery instrumentation requires (the
+solo pool sends `worker_process_init` once; the threads, gevent and eventlet
+pools do not: use `worker_init`):
+
+```python
+from celery.signals import worker_process_init
+from opentelemetry.instrumentation.celery import CeleryInstrumentor
+
+from autter_tracing import init_tracing
+
+
+@worker_process_init.connect(weak=False)
+def init_worker_tracing(**kwargs):
+    init_tracing()
+    CeleryInstrumentor().instrument()
+```
+
+### Always-on errors
+
+Head sampling decides at a trace's first span, before anything has failed,
+and the Python SDK exports sampled spans only: at a 10% ratio, 90% of
+exceptions never leave the process. `init_tracing()` keeps them:
+
+- `RecordUnsampled(sampler)` turns the head sampler's "drop" into "record
+  only". Unsampled spans still reach the span processors, with the
+  attributes they started with, keep the not-sampled flag and propagate it
+  downstream.
+- `RetainErrorTraces(processor)` holds the unsampled spans of each trace.
+  When one of them ends with an `exception` event or ERROR status, the whole
+  local trace goes to the batch processor: the spans that already ended (the
+  failing child, the queries before it) and those that end later (the request
+  span). A trace whose first local span ends without an error is dropped.
+  Memory is bounded: 256 spans per trace, 5,000 buffered spans and traces,
+  30 s per trace; past that, the oldest traces are plain head-sampled.
+- Spans exported this way carry `autter.tail_retained = true`, like the
+  traces `@autter/runtime-node` retains after an error. They are not a
+  sample of the traffic, so the ingester counts no request from them; each
+  error on them counts as one event. Head-sampled traces export unchanged.
+- `RedactingSpanExporter` scrubs span names, attributes, status messages,
+  exception messages and tracebacks, causes included, with `redact.py`
+  before export. `redact.configure(value_patterns=[...], key_patterns=[...])`
+  adds your own patterns. The ingester scrubs again.
+
+Every request is recorded as if sampled (instrumentations collect their
+attributes), but only sampled and failing traces are exported. To wire the
+pieces yourself, for another exporter or more processors:
+
+```python
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+
+from autter_tracing import RecordUnsampled, RedactingSpanExporter, RetainErrorTraces
+
+provider = TracerProvider(sampler=RecordUnsampled(ParentBased(TraceIdRatioBased(0.1))))
+provider.add_span_processor(RetainErrorTraces(BatchSpanProcessor(RedactingSpanExporter(OTLPSpanExporter()))))
+trace.set_tracer_provider(provider)
+```
+
+**Zero-code (`opentelemetry-instrument`).** The `opentelemetry-distro`
+wrapper takes its sampler from `OTEL_TRACES_SAMPLER`, and no standard
+sampler keeps the errors of unsampled traces. Either run it at full sampling
+(`OTEL_TRACES_SAMPLER=parentbased_always_on`, plus
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, since the distro defaults to
+gRPC), sample in an OpenTelemetry Collector (see
+[Sampling guidance](#sampling-guidance-all-stacks)), or start the app without
+the wrapper and call `init_tracing()`. Under the wrapper, `init_tracing()`
+leaves the wrapper's provider in place and warns when its sampler drops
+errors. The Django recipe tests the full-sampling variant.
+
+### Unhandled and handled exceptions
+
+| Framework | Unhandled exceptions | Not recorded |
+| --- | --- | --- |
+| Django | OpenTelemetry's middleware, first in `MIDDLEWARE`, records the exception on the request span (`process_exception`), with ERROR status and the 500 | It also records `Http404`, `PermissionDenied`, `BadRequest` and `SuspiciousOperation`: add `ClientErrorResponses` so 404s are not issues. An exception another middleware's `process_exception` answers never reaches it |
+| FastAPI | The ASGI middleware records what escapes the app (Starlette's 500) on the request span | `HTTPException` (a response), exceptions an `@app.exception_handler` answers |
+| Flask | Recorded on the request span when the request is torn down (Flask's 500) | `abort()` / `HTTPException`, exceptions an `@app.errorhandler` answers |
+| Celery | Recorded on the task's `run/<task name>` span, ERROR status | Nothing: every exception that fails a task is recorded, `throws=(...)` ones included |
+
+Record handled exceptions, and the ones your own error handlers answer, on
+the current span: in a request that is the request span, in a task the task
+span.
+
+```python
+from opentelemetry import trace
+
+try:
+    refund_card(order_id)
+except RefundPending as exc:
+    trace.get_current_span().record_exception(exc, attributes={"autter.handled": True})
+    return JsonResponse({"status": "pending"}, status=202)
+```
+
+`record_exception` sends `exception.type` (`module.Class`, as in
+`shop.payments.RefundPending`; builtins bare, as in `KeyError`),
+`exception.message` and `exception.stacktrace`: the whole formatted
+traceback, chained exceptions included. A handled exception's traceback
+starts at the function that caught it. Add `"autter.severity": "warning"`
+to the attributes for one that should not count as an error.
+
+What the ingester makes of a Python traceback: frames innermost first, with
+their line numbers. A chained exception ("During handling of the above
+exception…", "The above exception was the direct cause…") contributes the
+frames of the exception that was reported, and an exception group (3.11+)
+its own frames, not its sub-exceptions'. In-app frames are your files:
+`site-packages`, `dist-packages` and the standard library (`<frozen …>`,
+`lib/python3.X/`) are not. The `frames-v3` issue identity hashes the error
+type and up to five in-app `function@file` tokens, so line numbers and ids
+in messages (`card declined for order 4821`) do not split an issue, while
+two Celery tasks failing in one helper are two issues. An error recorded on
+two spans of a request (the instrumentation's request span and a span of
+your own around the call) is one occurrence when both arrive in the same
+export batch.
+
+### Troubleshooting
+
+- **Nothing arrives.** The exporter logs failed exports: a 401 is a missing
+  or wrong key, a connection error the endpoint or egress.
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is the base URL;
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` takes the full `…/v1/traces` URL.
+- **Errors arrive, healthy requests rarely.** That is the sampler at work.
+- **No errors either.** `init_tracing()` did not run in the process that
+  serves the requests: a module only a parent process imports, or a Celery
+  pool child without the `worker_process_init` hook.
+- **`init_tracing(): an OpenTelemetry TracerProvider is already registered`.**
+  The app runs under `opentelemetry-instrument`: see Zero-code.
+- **Every Django 404 is an issue.** Add `ClientErrorResponses`.
+- **A stackless `HttpServerError` for a 500.** The framework or your error
+  handler answered the exception before the instrumentation saw it: record
+  it there. FastAPI's errored `http send` span of a 500 is folded into the
+  request's error when both reach the ingester in one export batch;
+  `FastAPIInstrumentor.instrument_app(app, exclude_spans=["send", "receive"])`
+  drops those spans. Keep `OTEL_BSP_SCHEDULE_DELAY` at its default.
+- **macOS development only.** `gunicorn --preload` workers die with
+  `objc[…]: … fork() was called` (set `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`;
+  plain OpenTelemetry fails the same way), and Celery's prefork pool needs
+  `FORKED_BY_MULTIPROCESSING=1`, since billiard spawns its children on macOS.
+
 ## Go
 
 ```go
@@ -189,6 +407,9 @@ exp, _ := otlptracehttp.New(ctx,
 // errors: span.RecordError(err); span.SetStatus(codes.Error, err.Error())
 ```
 
+With a ratio sampler, keep errors as in
+[Java / Ruby / .NET / anything else](#java--ruby--net--anything-else).
+
 ## Rust
 
 ```rust
@@ -203,7 +424,7 @@ let exporter = opentelemetry_otlp::SpanExporter::builder()
     .build()?;
 ```
 
-## Python / Java / .NET / anything else
+## Java / Ruby / .NET / anything else
 
 Standard OTel env vars work with every SDK:
 
@@ -219,6 +440,26 @@ OTEL_TRACES_SAMPLER_ARG=0.01
 
 Errors surface as issues when spans carry `exception` events (every SDK's
 `record_exception` / `RecordError` does this) or `ERROR` status.
+
+**Always-on errors.** With a ratio sampler, an error on an unsampled trace is
+dropped with it. The pieces the Python recipe uses are defined by the
+[SDK specification](https://opentelemetry.io/docs/specs/otel/trace/sdk/#sampling),
+so an SDK that implements it can be wired the same way: a sampler may answer
+*record only*, span processors receive every recorded span, and exporters
+receive sampled spans only. Wrap the head sampler so that its *drop* becomes
+*record only*, and add a span processor
+that, when a recorded but unsampled span ends with an `exception` event or
+ERROR status, passes that span and the rest of its local trace to the
+exporting processor with the sampled flag set and `autter.tail_retained =
+true` on each span. [`adapters/python/autter_tracing.py`](../adapters/python/autter_tracing.py)
+is the reference (buffering, bounds, local roots); only the Python version is
+tested here. See your SDK's sampler and span processor docs:
+[Go](https://pkg.go.dev/go.opentelemetry.io/otel/sdk/trace),
+[Java](https://opentelemetry.io/docs/languages/java/sdk/),
+[Ruby](https://opentelemetry.io/docs/languages/ruby/),
+[.NET](https://opentelemetry.io/docs/languages/dotnet/). Without code changes,
+sample at 100% in the SDK and let an OpenTelemetry Collector decide instead
+(see [Sampling guidance](#sampling-guidance-all-stacks)).
 
 **Coded errors** (any language): add `autter.error.code` (matching
 `^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$`, ≤ 80 chars) and optionally
@@ -284,9 +525,10 @@ an unsampled trace is dropped with it, and even when the error survives
 through a separate path, the trace explaining it usually doesn't.
 `@autter/runtime-node` handles both automatically — errors ride a dedicated
 always-on tracer, and the full trace around an error is tail-retained even
-when head sampling said no (`retainTracesOnError`, on by default). On other
-stacks, route errors through an always-on tracer provider (same pattern as
-the LLM guidance above), and if you want erroring traces kept in full, put
-an OTel Collector with the `tail_sampling` processor (a
-`status_code = ERROR` policy plus a small `probabilistic` one) in front of
-the ingester instead of sampling in the SDK.
+when head sampling said no (`retainTracesOnError`, on by default). Python
+services get the same from `adapters/python/autter_tracing.py`
+([Always-on errors](#always-on-errors)), and other SDKs can be wired the same
+way ([Java / Ruby / .NET](#java--ruby--net--anything-else)). Alternatively,
+sample at 100% in the SDK and put an OTel Collector with the
+`tail_sampling` processor (a `status_code = ERROR` policy plus a small
+`probabilistic` one) in front of the ingester.

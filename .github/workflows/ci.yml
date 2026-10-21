@@ -24,3 +24,33 @@ jobs:
       - run: npm run test -w @autter/runtime-cli
       - run: npm run size -w @autter/runtime-browser
       - run: python3 -m unittest discover -s adapters/python -v
+
+  python:
+    # The always-on error adapter with the OpenTelemetry SDK installed, and
+    # each Python recipe run for real against a stub OTLP receiver. No
+    # services: Celery uses kombu's filesystem and memory transports.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [adapter, django, fastapi, flask, celery]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            adapters/python/requirements-test.txt
+            examples/python/*/requirements.txt
+      - name: adapters/python with opentelemetry-sdk
+        if: matrix.suite == 'adapter'
+        run: |
+          python -m pip install -r adapters/python/requirements-test.txt
+          python -m unittest discover -s adapters/python -v
+      - name: examples/python/${{ matrix.suite }}
+        if: matrix.suite != 'adapter'
+        working-directory: examples/python/${{ matrix.suite }}
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest -v test_${{ matrix.suite }}_recipe.py

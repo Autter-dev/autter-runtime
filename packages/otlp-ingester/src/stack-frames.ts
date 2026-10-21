@@ -13,8 +13,10 @@ import type { StackFrame } from "./types.js";
  * - V8 (Node, Chrome, Edge): `at fn (file:line:col)` / `at file:line:col`
  * - Firefox / Safari: `fn@url:line:col` / `@url:line:col`
  * - Python: `File "…", line N, in fn` — tracebacks list the OUTERMOST frame
- *   first, so the frames are reversed; only the last (reported) traceback
- *   of a chained exception is used
+ *   first, so the frames are reversed; only the reported exception's own
+ *   frames are used: the last top-level block of a chained exception, and
+ *   for an exception group (3.11+) its own `| `-margined block, never its
+ *   sub-exceptions
  * - Go: function line + `\t<file>.go:<line> +0x…`, first goroutine only
  * - JVM: `at pkg.Class.method(File.java:N)`, first exception block only
  *   (before `Caused by:`)
@@ -76,6 +78,22 @@ export function isInAppPath(path: string | null): boolean {
 	return true;
 }
 
+/**
+ * Python's standard library: frozen modules (`<frozen runpy>`) and the
+ * version directory of an installation (`/usr/local/lib/python3.12/`,
+ * `…/Versions/3.14/lib/python3.14/`, `C:\Python312\Lib\`); a
+ * virtualenv's packages are `site-packages`, covered by the path rule. Like
+ * Go's `/usr/local/go/`, they are the runtime, not the app: an asyncio or
+ * socket error's first five frames would otherwise all be stdlib frames.
+ */
+const PY_STDLIB_RE = /\/lib\/(?:python|pypy)\d\.\d+t?\/|\/python\d{2,3}t?\/lib\//i;
+
+export function isPythonStdlibPath(path: string | null): boolean {
+	if (!path) return false;
+	if (path.startsWith("<frozen ")) return true;
+	return PY_STDLIB_RE.test(path.replace(/\\/g, "/"));
+}
+
 /** Fully qualified name for the language rules (`module.function`). */
 function qualifiedName(frame: Pick<StackFrame, "function" | "module">): string {
 	if (frame.module && frame.function) return `${frame.module}.${frame.function}`;
@@ -97,6 +115,7 @@ export function isInAppFrame(
 		if (qualified.startsWith("runtime.")) return false;
 		if ((frame.filename ?? "").replace(/\\/g, "/").includes("/usr/local/go/")) return false;
 	}
+	if (language === "python" && isPythonStdlibPath(frame.filename)) return false;
 	if (language === "jvm" && /^(?:java|javax|kotlin|jdk)\./.test(qualified)) return false;
 	if (language === "dotnet" && /^(?:System|Microsoft)\./.test(qualified)) return false;
 	return true;
@@ -245,14 +264,41 @@ function parseGecko(lines: string[]): StackFrame[] {
 
 const PY_FILE_RE = /^\s*File "(.+)", line (\d+)(?:, in (.+?))?\s*$/;
 const PY_TRACEBACK_RE = /^\s*Traceback \(most recent call last\):\s*$/;
+// 3.11+: an exception group prints its own frames behind a "| " margin,
+// under this header (nested groups' headers carry the margin instead of "+"),
+// then its sub-exceptions after a "+-+---- 1 ----" separator.
+const PY_GROUP_TRACEBACK_RE = /^\s*\+ Exception Group Traceback \(most recent call last\):\s*$/;
+const PY_GROUP_MARGIN_RE = /^\s*\|/;
+const PY_GROUP_SUBEXCEPTIONS_RE = /^\s*\+-/;
+
+function isPythonFrameLine(line: string): boolean {
+	return PY_FILE_RE.test(line) || PY_FILE_RE.test(line.replace(PY_GROUP_MARGIN_RE, ""));
+}
 
 function parsePython(lines: string[]): StackFrame[] {
-	// A chained exception prints one traceback per exception; the reported
-	// (final) exception's frames are the last block.
-	let start = 0;
-	for (let i = 0; i < lines.length; i++) if (PY_TRACEBACK_RE.test(lines[i]!)) start = i;
+	// A chained exception prints one block per exception, the reported
+	// (final) one last, whether the chain says "During handling of the above
+	// exception" or "The above exception was the direct cause". Blocks of
+	// sub-exceptions and of groups in the chain carry a margin, so the last
+	// unmargined header starts the reported exception's own frames.
+	let start = -1;
+	let group = false;
+	for (let i = 0; i < lines.length; i++) {
+		if (PY_TRACEBACK_RE.test(lines[i]!)) {
+			start = i;
+			group = false;
+		} else if (PY_GROUP_TRACEBACK_RE.test(lines[i]!)) {
+			start = i;
+			group = true;
+		}
+	}
 	const outermostFirst: StackFrame[] = [];
-	for (const line of lines.slice(start)) {
+	for (const raw of lines.slice(start + 1)) {
+		let line = raw;
+		if (group) {
+			if (PY_GROUP_SUBEXCEPTIONS_RE.test(line)) break;
+			line = line.replace(PY_GROUP_MARGIN_RE, "");
+		}
 		const m = PY_FILE_RE.exec(line);
 		if (!m) continue;
 		outermostFirst.push(frame("python", { function: m[3] ?? null, filename: m[1], lineno: toInt(m[2]) }));
@@ -410,7 +456,7 @@ export function detectFrameLanguage(lines: string[]): FrameLanguage | null {
 			return "dotnet";
 		default:
 	}
-	if (lines.some((line) => PY_FILE_RE.test(line))) return "python";
+	if (lines.some(isPythonFrameLine)) return "python";
 	if (
 		lines.some((line) => DOTNET_BARE_RE.test(line)) &&
 		!lines.some((line) => /:\d+(?::\d+)?\)?\s*$/.test(line))

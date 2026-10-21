@@ -1,0 +1,29 @@
+# Django recipe: Django + OpenTelemetry's Django instrumentation; opentelemetry-distro for the zero-code variant.
+# Pinned 2026-10-21 (pip freeze of a fresh install). Python 3.12+ (Django 6.1); tested on 3.14.
+# autter_tracing.py and redact.py come from adapters/python (copy them next to your code).
+asgiref==3.12.1
+certifi==2026.10.19
+charset-normalizer==3.5.2
+Django==6.1.2
+googleapis-common-protos==1.75.5
+idna==3.20
+opentelemetry-api==1.45.1
+opentelemetry-distro==0.66b1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-instrumentation==0.66b1
+opentelemetry-instrumentation-django==0.66b1
+opentelemetry-instrumentation-wsgi==0.66b1
+opentelemetry-proto==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+opentelemetry-util-http==0.66b1
+packaging==26.3
+protobuf==7.36.2
+requests==2.34.2
+sqlparse==0.6.0
+typing_extensions==4.16.0
+urllib3==2.8.0
+wrapt==2.5.1

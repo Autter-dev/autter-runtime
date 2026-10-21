@@ -1,0 +1,251 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "2cea23e2-7e08-4e2a-83ab-a0d708efcf4b"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "deployment.environment",
+      "value": {
+       "stringValue": "test"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "shop-fastapi"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.fastapi",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "10f312ce8e985c96cd1606443b40ae2c",
+       "spanId": "502f22e93dcef19d",
+       "parentSpanId": "c212a2a0e64c02f2",
+       "name": "POST /carts/{cart_id}/checkout http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1792546183320052000",
+       "endTimeUnixNano": "1792546183320064000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.start"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "500"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      },
+      {
+       "traceId": "10f312ce8e985c96cd1606443b40ae2c",
+       "spanId": "33e4136145364314",
+       "parentSpanId": "c212a2a0e64c02f2",
+       "name": "POST /carts/{cart_id}/checkout http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1792546183320225000",
+       "endTimeUnixNano": "1792546183320232000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.body"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {},
+       "flags": 256
+      },
+      {
+       "traceId": "10f312ce8e985c96cd1606443b40ae2c",
+       "spanId": "c212a2a0e64c02f2",
+       "name": "POST /carts/{cart_id}/checkout",
+       "kind": "SPAN_KIND_SERVER",
+       "startTimeUnixNano": "1792546183317551000",
+       "endTimeUnixNano": "1792546183320290000",
+       "attributes": [
+        {
+         "key": "http.scheme",
+         "value": {
+          "stringValue": "http"
+         }
+        },
+        {
+         "key": "http.host",
+         "value": {
+          "stringValue": "127.0.0.1:51964"
+         }
+        },
+        {
+         "key": "net.host.port",
+         "value": {
+          "intValue": "51964"
+         }
+        },
+        {
+         "key": "http.flavor",
+         "value": {
+          "stringValue": "1.1"
+         }
+        },
+        {
+         "key": "http.target",
+         "value": {
+          "stringValue": "/carts/12/checkout"
+         }
+        },
+        {
+         "key": "http.url",
+         "value": {
+          "stringValue": "http://127.0.0.1:51964/carts/12/checkout"
+         }
+        },
+        {
+         "key": "http.method",
+         "value": {
+          "stringValue": "POST"
+         }
+        },
+        {
+         "key": "http.server_name",
+         "value": {
+          "stringValue": "127.0.0.1:51964"
+         }
+        },
+        {
+         "key": "http.user_agent",
+         "value": {
+          "stringValue": "Python-urllib/3.14"
+         }
+        },
+        {
+         "key": "net.peer.ip",
+         "value": {
+          "stringValue": "127.0.0.1"
+         }
+        },
+        {
+         "key": "net.peer.port",
+         "value": {
+          "intValue": "51971"
+         }
+        },
+        {
+         "key": "http.route",
+         "value": {
+          "stringValue": "/carts/{cart_id}/checkout"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "500"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546183320012000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "inventory.OutOfStock"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "sku-1: 2 requested, 0 left"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/venv/lib/python3.14/site-packages/opentelemetry/instrumentation/fastapi/__init__.py\", line 360, in __call__\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/telemetry/_asgi.py\", line 151, in __call__\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/middleware/exceptions.py\", line 63, in __call__\n    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 53, in wrapped_app\n    raise exc\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 42, in wrapped_app\n    await app(scope, receive, sender)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/middleware/asyncexitstack.py\", line 18, in __call__\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/routing.py\", line 678, in __call__\n    await self.middleware_stack(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 2811, in app\n    await route.handle(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 1330, in handle\n    await super().handle(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/routing.py\", line 284, in handle\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 166, in app\n    await wrap_app_handling_exceptions(app, request)(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 53, in wrapped_app\n    raise exc\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 42, in wrapped_app\n    await app(scope, receive, sender)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 152, in app\n    response = await f(request)\n               ^^^^^^^^^^^^^^^^\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 745, in app\n    raw_response = await run_endpoint_function(\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n    )\n    ^\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 372, in run_endpoint_function\n    return await dependant.call(**values)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/srv/app/app.py\", line 36, in checkout\n    reserve(\"sku-1\", 2)  # frame: checkout\n    ~~~~~~~^^^^^^^^^^^^\n  File \"/srv/app/inventory.py\", line 17, in reserve\n    raise OutOfStock(f\"{sku}: {quantity} requested, {STOCK.get(sku, 0)} left\")  # frame: reserve\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ninventory.OutOfStock: sku-1: 2 requested, 0 left\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    }
+   ]
+  }
+ ]
+}

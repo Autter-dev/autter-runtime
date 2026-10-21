@@ -1,0 +1,384 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "53efb44f-c54c-4c23-a0d4-e61cd4e2ede3"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "deployment.environment",
+      "value": {
+       "stringValue": "test"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "shop-worker"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.celery",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "8c974c4c362b984ce6c36ffe609055ff",
+       "spanId": "44f12cfc483fff2d",
+       "name": "run/shop.ship_order",
+       "kind": "SPAN_KIND_CONSUMER",
+       "startTimeUnixNano": "1792546272305496000",
+       "endTimeUnixNano": "1792546272308202000",
+       "attributes": [
+        {
+         "key": "celery.action",
+         "value": {
+          "stringValue": "run"
+         }
+        },
+        {
+         "key": "celery.state",
+         "value": {
+          "stringValue": "FAILURE"
+         }
+        },
+        {
+         "key": "messaging.conversation_id",
+         "value": {
+          "stringValue": "f20ecee1-5bd9-4003-8103-7765271d766e"
+         }
+        },
+        {
+         "key": "messaging.destination",
+         "value": {
+          "stringValue": "celery"
+         }
+        },
+        {
+         "key": "celery.delivery_info",
+         "value": {
+          "stringValue": "{'exchange': '', 'routing_key': 'celery', 'priority': 0, 'redelivered': False}"
+         }
+        },
+        {
+         "key": "messaging.message.id",
+         "value": {
+          "stringValue": "f20ecee1-5bd9-4003-8103-7765271d766e"
+         }
+        },
+        {
+         "key": "celery.reply_to",
+         "value": {
+          "stringValue": "48c6969f-3a4c-3737-be21-57a0ebefe80e"
+         }
+        },
+        {
+         "key": "celery.hostname",
+         "value": {
+          "stringValue": "[redacted]"
+         }
+        },
+        {
+         "key": "celery.task_name",
+         "value": {
+          "stringValue": "shop.ship_order"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546272307893000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "fulfilment.PrinterOffline"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "label printer for order 1001 is offline"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/venv/lib/python3.14/site-packages/celery/app/trace.py\", line 585, in trace_task\n    R = retval = fun(*args, **kwargs)\n                 ~~~^^^^^^^^^^^^^^^^^\n  File \"/srv/venv/lib/python3.14/site-packages/celery/app/trace.py\", line 858, in __protected_call__\n    return self.run(*args, **kwargs)\n           ~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/srv/app/tasks.py\", line 50, in ship_order\n    print_label(order_id)  # frame: ship_order\n    ~~~~~~~~~~~^^^^^^^^^^\n  File \"/srv/app/fulfilment.py\", line 10, in print_label\n    raise PrinterOffline(f\"label printer for order {order_id} is offline\")  # frame: print_label\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nfulfilment.PrinterOffline: label printer for order 1001 is offline\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "message": "label printer for order 1001 is offline",
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      },
+      {
+       "traceId": "c660c8097e32366d1fad480a773a70f0",
+       "spanId": "26b3ea3ffc46cc48",
+       "name": "run/shop.send_receipt",
+       "kind": "SPAN_KIND_CONSUMER",
+       "startTimeUnixNano": "1792546272309240000",
+       "endTimeUnixNano": "1792546272310323000",
+       "attributes": [
+        {
+         "key": "celery.action",
+         "value": {
+          "stringValue": "run"
+         }
+        },
+        {
+         "key": "celery.state",
+         "value": {
+          "stringValue": "FAILURE"
+         }
+        },
+        {
+         "key": "messaging.conversation_id",
+         "value": {
+          "stringValue": "0dfc5104-eae1-4b26-919a-3af59e84a005"
+         }
+        },
+        {
+         "key": "messaging.destination",
+         "value": {
+          "stringValue": "celery"
+         }
+        },
+        {
+         "key": "celery.delivery_info",
+         "value": {
+          "stringValue": "{'exchange': '', 'routing_key': 'celery', 'priority': 0, 'redelivered': False}"
+         }
+        },
+        {
+         "key": "messaging.message.id",
+         "value": {
+          "stringValue": "0dfc5104-eae1-4b26-919a-3af59e84a005"
+         }
+        },
+        {
+         "key": "celery.reply_to",
+         "value": {
+          "stringValue": "48c6969f-3a4c-3737-be21-57a0ebefe80e"
+         }
+        },
+        {
+         "key": "celery.hostname",
+         "value": {
+          "stringValue": "[redacted]"
+         }
+        },
+        {
+         "key": "celery.task_name",
+         "value": {
+          "stringValue": "shop.send_receipt"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546272310070000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "fulfilment.PrinterOffline"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "label printer for order 1001 is offline"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/venv/lib/python3.14/site-packages/celery/app/trace.py\", line 585, in trace_task\n    R = retval = fun(*args, **kwargs)\n                 ~~~^^^^^^^^^^^^^^^^^\n  File \"/srv/venv/lib/python3.14/site-packages/celery/app/trace.py\", line 858, in __protected_call__\n    return self.run(*args, **kwargs)\n           ~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/srv/app/tasks.py\", line 55, in send_receipt\n    print_label(order_id)  # frame: send_receipt\n    ~~~~~~~~~~~^^^^^^^^^^\n  File \"/srv/app/fulfilment.py\", line 10, in print_label\n    raise PrinterOffline(f\"label printer for order {order_id} is offline\")  # frame: print_label\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nfulfilment.PrinterOffline: label printer for order 1001 is offline\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "message": "label printer for order 1001 is offline",
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      },
+      {
+       "traceId": "eb6fcc9b684254c62d8271623be69f86",
+       "spanId": "438540fd7a0a6386",
+       "name": "run/shop.ship_order",
+       "kind": "SPAN_KIND_CONSUMER",
+       "startTimeUnixNano": "1792546272310983000",
+       "endTimeUnixNano": "1792546272311964000",
+       "attributes": [
+        {
+         "key": "celery.action",
+         "value": {
+          "stringValue": "run"
+         }
+        },
+        {
+         "key": "celery.state",
+         "value": {
+          "stringValue": "FAILURE"
+         }
+        },
+        {
+         "key": "messaging.conversation_id",
+         "value": {
+          "stringValue": "2342b104-ea1f-4784-b14e-ae01f9b3f43d"
+         }
+        },
+        {
+         "key": "messaging.destination",
+         "value": {
+          "stringValue": "celery"
+         }
+        },
+        {
+         "key": "celery.delivery_info",
+         "value": {
+          "stringValue": "{'exchange': '', 'routing_key': 'celery', 'priority': 0, 'redelivered': False}"
+         }
+        },
+        {
+         "key": "messaging.message.id",
+         "value": {
+          "stringValue": "2342b104-ea1f-4784-b14e-ae01f9b3f43d"
+         }
+        },
+        {
+         "key": "celery.reply_to",
+         "value": {
+          "stringValue": "48c6969f-3a4c-3737-be21-57a0ebefe80e"
+         }
+        },
+        {
+         "key": "celery.hostname",
+         "value": {
+          "stringValue": "[redacted]"
+         }
+        },
+        {
+         "key": "celery.task_name",
+         "value": {
+          "stringValue": "shop.ship_order"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546272311748000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "fulfilment.PrinterOffline"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "label printer for order 1002 is offline"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/venv/lib/python3.14/site-packages/celery/app/trace.py\", line 585, in trace_task\n    R = retval = fun(*args, **kwargs)\n                 ~~~^^^^^^^^^^^^^^^^^\n  File \"/srv/venv/lib/python3.14/site-packages/celery/app/trace.py\", line 858, in __protected_call__\n    return self.run(*args, **kwargs)\n           ~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/srv/app/tasks.py\", line 50, in ship_order\n    print_label(order_id)  # frame: ship_order\n    ~~~~~~~~~~~^^^^^^^^^^\n  File \"/srv/app/fulfilment.py\", line 10, in print_label\n    raise PrinterOffline(f\"label printer for order {order_id} is offline\")  # frame: print_label\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nfulfilment.PrinterOffline: label printer for order 1002 is offline\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "message": "label printer for order 1002 is offline",
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    }
+   ]
+  }
+ ]
+}

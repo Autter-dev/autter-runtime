@@ -31,7 +31,8 @@ def install_caught_sampler(
     if not 0 <= sample_rate <= 1 or max_per_minute < 1:
         raise ValueError("invalid caught exception sampling limits")
     previous = sys.gettrace()
-    previous_threads = threading.gettrace()
+    # threading.gettrace() is 3.10+; on 3.9 the hook lives in _trace_hook.
+    previous_threads = threading.gettrace() if hasattr(threading, "gettrace") else getattr(threading, "_trace_hook", None)
     seen: set[int] = set()
     window = -1
     sent = 0

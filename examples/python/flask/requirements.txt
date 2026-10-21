@@ -1,0 +1,33 @@
+# Flask recipe: Flask on gunicorn + OpenTelemetry's Flask instrumentation.
+# Pinned 2026-10-21 (pip freeze of a fresh install). Python 3.10+ (OpenTelemetry 1.45); tested on 3.14.
+# autter_tracing.py and redact.py come from adapters/python (copy them next to your code).
+blinker==1.9.0
+certifi==2026.10.19
+charset-normalizer==3.5.2
+click==8.5.0
+Flask==3.1.3
+googleapis-common-protos==1.75.5
+gunicorn==26.2.0
+idna==3.20
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+opentelemetry-api==1.45.1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-instrumentation==0.66b1
+opentelemetry-instrumentation-flask==0.66b1
+opentelemetry-instrumentation-wsgi==0.66b1
+opentelemetry-proto==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+opentelemetry-util-http==0.66b1
+packaging==26.3
+protobuf==7.36.2
+requests==2.34.2
+typing_extensions==4.16.0
+urllib3==2.8.0
+Werkzeug==3.1.9
+wrapt==2.5.1

@@ -1,0 +1,197 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "af880441-475d-4f88-a785-529ca92ff04d"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "deployment.environment",
+      "value": {
+       "stringValue": "test"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "billing-flask"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.flask",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "a64bd56dde949be0998d15c8b945df1f",
+       "spanId": "bf7144a7754d318e",
+       "name": "GET /invoices/<int:invoice_id>/late-fee",
+       "kind": "SPAN_KIND_SERVER",
+       "startTimeUnixNano": "1792546185233931000",
+       "endTimeUnixNano": "1792546185234213000",
+       "attributes": [
+        {
+         "key": "http.method",
+         "value": {
+          "stringValue": "GET"
+         }
+        },
+        {
+         "key": "http.server_name",
+         "value": {
+          "stringValue": "127.0.0.1"
+         }
+        },
+        {
+         "key": "http.scheme",
+         "value": {
+          "stringValue": "http"
+         }
+        },
+        {
+         "key": "net.host.name",
+         "value": {
+          "stringValue": "127.0.0.1:51991"
+         }
+        },
+        {
+         "key": "http.host",
+         "value": {
+          "stringValue": "127.0.0.1:51991"
+         }
+        },
+        {
+         "key": "net.host.port",
+         "value": {
+          "intValue": "51991"
+         }
+        },
+        {
+         "key": "http.target",
+         "value": {
+          "stringValue": "/invoices/31/late-fee"
+         }
+        },
+        {
+         "key": "net.peer.ip",
+         "value": {
+          "stringValue": "127.0.0.1"
+         }
+        },
+        {
+         "key": "net.peer.port",
+         "value": {
+          "intValue": "52000"
+         }
+        },
+        {
+         "key": "http.user_agent",
+         "value": {
+          "stringValue": "Python-urllib/3.14"
+         }
+        },
+        {
+         "key": "http.flavor",
+         "value": {
+          "stringValue": "1.1"
+         }
+        },
+        {
+         "key": "http.route",
+         "value": {
+          "stringValue": "/invoices/<int:invoice_id>/late-fee"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "422"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546185234163000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "KeyError"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "'XYZ'"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/app/app.py\", line 42, in fee\n    return {\"invoice\": invoice_id, \"fee\": late_fee(120.0, \"XYZ\")}  # frame: fee\n                                          ~~~~~~~~^^^^^^^^^^^^^^\n  File \"/srv/app/billing.py\", line 11, in late_fee\n    return amount * RATES[currency]  # frame: late_fee\n                    ~~~~~^^^^^^^^^^\nKeyError: 'XYZ'\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          },
+          {
+           "key": "autter.handled",
+           "value": {
+            "boolValue": true
+           }
+          }
+         ]
+        }
+       ],
+       "status": {},
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,191 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "37b407c1-fd6b-48c1-ab49-f47f7a3ec9f4"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "deployment.environment",
+      "value": {
+       "stringValue": "test"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "shop-django"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.django",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "7363d9018edc7f4b68ffed056bafc498",
+       "spanId": "75e973b3a838c266",
+       "name": "GET orders/<int:order_id>/refund",
+       "kind": "SPAN_KIND_SERVER",
+       "startTimeUnixNano": "1792546181194277000",
+       "endTimeUnixNano": "1792546181194722000",
+       "attributes": [
+        {
+         "key": "http.method",
+         "value": {
+          "stringValue": "GET"
+         }
+        },
+        {
+         "key": "http.server_name",
+         "value": {
+          "stringValue": "1.0.0.127.in-addr.arpa"
+         }
+        },
+        {
+         "key": "http.scheme",
+         "value": {
+          "stringValue": "http"
+         }
+        },
+        {
+         "key": "net.host.name",
+         "value": {
+          "stringValue": "127.0.0.1:51940"
+         }
+        },
+        {
+         "key": "http.host",
+         "value": {
+          "stringValue": "127.0.0.1:51940"
+         }
+        },
+        {
+         "key": "net.host.port",
+         "value": {
+          "intValue": "51940"
+         }
+        },
+        {
+         "key": "http.url",
+         "value": {
+          "stringValue": "http://127.0.0.1:51940/orders/4821/refund"
+         }
+        },
+        {
+         "key": "net.peer.ip",
+         "value": {
+          "stringValue": "127.0.0.1"
+         }
+        },
+        {
+         "key": "http.user_agent",
+         "value": {
+          "stringValue": "Python-urllib/3.14"
+         }
+        },
+        {
+         "key": "http.flavor",
+         "value": {
+          "stringValue": "1.1"
+         }
+        },
+        {
+         "key": "http.route",
+         "value": {
+          "stringValue": "orders/<int:order_id>/refund"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "202"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1792546181194652000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "shop.payments.RefundPending"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "refund for order 4821 is still settling"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/app/shop/payments.py\", line 38, in refund_card\n    return LEDGER[order_id]\n           ~~~~~~^^^^^^^^^^\nKeyError: 4821\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/srv/app/shop/views.py\", line 20, in refund\n    return JsonResponse(refund_card(order_id))  # frame: refund\n                        ~~~~~~~~~~~^^^^^^^^^^\n  File \"/srv/app/shop/payments.py\", line 40, in refund_card\n    raise RefundPending(f\"refund for order {order_id} is still settling\")  # frame: refund_card\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nshop.payments.RefundPending: refund for order 4821 is still settling\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          },
+          {
+           "key": "autter.handled",
+           "value": {
+            "boolValue": true
+           }
+          }
+         ]
+        }
+       ],
+       "status": {},
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    }
+   ]
+  }
+ ]
+}

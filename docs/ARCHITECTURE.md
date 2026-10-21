@@ -217,8 +217,16 @@ preview domains, pages and tiers. Shared vectors:
 `/site-packages/`, `/dist-packages/`, `/vendor/` or `/.pnpm/`; `node:` and
 `internal/` paths; browser extension URLs; sources a source map lists in
 `ignoreList`/`x_google_ignoreList`; Go `runtime.` and `/usr/local/go/` frames;
-JVM `java.`/`javax.`/`kotlin.`/`jdk.` frames; .NET `System.`/`Microsoft.`
+Python standard library frames (`<frozen …>` modules, an installation's
+`lib/pythonX.Y/` or `PythonXY\Lib\` directory); JVM
+`java.`/`javax.`/`kotlin.`/`jdk.` frames; .NET `System.`/`Microsoft.`
 frames. Everything else is in-app.
+
+**Python tracebacks** list the outermost frame first and are reversed. Only
+the reported exception's own frames are parsed: the last top-level block of a
+chained exception ("During handling of the above exception…", "The above
+exception was the direct cause…"), and for an exception group (3.11+) the
+group's own `|`-margined block, never its sub-exceptions.
 
 **Symbolication at ingest.** Browser frames in `.js`/`.mjs`/`.cjs` files are
 resolved through the map uploaded for the event's release and the script's

@@ -1303,6 +1303,374 @@
 		]
 	},
 	{
+		"name": "python 3.11+ exception group from a TaskGroup: the group's own frames, stdlib frames not in-app",
+		"stack": "  + Exception Group Traceback (most recent call last):\n  |   File \"/srv/app/worker.py\", line 7, in capture\n  |     fn(*args)\n  |     ~~^^^^^^^\n  |   File \"/srv/app/orders/fanout.py\", line 20, in run_checks\n  |     asyncio.run(check_all())\n  |     ~~~~~~~~~~~^^^^^^^^^^^^^\n  |   File \"/usr/local/lib/python3.14/asyncio/runners.py\", line 205, in run\n  |     return runner.run(main)\n  |            ~~~~~~~~~~^^^^^^\n  |   File \"/usr/local/lib/python3.14/asyncio/runners.py\", line 128, in run\n  |     return self._loop.run_until_complete(task)\n  |            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^\n  |   File \"/usr/local/lib/python3.14/asyncio/base_events.py\", line 720, in run_until_complete\n  |     return future.result()\n  |            ~~~~~~~~~~~~~^^\n  |   File \"/srv/app/orders/fanout.py\", line 14, in check_all\n  |     async with asyncio.TaskGroup() as group:\n  |                ~~~~~~~~~~~~~~~~~^^\n  |   File \"/usr/local/lib/python3.14/asyncio/taskgroups.py\", line 72, in __aexit__\n  |     return await self._aexit(et, exc)\n  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  |   File \"/usr/local/lib/python3.14/asyncio/taskgroups.py\", line 174, in _aexit\n  |     raise BaseExceptionGroup(\n  |     ...<2 lines>...\n  |     ) from None\n  | ExceptionGroup: unhandled errors in a TaskGroup (2 sub-exceptions)\n  +-+---------------- 1 ----------------\n    | Traceback (most recent call last):\n    |   File \"/srv/app/orders/fanout.py\", line 10, in fetch\n    |     raise StockError(f\"warehouse {name} unreachable\")\n    | orders.fanout.StockError: warehouse north unreachable\n    +---------------- 2 ----------------\n    | Traceback (most recent call last):\n    |   File \"/srv/app/orders/fanout.py\", line 10, in fetch\n    |     raise StockError(f\"warehouse {name} unreachable\")\n    | orders.fanout.StockError: warehouse south unreachable\n    +------------------------------------\n",
+		"frames": [
+			{
+				"function": "_aexit",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/asyncio/taskgroups.py",
+				"lineno": 174,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "__aexit__",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/asyncio/taskgroups.py",
+				"lineno": 72,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "check_all",
+				"module": null,
+				"filename": "/srv/app/orders/fanout.py",
+				"lineno": 14,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "run_until_complete",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/asyncio/base_events.py",
+				"lineno": 720,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "run",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/asyncio/runners.py",
+				"lineno": 128,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "run",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/asyncio/runners.py",
+				"lineno": 205,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "run_checks",
+				"module": null,
+				"filename": "/srv/app/orders/fanout.py",
+				"lineno": 20,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "capture",
+				"module": null,
+				"filename": "/srv/app/worker.py",
+				"lineno": 7,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python exception group raised while handling another exception",
+		"stack": "Traceback (most recent call last):\n  File \"/srv/app/orders/fanout.py\", line 37, in load\n    return {}[cart_id]\n           ~~^^^^^^^^^\nKeyError: 7\n\nDuring handling of the above exception, another exception occurred:\n\n  + Exception Group Traceback (most recent call last):\n  |   File \"/srv/app/worker.py\", line 7, in capture\n  |     fn(*args)\n  |     ~~^^^^^^^\n  |   File \"/srv/app/orders/fanout.py\", line 39, in load\n  |     validate([-1, -2])\n  |     ~~~~~~~~^^^^^^^^^^\n  |   File \"/srv/app/orders/fanout.py\", line 32, in validate\n  |     raise ExceptionGroup(\"invalid cart\", errors)\n  | ExceptionGroup: invalid cart (2 sub-exceptions)\n  +-+---------------- 1 ----------------\n    | Traceback (most recent call last):\n    |   File \"/srv/app/orders/fanout.py\", line 28, in validate\n    |     raise ValueError(f\"negative quantity {item}\")\n    | ValueError: negative quantity -1\n    +---------------- 2 ----------------\n    | Traceback (most recent call last):\n    |   File \"/srv/app/orders/fanout.py\", line 28, in validate\n    |     raise ValueError(f\"negative quantity {item}\")\n    | ValueError: negative quantity -2\n    +------------------------------------\n",
+		"frames": [
+			{
+				"function": "validate",
+				"module": null,
+				"filename": "/srv/app/orders/fanout.py",
+				"lineno": 32,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "load",
+				"module": null,
+				"filename": "/srv/app/orders/fanout.py",
+				"lineno": 39,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "capture",
+				"module": null,
+				"filename": "/srv/app/worker.py",
+				"lineno": 7,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python exception group raised from a cause, sub-exception without a traceback",
+		"stack": "Traceback (most recent call last):\n  File \"/srv/app/orders/fanout.py\", line 44, in load_with_cause\n    return {}[cart_id]\n           ~~^^^^^^^^^\nKeyError: 7\n\nThe above exception was the direct cause of the following exception:\n\n  + Exception Group Traceback (most recent call last):\n  |   File \"/srv/app/worker.py\", line 7, in capture\n  |     fn(*args)\n  |     ~~^^^^^^^\n  |   File \"/srv/app/orders/fanout.py\", line 46, in load_with_cause\n  |     raise ExceptionGroup(\"cart unavailable\", [LookupError(cart_id)]) from err\n  | ExceptionGroup: cart unavailable (1 sub-exception)\n  +-+---------------- 1 ----------------\n    | LookupError: 7\n    +------------------------------------\n",
+		"frames": [
+			{
+				"function": "load_with_cause",
+				"module": null,
+				"filename": "/srv/app/orders/fanout.py",
+				"lineno": 46,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "capture",
+				"module": null,
+				"filename": "/srv/app/worker.py",
+				"lineno": 7,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python nested exception groups use the outer group's frames",
+		"stack": "  + Exception Group Traceback (most recent call last):\n  |   File \"/srv/app/worker.py\", line 7, in capture\n  |     fn(*args)\n  |     ~~^^^^^^^\n  |   File \"/srv/app/orders/fanout.py\", line 50, in nested\n  |     raise ExceptionGroup(\"outer\", [ExceptionGroup(\"inner\", [TypeError(\"bad type\")]), ValueError(\"bad value\")])\n  | ExceptionGroup: outer (2 sub-exceptions)\n  +-+---------------- 1 ----------------\n    | ExceptionGroup: inner (1 sub-exception)\n    +-+---------------- 1 ----------------\n      | TypeError: bad type\n      +------------------------------------\n    +---------------- 2 ----------------\n    | ValueError: bad value\n    +------------------------------------\n",
+		"frames": [
+			{
+				"function": "nested",
+				"module": null,
+				"filename": "/srv/app/orders/fanout.py",
+				"lineno": 50,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "capture",
+				"module": null,
+				"filename": "/srv/app/worker.py",
+				"lineno": 7,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python plain exception raised while handling an exception group",
+		"stack": "  + Exception Group Traceback (most recent call last):\n  |   File \"/srv/app/orders/fanout.py\", line 55, in handle_group\n  |     validate([-3])\n  |     ~~~~~~~~^^^^^^\n  |   File \"/srv/app/orders/fanout.py\", line 32, in validate\n  |     raise ExceptionGroup(\"invalid cart\", errors)\n  | ExceptionGroup: invalid cart (1 sub-exception)\n  +-+---------------- 1 ----------------\n    | Traceback (most recent call last):\n    |   File \"/srv/app/orders/fanout.py\", line 28, in validate\n    |     raise ValueError(f\"negative quantity {item}\")\n    | ValueError: negative quantity -3\n    +------------------------------------\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/srv/app/worker.py\", line 7, in capture\n    fn(*args)\n    ~~^^^^^^^\n  File \"/srv/app/orders/fanout.py\", line 57, in handle_group\n    raise RuntimeError(\"could not recover the cart\")\nRuntimeError: could not recover the cart\n",
+		"frames": [
+			{
+				"function": "handle_group",
+				"module": null,
+				"filename": "/srv/app/orders/fanout.py",
+				"lineno": 57,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "capture",
+				"module": null,
+				"filename": "/srv/app/worker.py",
+				"lineno": 7,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python exception group that was never raised has no frames",
+		"stack": "  | ExceptionGroup: not raised (1 sub-exception)\n  +-+---------------- 1 ----------------\n    | ValueError: v\n    +------------------------------------\n",
+		"frames": []
+	},
+	{
+		"name": "python direct cause (raise from) uses the reported traceback; frozen runpy frames not in-app",
+		"stack": "Traceback (most recent call last):\n  File \"/srv/app/orders/importer.py\", line 16, in main\n    import_orders(['{\"id\": 1}', '{\"id\": 2,'])\n    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/srv/app/orders/importer.py\", line 11, in import_orders\n    return [parse(line) for line in lines]\n            ~~~~~^^^^^^\n  File \"/srv/app/orders/importer.py\", line 7, in parse\n    return json.loads(payload)\n           ~~~~~~~~~~^^^^^^^^^\n  File \"/usr/local/lib/python3.14/json/__init__.py\", line 352, in loads\n    return _default_decoder.decode(s)\n           ~~~~~~~~~~~~~~~~~~~~~~~^^^\n  File \"/usr/local/lib/python3.14/json/decoder.py\", line 345, in decode\n    obj, end = self.raw_decode(s, idx=_w(s, 0).end())\n               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/json/decoder.py\", line 361, in raw_decode\n    obj, end = self.scan_once(s, idx)\n               ~~~~~~~~~~~~~~^^^^^^^^\njson.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 10 (char 9)\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"<frozen runpy>\", line 203, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/srv/app/orders/importer.py\", line 30, in <module>\n    main()\n    ~~~~^^\n  File \"/srv/app/orders/importer.py\", line 18, in main\n    raise RuntimeError(\"order import failed\") from err\nRuntimeError: order import failed\n",
+		"frames": [
+			{
+				"function": "main",
+				"module": null,
+				"filename": "/srv/app/orders/importer.py",
+				"lineno": 18,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "<module>",
+				"module": null,
+				"filename": "/srv/app/orders/importer.py",
+				"lineno": 30,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "_run_code",
+				"module": null,
+				"filename": "<frozen runpy>",
+				"lineno": 88,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "_run_module_as_main",
+				"module": null,
+				"filename": "<frozen runpy>",
+				"lineno": 203,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python stdlib frames (json) innermost are not in-app",
+		"stack": "Traceback (most recent call last):\n  File \"<frozen runpy>\", line 203, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/srv/app/orders/raw.py\", line 19, in <module>\n    parse('{\"id\": 2,')\n    ~~~~~^^^^^^^^^^^^^\n  File \"/srv/app/orders/raw.py\", line 7, in parse\n    return json.loads(payload)\n           ~~~~~~~~~~^^^^^^^^^\n  File \"/usr/local/lib/python3.14/json/__init__.py\", line 352, in loads\n    return _default_decoder.decode(s)\n           ~~~~~~~~~~~~~~~~~~~~~~~^^^\n  File \"/usr/local/lib/python3.14/json/decoder.py\", line 345, in decode\n    obj, end = self.raw_decode(s, idx=_w(s, 0).end())\n               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/json/decoder.py\", line 361, in raw_decode\n    obj, end = self.scan_once(s, idx)\n               ~~~~~~~~~~~~~~^^^^^^^^\njson.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 10 (char 9)\n",
+		"frames": [
+			{
+				"function": "raw_decode",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/json/decoder.py",
+				"lineno": 361,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "decode",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/json/decoder.py",
+				"lineno": 345,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "loads",
+				"module": null,
+				"filename": "/usr/local/lib/python3.14/json/__init__.py",
+				"lineno": 352,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "parse",
+				"module": null,
+				"filename": "/srv/app/orders/raw.py",
+				"lineno": 7,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "<module>",
+				"module": null,
+				"filename": "/srv/app/orders/raw.py",
+				"lineno": 19,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "_run_code",
+				"module": null,
+				"filename": "<frozen runpy>",
+				"lineno": 88,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "_run_module_as_main",
+				"module": null,
+				"filename": "<frozen runpy>",
+				"lineno": 203,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
+		"name": "python windows stdlib and app paths",
+		"stack": "Traceback (most recent call last):\n  File \"<frozen runpy>\", line 203, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"C:\\srv\\app\\orders\\raw.py\", line 19, in <module>\n    parse('{\"id\": 2,')\n    ~~~~~^^^^^^^^^^^^^\n  File \"C:\\srv\\app\\orders\\raw.py\", line 7, in parse\n    return json.loads(payload)\n           ~~~~~~~~~~^^^^^^^^^\n  File \"C:\\Python314\\Lib\\json\\__init__.py\", line 352, in loads\n    return _default_decoder.decode(s)\n           ~~~~~~~~~~~~~~~~~~~~~~~^^^\n  File \"C:\\Python314\\Lib\\json\\decoder.py\", line 345, in decode\n    obj, end = self.raw_decode(s, idx=_w(s, 0).end())\n               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Python314\\Lib\\json\\decoder.py\", line 361, in raw_decode\n    obj, end = self.scan_once(s, idx)\n               ~~~~~~~~~~~~~~^^^^^^^^\njson.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 10 (char 9)\n",
+		"frames": [
+			{
+				"function": "raw_decode",
+				"module": null,
+				"filename": "C:\\Python314\\Lib\\json\\decoder.py",
+				"lineno": 361,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "decode",
+				"module": null,
+				"filename": "C:\\Python314\\Lib\\json\\decoder.py",
+				"lineno": 345,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "loads",
+				"module": null,
+				"filename": "C:\\Python314\\Lib\\json\\__init__.py",
+				"lineno": 352,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "parse",
+				"module": null,
+				"filename": "C:\\srv\\app\\orders\\raw.py",
+				"lineno": 7,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "<module>",
+				"module": null,
+				"filename": "C:\\srv\\app\\orders\\raw.py",
+				"lineno": 19,
+				"colno": null,
+				"inApp": true,
+				"resolved": false
+			},
+			{
+				"function": "_run_code",
+				"module": null,
+				"filename": "<frozen runpy>",
+				"lineno": 88,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			},
+			{
+				"function": "_run_module_as_main",
+				"module": null,
+				"filename": "<frozen runpy>",
+				"lineno": 203,
+				"colno": null,
+				"inApp": false,
+				"resolved": false
+			}
+		]
+	},
+	{
 		"name": "go panic with runtime frames, module path and a second goroutine",
 		"stack": "panic: order missing [recovered]\n\tpanic: order missing\n\ngoroutine 7 [running]:\npanic({0x6a1b20?, 0x8f3c40?})\n\t/usr/local/go/src/runtime/panic.go:770 +0x132\ngithub.com/acme/shop/orders.(*Service).Load(0xc000120000, {0xc00001c0a0, 0x8})\n\t/home/ci/shop/orders/service.go:51 +0x8e\ngithub.com/acme/shop/web.Checkout({0x8f2b20, 0xc0000c2000}, 0xc000168000)\n\t/home/ci/shop/web/checkout.go:22 +0x45\n\ngoroutine 1 [chan receive]:\nmain.main()\n\t/home/ci/shop/main.go:30 +0x1c",
 		"frames": [

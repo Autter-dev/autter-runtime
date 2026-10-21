@@ -113,9 +113,26 @@ test("in-app rule (contract §3): language frames", () => {
 	assert.equal(isInAppFrame(frame("Start", "System.Threading.Tasks.Task"), "dotnet"), false);
 	assert.equal(isInAppFrame(frame("Execute", "Microsoft.AspNetCore.Mvc.X"), "dotnet"), false);
 	assert.equal(isInAppFrame(frame("Process", "MyApp.Orders"), "dotnet"), true);
+	for (const filename of [
+		"/usr/local/lib/python3.12/asyncio/taskgroups.py",
+		"/usr/lib/python3.11/socket.py",
+		"/opt/homebrew/Cellar/python@3.14/3.14.8_2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/json/decoder.py",
+		"/root/.local/share/uv/python/cpython-3.13.1-linux-x86_64-gnu/lib/python3.13t/threading.py",
+		"/opt/pypy/lib/pypy3.10/http/client.py",
+		"C:\\Python312\\Lib\\asyncio\\runners.py",
+		"C:\\Users\\dev\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\json\\decoder.py",
+		"<frozen runpy>",
+		"<frozen importlib._bootstrap>",
+	]) {
+		assert.equal(isInAppFrame(frame("f", null, filename), "python"), false, filename);
+	}
+	for (const filename of ["/srv/app/orders/views.py", "/home/dev/lib/python/tools.py", "/srv/lib/python3/app.py", "<string>", "<stdin>"]) {
+		assert.equal(isInAppFrame(frame("f", null, filename), "python"), true, filename);
+	}
 	// Language rules do not leak into other languages.
 	assert.equal(isInAppFrame(frame("runtime.start", null, "/app/src/boot.js"), "javascript"), true);
 	assert.equal(isInAppFrame(frame("System.load", null, "/app/src/sys.js"), "javascript"), true);
+	assert.equal(isInAppFrame(frame("load", null, "/usr/local/lib/python3.12/json/x.js"), "javascript"), true);
 });
 
 test("at most 50 frames are kept, innermost first", () => {

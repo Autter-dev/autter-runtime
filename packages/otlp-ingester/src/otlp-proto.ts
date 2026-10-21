@@ -97,12 +97,20 @@ message HistogramDataPoint {
   repeated double explicit_bounds = 7;
   repeated KeyValue attributes = 9;
 }
+
+// ExportTraceServiceResponse, ExportLogsServiceResponse and
+// ExportMetricsServiceResponse share this wire shape: partial_success = 1,
+// and in it the rejected count (rejected_spans / rejected_log_records /
+// rejected_data_points) = 1 and error_message = 2.
+message ExportServiceResponse { ExportPartialSuccess partial_success = 1; }
+message ExportPartialSuccess { int64 rejected = 1; string error_message = 2; }
 `;
 
 const root = protobuf.parse(PROTO).root;
 const TraceRequest = root.lookupType("otlp.ExportTraceServiceRequest");
 const MetricsRequest = root.lookupType("otlp.ExportMetricsServiceRequest");
 const LogsRequest = root.lookupType("otlp.ExportLogsServiceRequest");
+const ServiceResponse = root.lookupType("otlp.ExportServiceResponse");
 
 const TO_OBJECT_OPTIONS: protobuf.IConversionOptions = {
 	longs: String, // 64-bit ints → strings (matches OTLP/JSON)
@@ -144,4 +152,25 @@ export function decodeMetricsRequest(body: Buffer): OtlpMetricsRequest {
 
 export function decodeLogsRequest(body: Buffer): OtlpLogsRequest {
 	return hexifyIds(LogsRequest.toObject(LogsRequest.decode(body), TO_OBJECT_OPTIONS)) as OtlpLogsRequest;
+}
+
+/**
+ * The protobuf body of an OTLP export response: empty when everything was
+ * accepted, else `partial_success` with the rejected count and why
+ * (identical bytes for traces, logs and metrics).
+ */
+export function encodeExportResponse(partial: { rejected: number; errorMessage: string } | null): Uint8Array {
+	if (!partial) return new Uint8Array(0);
+	return ServiceResponse.encode(
+		ServiceResponse.create({ partialSuccess: { rejected: partial.rejected, errorMessage: partial.errorMessage } }),
+	).finish();
+}
+
+/** Decode an OTLP export response body (tests, and anything reading our answers). */
+export function decodeExportResponse(body: Uint8Array): { rejected: number; errorMessage: string } | null {
+	const message = ServiceResponse.toObject(ServiceResponse.decode(body), { longs: Number, defaults: false }) as {
+		partialSuccess?: { rejected?: number; errorMessage?: string };
+	};
+	if (!message.partialSuccess) return null;
+	return { rejected: message.partialSuccess.rejected ?? 0, errorMessage: message.partialSuccess.errorMessage ?? "" };
 }

@@ -72,7 +72,30 @@ version come from the OTLP resource attributes `telemetry.distro.name` and
 `telemetry.distro.version`, which the Node and Next.js SDKs set. Plain OTel
 SDKs are recorded as `opentelemetry-<language>` from `telemetry.sdk.*`. The
 browser SDK sends an `sdk` field. Writes are deduplicated to one row per
-service, SDK and version per hour.
+service, SDK, version and `via` per hour.
+
+From 1.8.0 (migration `0019-sdk-versions-via`) each row also says how the
+telemetry arrived, in `via`:
+
+- `collector`: an OpenTelemetry Collector or a similar agent forwarded it.
+  The ingester reads that from the request's User-Agent (any collector
+  build: `OpenTelemetry Collector Contrib/0.120.0 (linux/amd64)`, ADOT's
+  `AWS OTel Collector`, `otelcol-*`, Grafana Alloy and Agent, Fluent Bit,
+  Vector) or from a `telemetry.distro.name` that is an `otelcol` build (the
+  Autter collector config inserts `otelcol-contrib` for senders that set
+  none). An Autter SDK behind a collector keeps its own name, so its
+  compatibility checks still apply, and is still seen as collector-fed. A
+  resource with no SDK identity at all that came through a collector (a
+  Prometheus or file-log receiver) gets a row too, with an empty SDK name.
+- `direct`: an SDK exporter sent it itself (the `OTel-OTLP-Exporter-<lang>`
+  User-Agent of the OpenTelemetry SDKs, Go's `OTel Go OTLP …`, or an Autter
+  SDK's distro without a collector User-Agent), or a browser sent it with a
+  client key.
+- `relay`: browser events forwarded with a server key (the Autter relay).
+- `''`: nothing tells.
+
+`via` is not part of the table's sorting key, so a service, SDK and version
+row says how it arrived most recently.
 
 Ingesters released before `/v1/compat` (1.4.0 and older) answer it with a
 404. The SDK and `doctor` then probe the feature's own route instead. For
@@ -106,6 +129,9 @@ copy that a test keeps identical.
 | Browser trace propagation (`browser_trace_propagation`) | 1.6.0 | | | browser/next/node 1.6.0 |
 | Upload-only keys for source maps (`sourcemap_upload_keys`) | 1.7.0 | | `/v1/sourcemaps` | |
 | Source map check by debug id (`source_map_verify`) | 1.7.0 | `0017-source-maps-debug-id` | `/v1/sourcemaps/check` | |
+| Rejected and dropped records per repository (`ingest_drop_counts`) | 1.8.0 | `0018-runtime-ingest-drops` | | |
+| How each service's telemetry arrives (`telemetry_sender_via`) | 1.8.0 | `0019-sdk-versions-via` | | |
+| Resolved and unresolved browser frames per occurrence (`frame_resolution_counts`) | 1.8.0 | `0020-occurrence-frame-resolution` | | |
 
 Notes:
 
@@ -114,7 +140,18 @@ Notes:
 - Ingesters older than 1.3.2 (network events) or 1.3.4 (CSP) reject the
   **whole** browser batch with a 400 when it contains a newer event type.
   Errors in the same batch are lost too. Upgrade the ingester before the
-  browser SDK.
+  browser SDK. From 1.8.0 an event the ingester can't validate, a newer type
+  included, is dropped alone and counted (`invalid_event`); the rest of the
+  batch is stored.
+- `ingest_drop_counts`, `telemetry_sender_via` and `frame_resolution_counts`
+  list no SDK: they are what the ingester records about the traffic it gets,
+  read by the Autter dashboard (see [Rejections and drops](ARCHITECTURE.md#rejections-and-drops)).
+  1.8.0 also changes three answers: an OTLP body that is neither JSON nor
+  protobuf gets a 415 instead of an empty 200; more than 2,000 log records
+  in one request store the first 2,000 and reject the rest in
+  `partial_success` instead of a 400 for the whole request; and a value the
+  normaliser can't read (a non-integer timestamp) is a 400 instead of
+  stopping the process.
 - Ingesters older than 1.6.0 accept a browser event's `traceId` but drop it
   (the event itself is stored), so browser errors are not linked to server
   traces until the ingester is upgraded. The relay warns once.

@@ -60,6 +60,26 @@ const JS_FILE_RE = /\.[cm]?js$/i;
 const MAX_CONTEXT_CHARS = 300;
 const CONTEXT_LINES = 3;
 
+/**
+ * In-app browser frames a source map could resolve, counted after
+ * symbolication (EI-27): `resolved` ones, and `unresolved` .js/.mjs/.cjs
+ * frames left as parsed (no map uploaded, no release or debug id, no
+ * mapping at that position). Frames a map moved out of the app
+ * (node_modules, ignoreList) and non-JS frames count in neither. Stored per
+ * occurrence (`in_app_frames_resolved` / `in_app_frames_unresolved`) for the
+ * EI-14 rule: over 30% unresolved means the release needs source maps.
+ */
+export function inAppFrameResolution(frames: readonly StackFrame[] | undefined): { resolved: number; unresolved: number } {
+	let resolved = 0;
+	let unresolved = 0;
+	for (const frame of frames ?? []) {
+		if (!frame.inApp) continue;
+		if (frame.resolved) resolved += 1;
+		else if (frame.filename && JS_FILE_RE.test(frame.filename)) unresolved += 1;
+	}
+	return { resolved, unresolved };
+}
+
 /** Path-only form of a script URL — the key uploads are stored under. */
 export function scriptPath(filename: string): string | null {
 	try {

@@ -3,7 +3,7 @@ import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
 
 const config = loadConfig();
-const { app, store, sink, reportIngesterInfo } = createIngesterApp(config);
+const { app, store, sink, reportIngesterInfo, drops } = createIngesterApp(config);
 
 const server = app.listen(config.port, () => {
 	console.log(
@@ -36,7 +36,12 @@ async function shutdown(signal: string) {
 		}
 	}
 	server.close(() => {
-		void store.close().finally(() => process.exit(0));
+		// Write the rejection/drop counts still buffered (best effort: a
+		// failed write is logged, never retried).
+		void drops
+			.stop()
+			.finally(() => store.close())
+			.finally(() => process.exit(0));
 	});
 	setTimeout(() => process.exit(1), 10_000).unref();
 }
@@ -47,5 +52,14 @@ process.on("SIGINT", () => void shutdown("SIGINT"));
 export { createIngesterApp } from "./server.js";
 export { loadConfig } from "./config.js";
 export * from "./compat.js";
-export { SinkForwarder, type SinkStats, type SinkTuning } from "./sink.js";
+export { SinkForwarder, type SinkDrop, type SinkStats, type SinkTuning } from "./sink.js";
+export {
+	DROP_REASONS,
+	IngestDropCounter,
+	type DropKind,
+	type DropReason,
+	type DropRoute,
+	type IngestDrop,
+	type IngestDropRow,
+} from "./ingest-drops.js";
 export * from "./types.js";

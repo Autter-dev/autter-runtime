@@ -1,9 +1,24 @@
 import express, {
 	type Express,
+	type NextFunction,
 	type Request,
 	type Response,
 } from "express";
 import { KeyResolver, RateLimiter } from "./auth.js";
+import { countTruncations } from "./context.js";
+import {
+	autterKeyHash,
+	cumulativeHttpHistogramPoints,
+	dataPointsInRequest,
+	dropRoute,
+	IngestDropCounter,
+	PARTIAL_MESSAGES,
+	partialSuccess,
+	recordsInBody,
+	spansInRequest,
+	type DropReason,
+	type PartialSuccess,
+} from "./ingest-drops.js";
 import { ClickHouseStore } from "./clickhouse.js";
 import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
@@ -17,8 +32,8 @@ import {
 	promotionRollups,
 } from "./log-promotion.js";
 import {
-	browserPayloadSchema,
 	normalizeBrowserPayload,
+	parseBrowserPayload,
 } from "./normalize-browser.js";
 import {
 	normalizeMetrics,
@@ -26,10 +41,15 @@ import {
 	type OtlpMetricsRequest,
 	type OtlpTraceRequest,
 } from "./normalize-otlp.js";
-import { decodeMetricsRequest, decodeTraceRequest, decodeLogsRequest } from "./otlp-proto.js";
-import { normalizeLogs, type OtlpLogsRequest } from "./logs.js";
+import { decodeMetricsRequest, decodeTraceRequest, decodeLogsRequest, encodeExportResponse } from "./otlp-proto.js";
+import { MAX_LOG_RECORDS_PER_REQUEST, normalizeLogs, type OtlpLogsRequest } from "./logs.js";
 import { decodeProfile } from "./profiles.js";
-import { normalizeMemoryMetrics, normalizePlatformEvent, platformEventSchema } from "./memory.js";
+import {
+	MAX_MEMORY_SAMPLES_PER_REQUEST,
+	normalizeMemoryMetrics,
+	normalizePlatformEvent,
+	platformEventSchema,
+} from "./memory.js";
 import { SOURCE_MAP_MAX_BODY_BYTES, validateSourceMap, validateSourceMapCheck } from "./source-maps.js";
 import { SinkForwarder } from "./sink.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
@@ -44,6 +64,7 @@ import {
 	ingesterVersion,
 	SdkVersionTracker,
 	sdkSightingsFromOtlp,
+	telemetryVia,
 	type OtlpResourceRequest,
 } from "./sdk-versions.js";
 import type {
@@ -61,6 +82,8 @@ export interface IngesterApp {
 	/** Record this ingester's version + schema level in ClickHouse (for the
 	 * Autter dashboard). Called after the boot schema warm-up; throttled. */
 	reportIngesterInfo: () => Promise<void>;
+	/** Rejection and drop counts per tenant (runtime_ingest_drops); `stop()` writes what is buffered. */
+	drops: IngestDropCounter;
 }
 
 /** The only routes an upload key (`autter_rtu_…`, scope "upload") may call. */
@@ -77,6 +100,21 @@ export const UPLOAD_KEY_NOT_ALLOWED = {
 /** What an authenticated route accepts: "otlp" (server keys), "browser"
  * (server and client keys), "sourcemaps" (server and upload keys). */
 type Surface = "otlp" | "browser" | "sourcemaps";
+
+/** The OTLP export routes, which take JSON or protobuf and answer with a partial success. */
+type OtlpSignal = "traces" | "logs" | "metrics";
+
+/** Express 4 drops a rejected handler promise: hand it to the error handler instead of crashing the process. */
+function asyncRoute(
+	handler: (req: Request, res: Response, next: NextFunction) => Promise<void>,
+): (req: Request, res: Response, next: NextFunction) => void {
+	return (req, res, next) => {
+		handler(req, res, next).catch(next);
+	};
+}
+
+/** Spans one traces request may carry (normalizeTraces' MAX_SPANS_PER_REQUEST). */
+const SPANS_PER_REQUEST = 5000;
 
 /** Re-report the ingester version at most this often (keeps the row inside
  * its TTL for long-running ingesters). */
@@ -103,6 +141,20 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	const promotionLookupLimiter = new RateLimiter(config.promotionLookupsPerMinute ?? 30);
 	const version = ingesterVersion();
 	const sdkVersions = new SdkVersionTracker((ctx, rows) => store.insertSdkVersions(ctx, rows));
+	// What was refused or not stored, per tenant and minute (EI-27). Written
+	// in batches every few seconds, bounded, never retried: it can't slow
+	// or fail ingest. Without ClickHouse there is nowhere to count.
+	const drops = new IngestDropCounter((rows) => store.insertIngestDrops(rows), { enabled: store.configured });
+	drops.start();
+	if (sink) {
+		sink.onDrop = (drop) =>
+			drops.record({
+				tenant: { orgId: drop.orgId, repositoryId: drop.repositoryId },
+				route: "sink",
+				reason: drop.reason,
+				records: drop.occurrences,
+			});
+	}
 	const allMigrationIds = MIGRATIONS.map((migration) => migration.id);
 	const compatReport = () => {
 		const schema = store.schemaStatus();
@@ -131,9 +183,67 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		}
 	}
 	/** Fire-and-forget after a successful ingest: never delays or fails it. */
-	function recordSdks(ctx: IngestContext, request: unknown): void {
-		void sdkVersions.observe(ctx, sdkSightingsFromOtlp(request as OtlpResourceRequest));
+	function recordSdks(ctx: IngestContext, request: unknown, req: Request): void {
+		void sdkVersions.observe(
+			ctx,
+			sdkSightingsFromOtlp(request as OtlpResourceRequest, { userAgent: req.headers["user-agent"] ?? null }),
+		);
 		void reportIngesterInfo();
+	}
+
+	/**
+	 * Answer a refusal and count it. The response is written first; then the
+	 * records in the body are counted (a walk of the parsed JSON, or a
+	 * wire-format scan of protobuf: never a decode).
+	 */
+	function refuse(
+		req: Request,
+		res: Response,
+		who: IngestContext | { keyHash: string } | null,
+		reason: DropReason,
+		status: number,
+		body: unknown,
+		records?: number,
+	): void {
+		res.status(status).json(body);
+		const route = dropRoute(req.path);
+		drops.record({
+			tenant: who && "orgId" in who ? who : null,
+			...(who && "keyHash" in who ? { keyHash: who.keyHash } : {}),
+			route,
+			reason,
+			status,
+			records: records ?? recordsInBody(route, req.body, Boolean(req.is("application/x-protobuf"))),
+		});
+	}
+
+	/**
+	 * Count a refusal made before any route ran (body-parser errors, unknown
+	 * routes): resolve the key in the background to find the tenant. Never
+	 * delays the response, never throws.
+	 */
+	function countUnrouted(req: Request, reason: DropReason, status: number): void {
+		if (!store.configured) return;
+		const route = dropRoute(req.path);
+		const records = recordsInBody(route, req.body, Boolean(req.is("application/x-protobuf")));
+		const key = keys.extractKey(req);
+		if (!key) {
+			drops.record({ tenant: null, route, reason, status, records });
+			return;
+		}
+		keys
+			.resolveDetailed(key)
+			.then((resolution) =>
+				drops.record({
+					tenant: resolution.ctx,
+					...(resolution.ctx ? {} : { keyHash: autterKeyHash(key) }),
+					route,
+					reason,
+					status,
+					records,
+				}),
+			)
+			.catch(() => {});
 	}
 
 	const app = express();
@@ -153,23 +263,34 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	// parse one. body-parser inflates gzip/deflate and applies the limit to
 	// the inflated bytes, so a small compressed body can't expand past it.
 	const sourceMapBody = express.json({ limit: SOURCE_MAP_MAX_BODY_BYTES });
-	app.post("/v1/sourcemaps", async (req, res, next) => {
+	app.post("/v1/sourcemaps", asyncRoute(async (req, res, next) => {
 		// On failure the body is never read (Node discards it).
 		const ctx = await authenticate(req, res, "sourcemaps");
 		if (!ctx) return;
-		sourceMapBody(req, res, async (err?: unknown) => {
+		sourceMapBody(req, res, (err?: unknown) => {
 			if (err) {
+				// 413 / bad JSON: the error handler answers and counts it.
 				next(err);
 				return;
 			}
-			const sourceMap = validateSourceMap(req.body);
-			if (!sourceMap) { res.status(400).json({ error: "invalid source map" }); return; }
-			// Idempotent: the same release + path replaces the earlier row
-			// (ReplacingMergeTree), so CI retries and re-runs are harmless.
-			try { await store.insertSourceMap(ctx, sourceMap); res.status(202).json({ accepted: true }); }
-			catch (storeErr) { storageError(res, storeErr); }
+			void (async () => {
+				const sourceMap = validateSourceMap(req.body);
+				if (!sourceMap) {
+					refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid source map" });
+					return;
+				}
+				// Idempotent: the same release + path replaces the earlier row
+				// (ReplacingMergeTree), so CI retries and re-runs are harmless.
+				try {
+					await store.insertSourceMap(ctx, sourceMap);
+				} catch (storeErr) {
+					storageError(req, res, ctx, storeErr);
+					return;
+				}
+				res.status(202).json({ accepted: true });
+			})().catch(next);
 		});
-	});
+	}));
 	app.use(
 		express.json({
 			limit: config.maxBodyBytes,
@@ -275,33 +396,37 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		surface: Surface,
 	): Promise<IngestContext | null> {
 		// A storage-less ingester must refuse, not accept-and-drop: exporters
-		// retry on 503, so telemetry survives a misconfigured deploy.
+		// retry on 503, so telemetry survives a misconfigured deploy. Not
+		// counted: without ClickHouse there is nowhere to count it.
 		if (!store.configured) {
 			res.status(503).json({ error: "storage not configured" });
 			return null;
 		}
 		const key = keys.extractKey(req);
 		if (!key) {
-			res.status(401).json({ error: "missing ingest key" });
+			refuse(req, res, null, "missing_key", 401, { error: "missing ingest key" });
 			return null;
 		}
-		const ctx = await keys.resolve(key);
+		const resolution = await keys.resolveDetailed(key);
+		const ctx = resolution.ctx;
 		if (!ctx) {
-			res.status(401).json({ error: "invalid ingest key" });
+			// No tenant: counted against the null tenant, with the key's hash
+			// when it is an Autter key (ingest-drops.ts autterKeyHash).
+			refuse(req, res, { keyHash: autterKeyHash(key) }, resolution.failure, 401, { error: "invalid ingest key" });
 			return null;
 		}
 		if (ctx.scope === "upload") {
 			// CI keys: source map upload and check only. Server rate window
 			// (each key has its own).
 			if (surface !== "sourcemaps") {
-				res.status(403).json(UPLOAD_KEY_NOT_ALLOWED);
+				refuse(req, res, ctx, "upload_key_not_allowed", 403, UPLOAD_KEY_NOT_ALLOWED);
 				return null;
 			}
 		} else if (ctx.scope === "client") {
 			// Publishable keys: browser surface only, origin allow-list, and
 			// the tighter rate window.
 			if (surface !== "browser") {
-				res.status(403).json({
+				refuse(req, res, ctx, "client_key_not_allowed", 403, {
 					error:
 						surface === "sourcemaps"
 							? "client keys cannot upload source maps — use an upload key (autter_rtu_…) or a server key"
@@ -314,22 +439,22 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				ctx.allowedOrigins.length > 0 &&
 				(!origin || !ctx.allowedOrigins.includes(origin))
 			) {
-				res.status(403).json({ error: "origin not allowed for this key" });
+				refuse(req, res, ctx, "origin_not_allowed", 403, { error: "origin not allowed for this key" });
 				return null;
 			}
 			if (!clientRateLimiter.allow(key)) {
-				res.status(429).json({ error: "rate limit exceeded" });
+				refuse(req, res, ctx, "rate_limited", 429, { error: "rate limit exceeded" });
 				return null;
 			}
 			return ctx;
 		} else if (ctx.scope !== "server") {
 			// KeyResolver never yields another scope; refuse rather than
 			// treat an unknown one as a server key.
-			res.status(403).json({ error: "key scope not allowed" });
+			refuse(req, res, ctx, "key_scope_not_allowed", 403, { error: "key scope not allowed" });
 			return null;
 		}
 		if (!serverRateLimiter.allow(key)) {
-			res.status(429).json({ error: "rate limit exceeded" });
+			refuse(req, res, ctx, "rate_limited", 429, { error: "rate limit exceeded" });
 			return null;
 		}
 		return ctx;
@@ -442,26 +567,59 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		return fingerprinted.filter((o) => !o.traceId || !seen.has(o.traceId));
 	}
 
-	function storageError(res: Response, err: unknown): void {
+	function storageError(req: Request, res: Response, ctx: IngestContext, err: unknown, records?: number): void {
 		console.error("clickhouse write failed:", err);
-		res.status(503).json({ error: "storage unavailable, retry later" });
+		refuse(req, res, ctx, "storage_unavailable", 503, { error: "storage unavailable, retry later" }, records);
 	}
 
-	/** OTLP success responses mirror the request encoding: an empty
-	 * protobuf message body for proto clients, JSON otherwise. */
-	function otlpSuccess(req: Request, res: Response): void {
+	/**
+	 * OTLP/HTTP is JSON or protobuf; anything else gets a 415 (OTLP spec)
+	 * instead of an empty success that stores nothing. A request with no
+	 * body at all is an empty export, not a wrong type.
+	 */
+	function unsupportedOtlpBody(req: Request): boolean {
+		const match = req.is(["application/json", "application/x-protobuf"]);
+		return match === false && req.headers["content-length"] !== "0";
+	}
+
+	const UNSUPPORTED_OTLP = { error: "expected application/json or application/x-protobuf" } as const;
+
+	/** Count what an accepted request did not store, or stored cut. */
+	function countAccepted(
+		ctx: IngestContext,
+		req: Request,
+		parts: Array<{ reason: DropReason; records: number }>,
+	): void {
+		const route = dropRoute(req.path);
+		for (const part of parts) {
+			if (part.records > 0) drops.record({ tenant: ctx, route, reason: part.reason, records: part.records });
+		}
+	}
+
+	/**
+	 * OTLP success responses mirror the request encoding: protobuf for proto
+	 * clients (an empty message when everything was accepted), JSON
+	 * otherwise. When some records were not stored, `partial_success` names
+	 * how many and why (OTLP spec), so collectors and SDKs log it.
+	 */
+	function otlpSuccess(req: Request, res: Response, signal: OtlpSignal, partial: PartialSuccess | null): void {
 		if (req.is("application/x-protobuf")) {
-			res.status(200).type("application/x-protobuf").end();
+			res.status(200).type("application/x-protobuf").end(Buffer.from(encodeExportResponse(partial)));
 			return;
 		}
-		res.status(200).json({ partialSuccess: {} });
+		const rejectedField =
+			signal === "traces" ? "rejectedSpans" : signal === "logs" ? "rejectedLogRecords" : "rejectedDataPoints";
+		// int64 is a decimal string in proto3 JSON; OTLP decoders take both.
+		res.status(200).json({
+			partialSuccess: partial ? { [rejectedField]: String(partial.rejected), errorMessage: partial.errorMessage } : {},
+		});
 	}
 
-	app.post("/v1/profiles", async (req, res) => {
+	app.post("/v1/profiles", asyncRoute(async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
 		if (!req.is("application/x-pprof") || !Buffer.isBuffer(req.body)) {
-			res.status(415).json({ error: "expected application/x-pprof" });
+			refuse(req, res, ctx, "unsupported_media_type", 415, { error: "expected application/x-pprof" });
 			return;
 		}
 		const service = req.header("x-autter-service")?.trim() ?? "";
@@ -470,62 +628,102 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		const traceId = req.header("x-autter-trace-id")?.trim() ?? "";
 		const instanceId = req.header("x-autter-instance-id")?.trim() ?? "";
 		if (!/^[a-zA-Z0-9._-]{1,200}$/.test(service) || environment.length > 100 || release.length > 200 || instanceId.length > 128 || (traceId && !/^[a-f0-9]{32}$/.test(traceId))) {
-			res.status(400).json({ error: "invalid profile metadata" });
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid profile metadata" });
 			return;
 		}
 		let samples;
+		const stats = { overLimit: 0 };
 		try {
-			samples = decodeProfile(req.body, { service, environment, release, traceId, instanceId });
+			samples = decodeProfile(req.body, { service, environment, release, traceId, instanceId }, stats);
 			if (!samples.length) throw new Error("empty profile");
 		} catch {
-			res.status(400).json({ error: "invalid or unsymbolized profile" });
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid or unsymbolized profile" });
 			return;
 		}
 		try {
 			await store.insertProfileSamples(ctx, samples);
-			res.status(202).json({ profileId: samples[0]!.profileId, samples: samples.length });
-		} catch (err) { storageError(res, err); }
-	});
+		} catch (err) {
+			storageError(req, res, ctx, err, samples.length + stats.overLimit);
+			return;
+		}
+		res.status(202).json({ profileId: samples[0]!.profileId, samples: samples.length });
+		countAccepted(ctx, req, [{ reason: "profile_samples_over_limit", records: stats.overLimit }]);
+	}));
 
 	/** Which of these maps does this tenant already have? Lets
 	 * `autter-runtime sourcemaps upload` skip unchanged maps (1.6.0+). */
-	app.post("/v1/sourcemaps/check", async (req, res) => {
+	app.post("/v1/sourcemaps/check", asyncRoute(async (req, res) => {
 		const ctx = await authenticate(req, res, "sourcemaps");
 		if (!ctx) return;
 		const check = validateSourceMapCheck(req.body);
-		if (!check) { res.status(400).json({ error: "invalid source map check" }); return; }
-		try { res.status(200).json({ present: await store.sourceMapsPresent(ctx, check) }); }
-		catch (err) { storageError(res, err); }
-	});
+		if (!check) {
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid source map check" });
+			return;
+		}
+		let present: number[];
+		try {
+			present = await store.sourceMapsPresent(ctx, check);
+		} catch (err) {
+			storageError(req, res, ctx, err);
+			return;
+		}
+		res.status(200).json({ present });
+	}));
 
 	/** ECS/Kubernetes event forwarders use the same server key as OTLP. */
-	app.post("/v1/platform-events", async (req, res) => {
+	app.post("/v1/platform-events", asyncRoute(async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
 		const parsed = platformEventSchema.safeParse(req.body);
-		if (!parsed.success) { res.status(400).json({ error: "invalid platform event" }); return; }
+		if (!parsed.success) {
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid platform event" });
+			return;
+		}
 		const event = normalizePlatformEvent(parsed.data);
-		if (!event) { res.status(400).json({ error: "event timestamp outside retention window" }); return; }
-		try { await store.insertPlatformEvent(ctx, event); res.status(202).json({ accepted: true }); }
-		catch (err) { storageError(res, err); }
-	});
+		if (!event) {
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "event timestamp outside retention window" });
+			return;
+		}
+		try {
+			await store.insertPlatformEvent(ctx, event);
+		} catch (err) {
+			storageError(req, res, ctx, err);
+			return;
+		}
+		res.status(202).json({ accepted: true });
+	}));
 
-	app.post("/v1/traces", async (req, res) => {
+	app.post("/v1/traces", asyncRoute(async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
+		if (unsupportedOtlpBody(req)) {
+			refuse(req, res, ctx, "unsupported_media_type", 415, UNSUPPORTED_OTLP);
+			return;
+		}
 		let request: OtlpTraceRequest;
 		if (req.is("application/x-protobuf")) {
 			try {
 				request = decodeTraceRequest(req.body as Buffer);
 			} catch {
-				res.status(400).json({ error: "invalid protobuf payload" });
+				refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid protobuf payload" });
 				return;
 			}
 		} else {
 			request = req.body as OtlpTraceRequest;
 		}
-		const { occurrences, occurrenceBatchIndexes, spans, metricPoints, llmCalls } =
-			normalizeTraces(request);
+		const totalSpans = spansInRequest(request);
+		let normalized: ReturnType<typeof normalizeTraces>;
+		let truncated: number;
+		try {
+			({ result: normalized, truncated } = countTruncations(() => normalizeTraces(request)));
+		} catch {
+			// A value the normaliser can't read (a timestamp that is not an
+			// integer, a list that is not one): before 1.8.0 this threw out of
+			// the handler, an unhandled rejection that stopped the process.
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid OTLP traces payload" }, totalSpans);
+			return;
+		}
+		const { occurrences, occurrenceBatchIndexes, spans, metricPoints, llmCalls } = normalized;
 		const fingerprinted = await fingerprintAll(ctx, occurrences, occurrenceBatchIndexes);
 		// ClickHouse has no cross-table transaction, so these four inserts can
 		// partially commit. Recovery boundary: any failure → 503 → the exporter
@@ -543,24 +741,40 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				store.insertLlmCalls(ctx, llmCalls),
 			]);
 		} catch (err) {
-			storageError(res, err);
+			storageError(req, res, ctx, err, totalSpans);
 			return;
 		}
 		sink?.enqueue(ctx, fingerprinted, metricPoints, llmCalls);
-		recordSdks(ctx, request);
-		otlpSuccess(req, res);
-	});
+		recordSdks(ctx, request, req);
+		// normalizeTraces stops at SPANS_PER_REQUEST; the rest were not read.
+		const overLimit = Math.max(0, totalSpans - normalized.spanCount);
+		otlpSuccess(req, res, "traces", partialSuccess([
+			{ rejected: overLimit, message: PARTIAL_MESSAGES.spans(overLimit, SPANS_PER_REQUEST) },
+		]));
+		countAccepted(ctx, req, [
+			{ reason: "spans_over_limit", records: overLimit },
+			{ reason: "attributes_truncated", records: truncated },
+		]);
+	}));
 
-	app.post("/v1/logs", async (req, res) => {
+	app.post("/v1/logs", asyncRoute(async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
-		let logs;
+		if (unsupportedOtlpBody(req)) {
+			refuse(req, res, ctx, "unsupported_media_type", 415, UNSUPPORTED_OTLP);
+			return;
+		}
+		let logs: ReturnType<typeof normalizeLogs>;
 		let logsRequest: OtlpLogsRequest;
+		let truncated: number;
+		const stats = { overLimit: 0 };
 		try {
 			logsRequest = req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest;
-			logs = normalizeLogs(logsRequest);
+			({ result: logs, truncated } = countTruncations(() => normalizeLogs(logsRequest, stats)));
+		} catch {
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid OTLP logs payload" });
+			return;
 		}
-		catch { res.status(400).json({ error: "invalid OTLP logs payload" }); return; }
 		// Logs are diagnostic evidence; exceptions and failed outcomes normally
 		// reach grouping through the trace path. The exception: logger-only /
 		// edge SDKs mark span-less error records `autter.capture.mode = "log"`,
@@ -573,43 +787,82 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				store.insertOccurrences(ctx, promoted),
 				store.insertMetricPoints(ctx, metricPoints),
 			]);
+		} catch (err) {
+			storageError(req, res, ctx, err, logs.length + stats.overLimit);
+			return;
 		}
-		catch (err) { storageError(res, err); return; }
 		sink?.enqueue(ctx, promoted, metricPoints);
-		recordSdks(ctx, logsRequest);
-		otlpSuccess(req, res);
-	});
+		recordSdks(ctx, logsRequest, req);
+		otlpSuccess(req, res, "logs", partialSuccess([
+			{ rejected: stats.overLimit, message: PARTIAL_MESSAGES.logRecords(stats.overLimit, MAX_LOG_RECORDS_PER_REQUEST) },
+		]));
+		countAccepted(ctx, req, [
+			{ reason: "log_records_over_limit", records: stats.overLimit },
+			{ reason: "attributes_truncated", records: truncated },
+		]);
+	}));
 
-	app.post("/v1/metrics", async (req, res) => {
+	app.post("/v1/metrics", asyncRoute(async (req, res) => {
 		const ctx = await authenticate(req, res, "otlp");
 		if (!ctx) return;
+		if (unsupportedOtlpBody(req)) {
+			refuse(req, res, ctx, "unsupported_media_type", 415, UNSUPPORTED_OTLP);
+			return;
+		}
 		let request: OtlpMetricsRequest;
 		if (req.is("application/x-protobuf")) {
 			try {
 				request = decodeMetricsRequest(req.body as Buffer);
 			} catch {
-				res.status(400).json({ error: "invalid protobuf payload" });
+				refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid protobuf payload" });
 				return;
 			}
 		} else {
 			request = req.body as OtlpMetricsRequest;
 		}
-		const metricPoints = normalizeMetrics(request);
-		const memorySamples = normalizeMemoryMetrics(request);
+		const memoryStats = { invalid: 0, overLimit: 0 };
+		let metricPoints: ReturnType<typeof normalizeMetrics>;
+		let memorySamples: ReturnType<typeof normalizeMemoryMetrics>;
+		let latency: ReturnType<typeof normalizeLatencyHistograms>;
+		let cumulative: number;
 		try {
-			await store.insertLatencyHistograms(ctx, normalizeLatencyHistograms(request));
+			metricPoints = normalizeMetrics(request);
+			memorySamples = normalizeMemoryMetrics(request, memoryStats);
+			latency = normalizeLatencyHistograms(request);
+			cumulative = cumulativeHttpHistogramPoints(request);
+		} catch {
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid OTLP metrics payload" }, dataPointsInRequest(request));
+			return;
+		}
+		try {
+			await store.insertLatencyHistograms(ctx, latency);
 			await store.insertMetricPoints(ctx, metricPoints);
 			await store.insertMemorySamples(ctx, memorySamples);
 		} catch (err) {
-			storageError(res, err);
+			storageError(req, res, ctx, err, dataPointsInRequest(request));
 			return;
 		}
 		sink?.enqueue(ctx, [], metricPoints);
-		recordSdks(ctx, request);
-		otlpSuccess(req, res);
-	});
+		recordSdks(ctx, request, req);
+		// Metrics the ingester has no use for (anything but HTTP server
+		// duration histograms and the memory/GC instruments) are ignored,
+		// not rejected: they are neither answered nor counted.
+		otlpSuccess(req, res, "metrics", partialSuccess([
+			{ rejected: cumulative, message: PARTIAL_MESSAGES.cumulative(cumulative) },
+			{ rejected: memoryStats.invalid, message: PARTIAL_MESSAGES.memoryInvalid(memoryStats.invalid) },
+			{
+				rejected: memoryStats.overLimit,
+				message: PARTIAL_MESSAGES.memoryOverLimit(memoryStats.overLimit, MAX_MEMORY_SAMPLES_PER_REQUEST),
+			},
+		]));
+		countAccepted(ctx, req, [
+			{ reason: "cumulative_histogram", records: cumulative },
+			{ reason: "memory_point_invalid", records: memoryStats.invalid },
+			{ reason: "memory_points_over_limit", records: memoryStats.overLimit },
+		]);
+	}));
 
-	app.post("/v1/browser", async (req, res) => {
+	app.post("/v1/browser", asyncRoute(async (req, res) => {
 		const ctx = await authenticate(req, res, "browser");
 		if (!ctx) return;
 		let body: unknown = req.body;
@@ -618,19 +871,35 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			try {
 				body = JSON.parse(body);
 			} catch {
-				res.status(400).json({ error: "invalid json" });
+				refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid json" }, 0);
 				return;
 			}
 		}
-		const parsed = browserPayloadSchema.safeParse(body);
+		// The envelope must be valid; each event is validated on its own and
+		// an invalid one is dropped and counted (1.8.0), not the whole beacon.
+		const parsed = parseBrowserPayload(body);
 		if (!parsed.success) {
-			res.status(400).json({
-				error: "invalid payload",
-				issues: parsed.error.issues.slice(0, 5),
-			});
+			refuse(
+				req,
+				res,
+				ctx,
+				"invalid_payload",
+				400,
+				{ error: "invalid payload", issues: parsed.issues },
+				recordsInBody("/v1/browser", body, false),
+			);
 			return;
 		}
-		const { occurrences, metricPoints } = normalizeBrowserPayload(parsed.data);
+		const { payload, invalidEvents, overLimitEvents, issues } = parsed.data;
+		let normalized: ReturnType<typeof normalizeBrowserPayload>;
+		let truncated: number;
+		try {
+			({ result: normalized, truncated } = countTruncations(() => normalizeBrowserPayload(payload)));
+		} catch {
+			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid payload" }, recordsInBody("/v1/browser", body, false));
+			return;
+		}
+		const { occurrences, metricPoints } = normalized;
 		const fingerprinted = await fingerprintAll(ctx, occurrences);
 		try {
 			await Promise.all([
@@ -638,44 +907,68 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				store.insertMetricPoints(ctx, metricPoints),
 			]);
 		} catch (err) {
-			storageError(res, err);
+			storageError(req, res, ctx, err, payload.events.length + invalidEvents + overLimitEvents);
 			return;
 		}
 		sink?.enqueue(ctx, fingerprinted, metricPoints);
-		if (parsed.data.sdk) {
+		if (payload.sdk) {
 			void sdkVersions.observe(ctx, [{
-				service: parsed.data.service,
-				environment: parsed.data.environment,
+				service: payload.service,
+				environment: payload.environment,
 				sdkName: BROWSER_SDK_NAME,
-				sdkVersion: parsed.data.sdk,
+				sdkVersion: payload.sdk,
 				sdkLanguage: "webjs",
+				via: telemetryVia({ userAgent: req.headers["user-agent"] ?? null, browserKeyScope: ctx.scope }),
 			}]);
 		}
 		void reportIngesterInfo();
-		res.status(202).json({ accepted: fingerprinted.length });
+		const rejected = invalidEvents + overLimitEvents;
+		res.status(202).json({ accepted: fingerprinted.length, ...(rejected > 0 ? { rejected, issues } : {}) });
+		countAccepted(ctx, req, [
+			{ reason: "invalid_event", records: invalidEvents },
+			{ reason: "events_over_limit", records: overLimitEvents },
+			{ reason: "attributes_truncated", records: truncated },
+		]);
+	}));
+
+	// A POST to a path nobody serves (a collector endpoint with /v1/traces
+	// twice, an exporter on the wrong base path): counted, then Express's
+	// usual 404.
+	app.use((req: Request, _res: Response, next: NextFunction) => {
+		if (req.method === "POST") countUnrouted(req, "unknown_route", 404);
+		next();
 	});
 
 	// Body-parser errors (oversized/malformed JSON) → clean 4xx, not a stack.
+	// They happen before any route ran, so the tenant is resolved in the
+	// background to count them.
 	app.use(
 		(
 			err: Error & { type?: string; status?: number },
-			_req: Request,
+			req: Request,
 			res: Response,
 			next: (err?: Error) => void,
 		) => {
 			if (res.headersSent) return next(err);
 			if (err.type === "entity.too.large") {
 				res.status(413).json({ error: "payload too large" });
+				countUnrouted(req, "payload_too_large", 413);
 				return;
 			}
 			if (err.status && err.status < 500) {
 				res.status(err.status).json({ error: "bad request" });
+				countUnrouted(
+					req,
+					err.status === 415 ? "unsupported_media_type" : err.type === "request.aborted" ? "request_aborted" : "invalid_payload",
+					err.status,
+				);
 				return;
 			}
 			console.error("unhandled error:", err);
 			res.status(500).json({ error: "internal error" });
+			countUnrouted(req, "internal_error", 500);
 		},
 	);
 
-	return { app, store, sink, reportIngesterInfo };
+	return { app, store, sink, reportIngesterInfo, drops };
 }

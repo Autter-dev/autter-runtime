@@ -46,9 +46,12 @@ export function profileTableDDL(db: string): string {
 	TTL toDateTime(observed_at) + INTERVAL 7 DAY`;
 }
 
+/** Samples kept per profile; the rest are dropped and counted (profile_samples_over_limit). */
+export const MAX_PROFILE_SAMPLES = 1000;
+
 export function decodeProfile(body: Buffer, meta: {
 	service: string; environment: string; release: string; traceId: string; instanceId: string;
-}): ProfileSample[] {
+}, stats?: { overLimit: number }): ProfileSample[] {
 	if (body.length === 0 || body.length > 1024 * 1024) throw new Error("invalid profile size");
 	const payload = body[0] === 0x1f && body[1] === 0x8b
 		? gunzipSync(body, { maxOutputLength: 1024 * 1024 }) : body;
@@ -69,7 +72,8 @@ export function decodeProfile(body: Buffer, meta: {
 	const observedAt = observedMs > 0 && observedMs <= Date.now() + 300_000 ? new Date(observedMs) : new Date();
 	const profileId = createHash("sha256").update(body).digest("hex").slice(0, 32);
 	const samples: ProfileSample[] = [];
-	for (const [sampleIndex, sample] of (profile.sample ?? []).slice(0, 1000).entries()) {
+	if (stats) stats.overLimit += Math.max(0, (profile.sample ?? []).length - MAX_PROFILE_SAMPLES);
+	for (const [sampleIndex, sample] of (profile.sample ?? []).slice(0, MAX_PROFILE_SAMPLES).entries()) {
 		const stack = (sample.locationId ?? []).slice(0, 64).flatMap((id) => {
 			const locLine = locations.get(id)?.line?.[0];
 			const fn = locLine?.functionId ? functions.get(locLine.functionId) : undefined;

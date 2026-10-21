@@ -14,9 +14,16 @@ import type { IngestContext } from "./types.js";
  *   `opentelemetry-<language>`;
  * - browser payloads: the `sdk` field sent by `@autter/runtime-browser`.
  *
+ * And how the telemetry arrived (`via`, 1.8.0): `collector` when an
+ * OpenTelemetry Collector (or a similar agent) forwarded it, `direct` when
+ * an SDK exporter sent it straight to the ingester, `relay` for browser
+ * payloads forwarded by a server-side relay; '' when it can't be told. So
+ * an Autter SDK behind a collector keeps its own name and is still seen as
+ * collector-fed. See `telemetryVia`.
+ *
  * Writes are deduplicated in memory: one row per (tenant, service,
- * environment, sdk, version) per `refreshMs`, bounded map, fire-and-forget —
- * a failed write is logged and never fails ingest.
+ * environment, sdk, version, via) per `refreshMs`, bounded map,
+ * fire-and-forget — a failed write is logged and never fails ingest.
  */
 
 let cachedVersion: string | null = null;
@@ -39,6 +46,44 @@ export interface SdkSighting {
 	sdkName: string;
 	sdkVersion: string;
 	sdkLanguage: string;
+	/** How it arrived (telemetryVia); '' when unknown. */
+	via: TelemetryVia;
+}
+
+/**
+ * How telemetry reached the ingester:
+ * - `collector`: forwarded by an OpenTelemetry Collector or a similar agent —
+ *   its User-Agent says so (any collector distribution: "OpenTelemetry
+ *   Collector Contrib/0.120.0 (linux/amd64)", ADOT's "AWS OTel Collector",
+ *   `otelcol-*` builds, Grafana Alloy / Agent, Fluent Bit, Vector), or the
+ *   resource's `telemetry.distro.name` is an otelcol build (the Autter
+ *   collector config inserts `otelcol-contrib` for senders that set none);
+ * - `direct`: an SDK exporter sent it itself (the `OTel-OTLP-Exporter-<lang>`
+ *   or Go `OTel Go OTLP …` User-Agent, or an Autter SDK's distro without a
+ *   collector User-Agent); browser events sent with a client key;
+ * - `relay`: browser events forwarded with a server key (the Autter relay);
+ * - '': nothing tells (another User-Agent, or none).
+ */
+export type TelemetryVia = "collector" | "direct" | "relay" | "";
+
+const COLLECTOR_AGENT_RE =
+	/(?:open[ -]?telemetry|\botel)[ -]?collector|^otelcol|^(?:grafana[ -])?alloy\/|grafana[ -]?agent|^fluent[ -]?bit|^vector\//i;
+const COLLECTOR_DISTRO_RE = /^otelcol(?:\b|[-_])|opentelemetry[-_ ]collector/i;
+const SDK_EXPORTER_AGENT_RE = /^OTel[- ]OTLP[- ]Exporter|^OTel \w+ OTLP/i;
+
+export function telemetryVia(input: {
+	userAgent?: string | null;
+	/** The resource's `telemetry.distro.name`, when it has one. */
+	distroName?: string | null;
+	/** The browser route: decided by the key (client key = the browser itself). */
+	browserKeyScope?: "server" | "client" | "upload" | null;
+}): TelemetryVia {
+	const agent = (input.userAgent ?? "").trim().slice(0, 300);
+	const distro = (input.distroName ?? "").trim();
+	if (COLLECTOR_AGENT_RE.test(agent) || COLLECTOR_DISTRO_RE.test(distro)) return "collector";
+	if (input.browserKeyScope) return input.browserKeyScope === "client" ? "direct" : "relay";
+	if (SDK_EXPORTER_AGENT_RE.test(agent) || distro.startsWith("@autter/")) return "direct";
+	return "";
 }
 
 interface KeyValue {
@@ -61,8 +106,16 @@ function clean(value: string | undefined, max = 100): string {
 	return CLEAN.test(trimmed) ? trimmed : "";
 }
 
-/** SDK identity per OTLP resource. Reads only a handful of resource keys. */
-export function sdkSightingsFromOtlp(request: OtlpResourceRequest | null | undefined): SdkSighting[] {
+/**
+ * SDK identity per OTLP resource. Reads only a handful of resource keys.
+ * A resource with no SDK identity that came through a collector is still
+ * a sighting (empty name and version, `via: "collector"`), so a service fed
+ * by a collector receiver with no SDK (Prometheus, file logs) is seen too.
+ */
+export function sdkSightingsFromOtlp(
+	request: OtlpResourceRequest | null | undefined,
+	transport: { userAgent?: string | null } = {},
+): SdkSighting[] {
 	if (!request || typeof request !== "object") return [];
 	const holders = [
 		...(Array.isArray(request.resourceSpans) ? request.resourceSpans : []),
@@ -82,13 +135,19 @@ export function sdkSightingsFromOtlp(request: OtlpResourceRequest | null | undef
 		const service = clean(get["service.name"], 200);
 		if (!service) continue;
 		const language = clean(get["telemetry.sdk.language"]);
-		let sdkName = clean(get["telemetry.distro.name"]);
+		const distroName = clean(get["telemetry.distro.name"]);
+		let sdkName = distroName;
 		let sdkVersion = clean(get["telemetry.distro.version"]);
 		if (!sdkName || !sdkVersion) {
 			sdkVersion = clean(get["telemetry.sdk.version"]);
 			sdkName = sdkVersion ? `opentelemetry-${language || "unknown"}` : "";
 		}
-		if (!sdkName || !sdkVersion) continue;
+		const via = telemetryVia({ userAgent: transport.userAgent, distroName });
+		if (!sdkName || !sdkVersion) {
+			if (via !== "collector") continue;
+			sdkName = "";
+			sdkVersion = "";
+		}
 		out.push({
 			service,
 			environment:
@@ -98,6 +157,7 @@ export function sdkSightingsFromOtlp(request: OtlpResourceRequest | null | undef
 			sdkName,
 			sdkVersion,
 			sdkLanguage: language,
+			via,
 		});
 	}
 	return out;
@@ -159,6 +219,7 @@ export class SdkVersionTracker {
 				sighting.environment,
 				sighting.sdkName,
 				sighting.sdkVersion,
+				sighting.via,
 			].join("\u0000");
 			const last = this.lastWritten.get(key);
 			if (last !== undefined && now - last < this.refreshMs) continue;
@@ -177,12 +238,20 @@ export class SdkVersionTracker {
 	}
 }
 
+/**
+ * Migration 0019 column — shared with the baseline DDL. Not in the sorting
+ * key (that can't change on a deployed table): a service+SDK+version row
+ * says how it arrived most recently.
+ */
+export const SDK_VERSION_VIA_COLUMN = "via LowCardinality(String) DEFAULT ''";
+
 export function sdkVersionTableDDL(db: string, ttlDays = 90): string {
 	return `CREATE TABLE IF NOT EXISTS ${db}.runtime_sdk_versions (
 		org_id String, repository_id String, service LowCardinality(String),
 		environment LowCardinality(String), sdk_name LowCardinality(String),
 		sdk_version String, sdk_language LowCardinality(String) DEFAULT '',
-		ingester_version String DEFAULT '', last_seen DateTime('UTC')
+		ingester_version String DEFAULT '', last_seen DateTime('UTC'),
+		${SDK_VERSION_VIA_COLUMN}
 	) ENGINE = ReplacingMergeTree(last_seen)
 	ORDER BY (org_id, repository_id, service, environment, sdk_name, sdk_version)
 	TTL last_seen + INTERVAL ${ttlDays} DAY`;

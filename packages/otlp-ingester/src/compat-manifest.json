@@ -134,6 +134,27 @@
 			"migrations": ["0017-source-maps-debug-id"],
 			"route": "/v1/sourcemaps/check",
 			"sdks": {}
+		},
+		{
+			"id": "ingest_drop_counts",
+			"title": "Rejected and dropped records per repository",
+			"ingester": "1.8.0",
+			"migrations": ["0018-runtime-ingest-drops"],
+			"sdks": {}
+		},
+		{
+			"id": "telemetry_sender_via",
+			"title": "How each service's telemetry arrives (SDK, OpenTelemetry Collector or browser relay)",
+			"ingester": "1.8.0",
+			"migrations": ["0019-sdk-versions-via"],
+			"sdks": {}
+		},
+		{
+			"id": "frame_resolution_counts",
+			"title": "Resolved and unresolved browser frames per occurrence",
+			"ingester": "1.8.0",
+			"migrations": ["0020-occurrence-frame-resolution"],
+			"sdks": {}
 		}
 	]
 }

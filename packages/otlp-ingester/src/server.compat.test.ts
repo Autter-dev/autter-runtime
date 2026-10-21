@@ -5,7 +5,7 @@ import { test } from "node:test";
 import type { IngesterConfig } from "./config.js";
 import { MIGRATIONS } from "./migrations.js";
 import { createIngesterApp } from "./server.js";
-import { ingesterVersion, SdkVersionTracker, sdkSightingsFromOtlp } from "./sdk-versions.js";
+import { ingesterVersion, SdkVersionTracker, sdkSightingsFromOtlp, telemetryVia } from "./sdk-versions.js";
 
 const listen = async (server: Server) => {
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -143,6 +143,8 @@ test("ingest responses carry the version header; SDK versions are recorded once 
 				org_id: "org-1", repository_id: "repo-1", service: "api", environment: "staging",
 				sdk_name: "@autter/runtime-node", sdk_version: "1.4.0", sdk_language: "nodejs",
 				ingester_version: ingesterVersion(), last_seen: undefined,
+				// An Autter SDK sending with no collector User-Agent: straight to the ingester.
+				via: "direct",
 			},
 		);
 		// The ingester reports its own version once the schema is ready.
@@ -175,7 +177,26 @@ test("ingest responses carry the version header; SDK versions are recorded once 
 		assert.equal(ok.headers.get("access-control-expose-headers"), "x-autter-ingester-version");
 		assert.equal((await browser("<img>")).status, 202);
 		await waitFor(() => ch.inserts.runtime_sdk_versions!.some((row) => row.sdk_name === "@autter/runtime-browser"));
-		assert.equal(ch.inserts.runtime_sdk_versions!.filter((row) => row.sdk_name === "@autter/runtime-browser").length, 1);
+		const browserRows = ch.inserts.runtime_sdk_versions!.filter((row) => row.sdk_name === "@autter/runtime-browser");
+		assert.equal(browserRows.length, 1);
+		// A client key is the browser itself; a server key would be the relay.
+		assert.equal(browserRows[0]!.via, "direct");
+
+		// The same Autter SDK behind an OpenTelemetry Collector: its own name, via the collector.
+		const viaCollector = await fetch(`${url}/v1/traces`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				authorization: "Bearer server",
+				"user-agent": "OpenTelemetry Collector Contrib/0.120.0 (linux/amd64)",
+			},
+			body: JSON.stringify(traces),
+		});
+		assert.equal(viaCollector.status, 200);
+		await waitFor(() => ch.inserts.runtime_sdk_versions!.some((row) => row.via === "collector"));
+		const collectorRow = ch.inserts.runtime_sdk_versions!.find((row) => row.via === "collector")!;
+		assert.equal(collectorRow.sdk_name, "@autter/runtime-node");
+		assert.equal(collectorRow.service, "api");
 	} finally {
 		await close(server);
 		await store.close();
@@ -196,9 +217,64 @@ test("plain OpenTelemetry SDKs are recorded by language; resources without ident
 	});
 	assert.deepEqual(sightings, [{
 		service: "worker", environment: "production", sdkName: "opentelemetry-python",
-		sdkVersion: "1.27.0", sdkLanguage: "python",
+		sdkVersion: "1.27.0", sdkLanguage: "python", via: "",
 	}]);
 	assert.deepEqual(sdkSightingsFromOtlp(null), []);
+});
+
+test("collector detection: User-Agent, telemetry.distro.name, and the browser key", () => {
+	const resource = (...attributes: Array<[string, string]>) => ({
+		resourceSpans: [{ resource: { attributes: attributes.map(([key, value]) => ({ key, value: { stringValue: value } })) } }],
+	});
+	const python = resource(["service.name", "worker"], ["telemetry.sdk.language", "python"], ["telemetry.sdk.version", "1.27.0"]);
+	const autter = resource(
+		["service.name", "api"], ["telemetry.sdk.language", "nodejs"], ["telemetry.sdk.version", "1.30.1"],
+		["telemetry.distro.name", "@autter/runtime-node"], ["telemetry.distro.version", "1.6.0"],
+	);
+	const via = (request: unknown, userAgent?: string) =>
+		sdkSightingsFromOtlp(request as Parameters<typeof sdkSightingsFromOtlp>[0], { userAgent }).map((s) => s.via);
+
+	// SDK exporters straight to the ingester (the spec's OTel-OTLP-Exporter-*, Go's own form).
+	assert.deepEqual(via(python, "OTel-OTLP-Exporter-Python/1.27.0"), ["direct"]);
+	assert.deepEqual(via(python, "OTel Go OTLP over HTTP/protobuf exporter/1.28.0"), ["direct"]);
+	assert.deepEqual(via(autter, "OTel-OTLP-Exporter-JavaScript/0.57.2"), ["direct"]);
+	// An Autter SDK without a recognisable User-Agent is still its own exporter.
+	assert.deepEqual(via(autter, "node"), ["direct"]);
+	assert.deepEqual(via(python, "node"), [""]);
+	assert.deepEqual(via(python), [""]);
+
+	// Collector builds and agents, whatever the SDK behind them: an Autter SDK keeps its name.
+	for (const agent of [
+		"OpenTelemetry Collector Contrib/0.120.0 (linux/amd64)",
+		"OpenTelemetry Collector/0.120.0 (darwin/arm64)",
+		"Custom OpenTelemetry Collector distribution/1.0.0 (linux/amd64)",
+		"AWS OTel Collector/v0.41.1 (linux/amd64)",
+		"otelcol-contrib/0.120.0",
+		"Alloy/v1.4.2 (linux; docker)",
+		"GrafanaAgent/v0.40.0 (static; linux)",
+		"Fluent-Bit",
+		"Vector/0.42.0 (x86_64-unknown-linux-gnu)",
+	]) {
+		assert.deepEqual(via(autter, agent), ["collector"], agent);
+		assert.equal(sdkSightingsFromOtlp(autter, { userAgent: agent })[0]!.sdkName, "@autter/runtime-node", agent);
+	}
+	// The distro name the Autter collector config inserts, with or without its User-Agent.
+	const inserted = resource(
+		["service.name", "billing"], ["telemetry.sdk.language", "go"], ["telemetry.sdk.version", "1.28.0"],
+		["telemetry.distro.name", "otelcol-contrib"], ["telemetry.distro.version", "0.120.0"],
+	);
+	assert.deepEqual(via(inserted), ["collector"]);
+	// No SDK identity at all, but a collector sent it (a Prometheus receiver): still a sighting.
+	const anonymous = resource(["service.name", "node-exporter"]);
+	assert.deepEqual(sdkSightingsFromOtlp(anonymous, { userAgent: "OpenTelemetry Collector Contrib/0.120.0 (linux/amd64)" }), [{
+		service: "node-exporter", environment: "production", sdkName: "", sdkVersion: "", sdkLanguage: "", via: "collector",
+	}]);
+	assert.deepEqual(sdkSightingsFromOtlp(anonymous, { userAgent: "OTel-OTLP-Exporter-Python/1.27.0" }), []);
+
+	// Browser payloads: the key decides, unless a collector forwarded them.
+	assert.equal(telemetryVia({ userAgent: "Mozilla/5.0", browserKeyScope: "client" }), "direct");
+	assert.equal(telemetryVia({ userAgent: "node", browserKeyScope: "server" }), "relay");
+	assert.equal(telemetryVia({ userAgent: "otelcol-contrib/0.120.0", browserKeyScope: "server" }), "collector");
 });
 
 test("SDK tracker refreshes after the window, retries failed writes and never throws", async () => {
@@ -214,7 +290,7 @@ test("SDK tracker refreshes after the window, retries failed writes and never th
 		{ refreshMs: 1000, now: () => now, onError: (err) => errors.push(err) },
 	);
 	const ctx = { orgId: "o", repositoryId: "r", scope: "server" as const, allowedOrigins: [] };
-	const sighting = { service: "s", environment: "e", sdkName: "n", sdkVersion: "1.0.0", sdkLanguage: "" };
+	const sighting = { service: "s", environment: "e", sdkName: "n", sdkVersion: "1.0.0", sdkLanguage: "", via: "" as const };
 	await tracker.observe(ctx, [sighting]);
 	assert.equal(errors.length, 1);
 	fail = false;
@@ -223,4 +299,7 @@ test("SDK tracker refreshes after the window, retries failed writes and never th
 	now = 1500;
 	await tracker.observe(ctx, [sighting]);
 	assert.deepEqual(writes, [1, 1]);
+	// The same SDK arriving another way is a new row, inside the window too.
+	await tracker.observe(ctx, [{ ...sighting, via: "collector" }]);
+	assert.deepEqual(writes, [1, 1, 1]);
 });

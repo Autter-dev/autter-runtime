@@ -18,8 +18,21 @@ import type { IngestContext } from "./types.js";
 
 interface CacheEntry {
 	ctx: IngestContext | null;
+	/** Why `ctx` is null: the validator said no, or could not answer (5xx). */
+	failure?: KeyFailure;
 	expiresAt: number;
 }
+
+/**
+ * Why a key did not resolve: `unknown_key` — not a static key and the
+ * validator did not accept it; `key_unverified` — the validator could not
+ * answer (unreachable, timed out or a 5xx) and no earlier answer was cached.
+ */
+export type KeyFailure = "unknown_key" | "key_unverified";
+
+export type KeyResolution =
+	| { ctx: IngestContext; failure?: undefined }
+	| { ctx: null; failure: KeyFailure };
 
 const VALIDATOR_CACHE_TTL_MS = 60_000;
 
@@ -55,14 +68,20 @@ export class KeyResolver {
 	}
 
 	async resolve(key: string): Promise<IngestContext | null> {
+		return (await this.resolveDetailed(key)).ctx;
+	}
+
+	/** `resolve`, plus why a key that did not resolve failed (for drop counts). */
+	async resolveDetailed(key: string): Promise<KeyResolution> {
 		const staticCtx = this.staticKeys.get(key);
-		if (staticCtx) return staticCtx;
-		if (!this.config.keyValidatorUrl) return null;
+		if (staticCtx) return { ctx: staticCtx };
+		if (!this.config.keyValidatorUrl) return { ctx: null, failure: "unknown_key" };
 
 		const cached = this.cache.get(key);
-		if (cached && cached.expiresAt > Date.now()) return cached.ctx;
+		if (cached && cached.expiresAt > Date.now()) return resolution(cached);
 
 		let ctx: IngestContext | null = null;
+		let failure: KeyFailure = "unknown_key";
 		try {
 			const response = await fetch(this.config.keyValidatorUrl, {
 				method: "POST",
@@ -96,21 +115,28 @@ export class KeyResolver {
 						allowedOrigins: body.allowedOrigins ?? [],
 					};
 				}
+			} else if (response.status >= 500) {
+				failure = "key_unverified";
 			}
 		} catch {
 			// Validator unreachable: fail closed for unknown keys, but reuse a
 			// stale cache entry if we have one so transient validator outages
 			// don't drop telemetry from known-good keys.
-			if (cached) return cached.ctx;
-			return null;
+			if (cached) return resolution(cached);
+			return { ctx: null, failure: "key_unverified" };
 		}
-		this.cache.set(key, { ctx, expiresAt: Date.now() + VALIDATOR_CACHE_TTL_MS });
+		const entry: CacheEntry = { ctx, expiresAt: Date.now() + VALIDATOR_CACHE_TTL_MS, ...(ctx ? {} : { failure }) };
+		this.cache.set(key, entry);
 		if (this.cache.size > 10_000) {
 			const oldest = this.cache.keys().next().value;
 			if (oldest !== undefined) this.cache.delete(oldest);
 		}
-		return ctx;
+		return resolution(entry);
 	}
+}
+
+function resolution(entry: CacheEntry): KeyResolution {
+	return entry.ctx ? { ctx: entry.ctx } : { ctx: null, failure: entry.failure ?? "unknown_key" };
 }
 
 /** Fixed-window per-key rate limiter (single-node; Redis backing is M1). */

@@ -141,11 +141,15 @@ test("a stalled write counts as failed, so counting goes on; one write at a time
 	counter.record({ tenant, route: "/v1/logs", reason: "rate_limited" });
 	assert.equal(counter.flush(), first);
 	assert.equal(counter.stats().buffered, 1);
+	// The stall guard's timer is unref'd (it never keeps the ingester alive), so
+	// hold the event loop open while it runs; Node 22 ends the test otherwise.
+	const hold = setTimeout(() => {}, 1000);
 	await first; // the stall guard settles it
 	assert.equal(counter.stats().failedWrites, 1);
 	await counter.flush();
 	assert.deepEqual(writes, [1, 1]);
 	(release as unknown as () => void)();
+	clearTimeout(hold);
 });
 
 test("the timer writes on its own and stop() writes what is left; a disabled counter keeps nothing", async () => {

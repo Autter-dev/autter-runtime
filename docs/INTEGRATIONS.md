@@ -278,12 +278,15 @@ Errors are always worth sending; keep successful-trace sampling at ~1%
 (`OTEL_TRACES_SAMPLER_ARG=0.01`). Request/usage metrics are derived
 server-side from server spans (one count per request) and the
 `http.server.request.duration` / `http.server.duration` histogram — no extra
-setup. If you export that histogram with **delta** temporality, add
-`autter.metrics_wired=true` to `OTEL_RESOURCE_ATTRIBUTES`: the histogram
-then counts every request and sampled server spans stop adding to it
-(`@autter/runtime-node` does this for you). Cumulative histograms are not
-counted, so leave the flag off with them. LLM/GenAI spans are the exception
-— send them at 100% (see above).
+setup. A sampled request reaches both feeds, so at ~1% sampling request
+counts read ~1% high. To count it from the histogram alone (delta
+temporality, `http.route` on the data point), add
+`autter.metrics_wired=true,autter.metrics_routes=true` to
+`OTEL_RESOURCE_ATTRIBUTES` and set `autter.metric_has_route=true` on each
+server span whose data point carries `http.route` (`@autter/runtime-node`
+1.7.0+ does all of this for you). Cumulative histograms are not counted,
+so leave the flags off with them. LLM/GenAI spans are the exception — send
+them at 100% (see above).
 
 One consequence of plain head sampling to know about: an error recorded on
 an unsampled trace is dropped with it, and even when the error survives

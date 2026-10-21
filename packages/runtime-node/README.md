@@ -317,12 +317,21 @@ silent loss. While wiring things up, set `debug: true` (or `AUTTER_DEBUG=1`)
 to see `[autter] exported N span(s)` lines on stderr as batches leave.
 
 Note on usage rollups: requests are counted from the `http.server.duration`
-metric (100% accurate), never from sampled server spans: the SDK marks its
-resource `autter.metrics_wired` and the ingester keeps its spans out of the
-span-fed rollups, whatever `traceSampleRate` is. Ingesters up to 1.7.0
-ignored the mark and also counted sampled server spans (at
-`traceSampleRate: 1`, about twice the requests); they did skip
-tail-retained error traces, whose spans carry `autter.tail_retained`.
+metric (100% accurate), under their route template: Express routes and,
+from 1.7.0, Next.js routes (`/blog/[slug]`, from the `next.route` Next puts
+on its own spans). The SDK marks its resource `autter.metrics_wired` and
+`autter.metrics_routes`, and each request span whose metric got a route
+`autter.metric_has_route`; an up-to-date ingester then counts that request
+from the metric alone, whatever `traceSampleRate` is. A request whose
+metric has no route (Koa, Fastify or plain `http` without a router
+instrumentation) is also counted from its sampled spans, which keep its
+path. Ingesters up to 1.7.0 count every sampled server span on top of the
+metric (at `traceSampleRate: 1`, about twice the requests), except
+tail-retained error traces (`autter.tail_retained`). Since 1.7.0 the SDK
+also applies the HTTP instrumentation to servers created before
+`initAutterServer` (Next.js creates its server before `instrumentation.ts`
+runs): until then a Next.js app got request spans and metrics only from
+the first request that happened to load `http` again, if ever.
 
 ### Privacy: secrets and PII are scrubbed before they leave the process
 

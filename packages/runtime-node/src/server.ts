@@ -1,3 +1,6 @@
+import { errorMonitor } from "node:events";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import { ServerResponse, type IncomingMessage } from "node:http";
 import { randomUUID } from "node:crypto";
 import {
@@ -85,6 +88,7 @@ import {
 } from "./unhandled-rejections.js";
 import { breadcrumbEventAttributes } from "./breadcrumbs.js";
 import { sharedSlot } from "./shared.js";
+import { RouteLabelSampler } from "./route-label.js";
 
 /**
  * The started tracker, shared by every copy of this package in the process
@@ -132,8 +136,9 @@ const S = sharedSlot<ServerSlot>("server", () => ({
  *                                         call)
  *   successful traces            : 1%    (head sampling, configurable)
  *   request metrics              : aggregated every 60 s, keyed by route
- *                                  template (Express routes detected
- *                                  out of the box — see captureExpressRoute)
+ *                                  template (Express and Next.js routes
+ *                                  detected out of the box — see
+ *                                  captureRequestRoute, route-label.ts)
  *   operation / request summaries: 100%  (withRuntimeOperation,
  *                                         autterRequests, … — one wide
  *                                         record per unit of work, never
@@ -809,6 +814,36 @@ export function redactWithActive(attributes?: Attributes | null): Attributes {
 }
 
 /**
+ * HttpInstrumentation patches `http` and `https` when they are required after
+ * `sdk.start()` (require-in-the-middle). A host that loaded them first never
+ * gets request spans or `http.server.duration` until some later code happens
+ * to require them: Next.js creates its server before `instrumentation.ts`
+ * runs, so a Next app was instrumented only from the first request that
+ * loaded its edge sandbox or a CommonJS dependency using `http`, if ever; an
+ * ES module app that imports its framework before calling initAutterServer
+ * is in the same place. Requiring them here applies the patch now. It wraps
+ * `Server.prototype.emit`, so servers created earlier are covered too.
+ */
+function patchLoadedHttpModules(): void {
+	try {
+		const load = createRequire(join(process.cwd(), "autter-runtime-http.cjs"));
+		load("http");
+		load("https");
+	} catch {
+		/* no CommonJS loader here: nothing was loaded through it either */
+	}
+}
+
+/** On an HTTP server span: this request's `http.server.duration` /
+ * `http.server.request.duration` data point carries `http.route`. With the
+ * resource's `autter.metrics_wired` and `autter.metrics_routes`, the ingester
+ * counts such a request from the metric alone; a request without it (no
+ * route known: Koa, Fastify or plain `http` without a router
+ * instrumentation) is also counted from its sampled spans, which keep its
+ * path. */
+const METRIC_ROUTE_ATTR = "autter.metric_has_route";
+
+/**
  * HttpInstrumentation responseHook: copy the Express route template into
  * `rpcMetadata.route` before the instrumentation snapshots attributes at
  * response close. That is the only channel through which `http.route`
@@ -816,26 +851,39 @@ export function redactWithActive(attributes?: Attributes | null): Attributes {
  * metric data points never carry raw URL paths (cardinality), so without a
  * route here every per-route rollup row lands on the empty route. A router
  * instrumentation supplied via `options.instrumentations` (e.g.
- * ExpressInstrumentation) wins when it has already set the route.
+ * ExpressInstrumentation) wins when it has already set the route, and so
+ * does a Next.js route template named while the request ran
+ * (route-label.ts). The request span is then marked METRIC_ROUTE_ATTR when
+ * its metric gets a route.
  */
-function captureExpressRoute(
-	_span: Span,
+function captureRequestRoute(
+	span: Span,
 	response: IncomingMessage | ServerResponse,
 ): void {
 	// The hook also fires for outgoing client responses (IncomingMessage).
 	if (!(response instanceof ServerResponse)) return;
 	const rpcMetadata = getRPCMetadata(context.active());
 	if (rpcMetadata?.type !== RPCType.HTTP) return;
+	// After a response error the instrumentation records the metric from
+	// the request-time attributes alone, without the route.
+	let failed = false;
+	response.on(errorMonitor, () => {
+		failed = true;
+	});
 	const setRoute = () => {
 		if (rpcMetadata.route) return;
 		const route = expressRouteOf(response.req);
 		if (route) rpcMetadata.route = route;
 	};
 	// prependListener: must run before the instrumentation's own 'close'
-	// handler reads rpcMetadata. 'finish' covers completed responses,
-	// 'close' covers aborted ones; setRoute is idempotent.
+	// handler reads rpcMetadata and records the metric. 'finish' covers
+	// completed responses, 'close' covers aborted ones; setRoute is
+	// idempotent.
 	response.prependListener("finish", setRoute);
-	response.prependListener("close", setRoute);
+	response.prependListener("close", () => {
+		setRoute();
+		if (rpcMetadata.route && !failed) span.setAttribute(METRIC_ROUTE_ATTR, true);
+	});
 	if (S.hookRequests) startHookRequest(response);
 }
 
@@ -897,8 +945,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		"telemetry.distro.version": distro.version,
 		// Tells the ingester request metrics arrive on the metrics pipe, so
 		// it must not also fold our server spans into usage rollups (that
-		// would double-count every sampled request).
+		// would double-count every sampled request)...
 		"autter.metrics_wired": true,
+		// ...for the requests whose metric carries their route: those
+		// request spans say so (`autter.metric_has_route`, see
+		// captureRequestRoute). Ingesters honour metrics_wired only with
+		// this, so an older SDK, whose Next.js metrics have no route, keeps
+		// its span-fed per-route counts.
+		"autter.metrics_routes": true,
 	});
 
 	const rootSampler = new TraceIdRatioBasedSampler(options.traceSampleRate ?? 0.01);
@@ -926,6 +980,9 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// global provider (Vercel AI SDK, GenAI instrumentations) skip head
 	// sampling so every model call reaches the ingester.
 	if (options.llmTracing !== false) sampler = new LlmAwareSampler(sampler);
+	// Outermost: sees every span start, so Next.js's route templates reach
+	// the request's metric whatever the sampling decision (route-label.ts).
+	sampler = new RouteLabelSampler(sampler);
 	const errorTraceBuffer = retainTraces
 		? new ErrorTraceRetentionProcessor(
 				new BatchSpanProcessor(traceExporter(), { scheduledDelayMillis: 2000 }),
@@ -968,11 +1025,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			) }),
 		],
 		instrumentations: [
-			new HttpInstrumentation({ responseHook: captureExpressRoute }),
+			new HttpInstrumentation({ responseHook: captureRequestRoute }),
 			...((options.instrumentations ?? []) as never[]),
 		],
 	});
 	sdk.start();
+	patchLoadedHttpModules();
 	const stopMemoryMetrics = options.memoryMetrics === false ? null : startMemoryMetrics();
 	noteCompatFeature("endpoint_latency");
 	if (stopMemoryMetrics) noteCompatFeature("memory_metrics");

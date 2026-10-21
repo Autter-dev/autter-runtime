@@ -148,11 +148,15 @@ interface ResourceInfo {
 	service: string;
 	environment: string;
 	release: string | null;
-	/** `autter.metrics_wired`: the sender exports delta HTTP-server duration
-	 * histograms (`/v1/metrics`), which count every request it serves, so
-	 * its server spans feed no request rollups (they would count its
-	 * traced requests twice). Set by `@autter/runtime-node`. */
-	metricsWired: boolean;
+	/** `autter.metrics_wired` and `autter.metrics_routes` (runtime-node
+	 * 1.7.0+): the sender's delta HTTP-server duration histograms
+	 * (`/v1/metrics`) count every request it serves, and each request span
+	 * whose data point carries `http.route` says so
+	 * (`autter.metric_has_route`). Those requests are counted from the
+	 * metric alone: their spans would count them twice. `metrics_wired`
+	 * alone (runtime-node before 1.7.0, whose Next.js metrics have no route)
+	 * is not enough: its spans keep feeding per-route request counts. */
+	metricsCountRoutedRequests: boolean;
 	/** One process: spans of different processes are never one request. */
 	process: string;
 }
@@ -169,7 +173,8 @@ function resourceInfo(resource: OtlpResource | undefined): ResourceInfo {
 		service,
 		environment,
 		release,
-		metricsWired: attrs.get("autter.metrics_wired") === "true",
+		metricsCountRoutedRequests:
+			attrs.get("autter.metrics_wired") === "true" && attrs.get("autter.metrics_routes") === "true",
 		process: [service, environment, release ?? "", attrs.get("service.instance.id") ?? ""].join("\u0000"),
 	};
 }
@@ -248,7 +253,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	const signalRollups: Array<{ spanIndex: number; route: string }> = [];
 	const spans: RuntimeSpanRow[] = [];
 	// Per span, what the request rollups need beyond the span row.
-	const spanFacts: Array<{ process: string; routeQuality: number; spanFedRollup: boolean }> = [];
+	const spanFacts: SpanFacts[] = [];
 	const llmCalls: RuntimeLlmCall[] = [];
 	const rollups = new Map<string, RuntimeMetricPoint>();
 	let spanCount = 0;
@@ -296,13 +301,17 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				spanFacts.push({
 					process: resource.process,
 					routeQuality: routeQualityOf(attrs, route),
-					// Whether this span may count its request in the span-fed
-					// rollups if it is the request's outermost server span.
-					// Not when the request is counted elsewhere: the sender's
-					// metric feed counts every request (`autter.metrics_wired`),
-					// and error-linked tail retention ships its spans at ~100%
-					// next to that feed (`autter.tail_retained`).
-					spanFedRollup: !resource.metricsWired && attrs.get("autter.tail_retained") !== "true",
+					// Whether this span, as the outermost server span of its
+					// request, counts the request in the span-fed rollups. Not
+					// when the sender's metric feed counts it: a request whose
+					// data point carries its route (metricsCountRoutedRequests),
+					// and spans error-linked tail retention ships at ~100% next
+					// to that feed (`autter.tail_retained`).
+					countedBySpans: !(
+						(resource.metricsCountRoutedRequests && attrs.get("autter.metric_has_route") === "true") ||
+						attrs.get("autter.tail_retained") === "true"
+					),
+					templateRoute: attrs.has("http.route") && route ? normalizeRoute(route) : "",
 				});
 
 				// Error signals: one per exception event; if the span is
@@ -449,9 +458,11 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	const deduped = dedupeTraceSignals(signals, spans);
 	const occurrences = deduped.occurrences;
 
-	// Server spans fold into 1-minute usage rollups so traffic is tracked
-	// even when no metric feed counts it: one count per request, the
-	// outermost server span (request-spans.ts), see spanRequests.
+	// Usage rollups (`runtime_metrics_1m`): `request_count` counts requests
+	// and only requests, `error_count` counts failed requests and errors
+	// outside any request. A request is its outermost server span
+	// (request-spans.ts); its server spans count it unless the sender's metric
+	// feed does (countedBySpans), and nothing else adds requests.
 	const membership = requestMembership(
 		spans.map((span, i) => ({
 			traceId: span.traceId,
@@ -467,53 +478,68 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 		return root >= 0 ? requests.get(root) : undefined;
 	};
 
-	// Each occurrence is counted once. One recorded in a request the
-	// span-fed rollup counts (on its server span, a server span nested in it,
-	// or any span below them in the batch) rides that request: an error or
-	// fatal one makes it an errored request, and adds no request of its own.
-	// Any other (captureException's internal error spans, workers, consumers,
-	// a request counted by its metric feed instead) counts as one event / one
-	// error event, or a service whose errors arrive outside HTTP handlers
-	// groups issues while every event counter stays 0. Counted after the
-	// dedupe, so each thrown error is one event; a dropped status-only
-	// occurrence is none.
-	const events: RuntimeMetricPoint[] = [];
+	// Each error or fatal occurrence (after the dedupe: one per thrown error)
+	// counts once. One recorded in a request (on its server spans or any span
+	// below them in the batch) makes that request a failed one; any other
+	// (captureException's always-on spans exported apart from their request,
+	// workers, consumers, jobs) is one error outside a request. Warnings and
+	// info count nothing; neither does a dropped status-only occurrence.
+	const errorsOutsideRequests: RuntimeMetricPoint[] = [];
 	deduped.members.forEach((members, i) => {
 		const occ = occurrences[i]!;
-		const isErrorEvent = occ.severity === "fatal" || occ.severity === "error";
+		if (occ.severity !== "fatal" && occ.severity !== "error") return;
 		const request = members.map(requestOfSignal).find((r) => r !== undefined);
 		if (request) {
-			if (isErrorEvent) request.isError = true;
+			request.hasErrorOccurrence = true;
 			return;
 		}
-		events.push({
+		errorsOutsideRequests.push({
 			service: occ.service,
 			environment: occ.environment,
 			release: occ.release,
 			route: signalRollups[deduped.sourceIndexes[i]!]!.route,
 			bucketAt: minuteBucket(occ.occurredAt),
-			requestCount: 1,
-			errorCount: isErrorEvent ? 1 : 0,
+			requestCount: 0,
+			errorCount: 1,
 			durationSumMs: 0,
 			sessionCount: 0,
 		});
 	});
 	for (const [root, request] of requests) {
 		const span = spans[root]!;
-		addToRollup(rollups, {
+		const point = {
 			service: span.service,
 			environment: span.environment,
 			release: span.release,
-			route: request.route,
 			bucketAt: minuteBucket(span.startedAt),
-			requestCount: 1,
-			errorCount: request.isError ? 1 : 0,
-			// The request's latency is its outermost span's.
-			durationSumMs: span.durationMs,
 			sessionCount: 0,
-		});
+		};
+		if (spanFacts[root]!.countedBySpans) {
+			addToRollup(rollups, {
+				...point,
+				route: request.route,
+				requestCount: 1,
+				errorCount: request.isError || request.hasErrorOccurrence ? 1 : 0,
+				// The request's latency is its outermost span's.
+				durationSumMs: span.durationMs,
+			});
+			continue;
+		}
+		// Counted by the metric feed, which already made a 5xx response a
+		// failed request. A request it saw succeed that recorded an error
+		// adds that one error, on the route its data point carried.
+		const metricCountedFailure = span.statusCode !== null && span.statusCode >= 500;
+		if (request.hasErrorOccurrence && !metricCountedFailure) {
+			addToRollup(rollups, {
+				...point,
+				route: spanFacts[root]!.templateRoute,
+				requestCount: 0,
+				errorCount: 1,
+				durationSumMs: 0,
+			});
+		}
 	}
-	for (const event of events) addToRollup(rollups, event);
+	for (const error of errorsOutsideRequests) addToRollup(rollups, error);
 
 	inheritHttpFromParent(
 		occurrences,
@@ -531,37 +557,52 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	};
 }
 
+interface SpanFacts {
+	/** The process the span was recorded in (request-spans.ts). */
+	process: string;
+	routeQuality: number;
+	/** As a request's outermost server span: its spans count the request
+	 * (else the sender's metric feed does). */
+	countedBySpans: boolean;
+	/** Its `http.route`, normalized, else "": the route the HTTP
+	 * instrumentation also put on the request's metric data point. */
+	templateRoute: string;
+}
+
 interface SpanRequest {
 	/** Normalized route the rollup row keys on. */
 	route: string;
 	routeQuality: number;
 	/** Depth of the span the route came from (shallower wins a tie). */
 	routeDepth: number;
+	/** One of its server spans failed. */
 	isError: boolean;
+	/** An error or fatal occurrence was recorded in it. */
+	hasErrorOccurrence: boolean;
 }
 
 /**
- * The requests the span-fed rollups count, keyed by the batch index of each
- * one's outermost server span (request-spans.ts). A request is counted when
- * that span may feed rollups (`spanFedRollup`). Server spans nested in it
- * add no request: they lend their route when it is better (a template such
- * as Next's `/blog/[slug]` over the HTTP span's raw path; on a tie the
- * shallower span's), and their error. Latency and minute bucket stay the
- * outermost span's.
+ * Every request in the batch, keyed by the batch index of its outermost
+ * server span (request-spans.ts). Server spans nested in it add no request:
+ * they lend their route when it is better (a template such as Next's
+ * `/blog/[slug]` over the HTTP span's raw path; on a tie the shallower
+ * span's), and their error. Latency and minute bucket stay the outermost
+ * span's.
  */
 function spanRequests(
 	spans: RuntimeSpanRow[],
-	facts: Array<{ routeQuality: number; spanFedRollup: boolean }>,
+	facts: SpanFacts[],
 	membership: RequestMembership,
 ): Map<number, SpanRequest> {
 	const requests = new Map<number, SpanRequest>();
 	spans.forEach((span, i) => {
-		if (membership.requestOf[i] !== i || !facts[i]!.spanFedRollup) return;
+		if (membership.requestOf[i] !== i) return;
 		requests.set(i, {
 			route: span.route ?? "",
 			routeQuality: facts[i]!.routeQuality,
 			routeDepth: membership.depth[i]!,
 			isError: span.status === "error",
+			hasErrorOccurrence: false,
 		});
 	});
 	spans.forEach((span, i) => {

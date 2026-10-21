@@ -192,14 +192,13 @@ export function normalizeBrowserPayload(
 			event.severity,
 			TYPE_TO_SEVERITY[event.type] ?? "error",
 		);
-		// The browser has no request stream, so error/message events are the
-		// only usage signal for many pages — count each as an event (and, for
-		// fatal/error severity, an error event). Without this, a page that
-		// only reports errors groups issues whose dashboards all read 0.
-		bumpRollup(event.route ? (event.route.split("?")[0] ?? "") : "", occurredAt, {
-			requestCount: 1,
-			errorCount: severity === "fatal" || severity === "error" ? 1 : 0,
-		});
+		// A browser error belongs to no server request: it counts in
+		// `error_count` only (fatal/error severity), never `request_count`,
+		// so a page that only reports errors still shows them without
+		// inventing requests. Warnings and info messages count nothing.
+		if (severity === "fatal" || severity === "error") {
+			bumpRollup(event.route ? (event.route.split("?")[0] ?? "") : "", occurredAt, { errorCount: 1 });
+		}
 
 		occurrences.push({
 			source: "browser",

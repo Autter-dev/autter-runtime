@@ -79,6 +79,14 @@ only inside a `process.env.NEXT_RUNTIME` branch Next removes from edge
 bundles. Without edge errors to report, `export { onRequestError } from
 "@autter/runtime-next/instrumentation"` is enough.
 
+Request counts and latency per route come from the `http.server.duration`
+metric of every request, under Next's route template (`/blog/[slug]`,
+`/api/items/[id]`, `/_not-found` for 404s), since 1.7.0: the SDK reads the
+`next.route` Next puts on its own spans while it serves the request. 1.7.0
+also instruments Next's server from the first request; before, it was
+instrumented only once a later request happened to load `http` again (in
+our test app, the first edge-route request), and its metrics had no route.
+
 On Node the error is recorded on the request span through the
 `registerAutter` tracker — once, even when `withRuntimeRequest` already
 reported it (Next's context is then added to that report). Recorded with

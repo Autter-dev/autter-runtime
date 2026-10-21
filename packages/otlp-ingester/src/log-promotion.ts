@@ -103,9 +103,10 @@ export function promotionLookups(
 }
 
 /**
- * One event / one error event per promoted occurrence — the same counting
- * the trace path applies to occurrences outside a server span, so issue
- * counters for logger-only services don't read 0.
+ * One error per promoted occurrence, in `error_count` only — the same
+ * counting the trace path applies to errors outside a request (a log record
+ * names no request the rollups count), so error counters for logger-only and
+ * edge services don't read 0 and no request is invented.
  */
 export function promotionRollups(
 	occurrences: RuntimeOccurrence[],
@@ -125,7 +126,6 @@ export function promotionRollups(
 		].join(" ");
 		const existing = rollups.get(key);
 		if (existing) {
-			existing.requestCount += 1;
 			existing.errorCount += 1;
 			continue;
 		}
@@ -135,7 +135,7 @@ export function promotionRollups(
 			release: occ.release,
 			route,
 			bucketAt,
-			requestCount: 1,
+			requestCount: 0,
 			errorCount: 1,
 			durationSumMs: 0,
 			sessionCount: 0,

@@ -110,7 +110,8 @@ under retries; exact per-request answers come from `runtime_logs`.
 to record an exception on; they send error log records with `exception.*`
 and `autter.capture.mode = "log"`. `/v1/logs` promotes such records (severity
 ≥ error) to server occurrences — fingerprinted, written to
-`runtime_error_occurrences`, counted in `runtime_metrics_1m` and forwarded to
+`runtime_error_occurrences`, counted in `runtime_metrics_1m` (`error_count`
+only: a log record names no request the rollups count) and forwarded to
 the sink. A record is skipped when its trace id already produced an
 occurrence in the same batch or, per a ClickHouse lookup, within ±60 s for
 the same org/repo (the lookup ignores the candidates' own deterministic
@@ -316,17 +317,31 @@ Span-level:
 - `route` from `http.route`, falling back to `url.path` / `http.target`
   (query-stripped).
 - `status_code` from `http.response.status_code` / `http.status_code`.
-- Server spans aggregate into 1-minute usage rollups, one count per
-  request: `request_count`, `error_count` (status ≥ 500 or span error),
-  `duration_sum_ms`. Rollup rows key on the **normalized** route (id-like
-  path segments → `:id`), so span-fed and metric-fed rows for the same
-  endpoint sum together and the SummingMergeTree key space stays bounded;
-  `runtime_metrics_1m` route
-  values are templates, never raw paths. (Metric-fed rollups get their
-  route from `http.route` on `http.server.duration` /
-  `http.server.request.duration` data points — OTel never puts raw URL
-  paths on metrics, so the SDK must set the route template;
-  `@autter/runtime-node` does this for Express out of the box.)
+- Usage rollups (`runtime_metrics_1m`, 1-minute buckets). **`request_count`
+  counts requests and only requests**: server requests from the span-fed
+  and metric-fed feeds below, plus the browser's synthetic usage counters
+  (`event:<name>` track events, `browser.longtask` and
+  `browser.resource:*` timings), which keep their own routes. **`error_count`
+  counts failed requests** (a 5xx or errored server span, or an error/fatal
+  occurrence recorded in the request: once per request however many) **and
+  errors outside any request** (workers, jobs, consumers, browser-only,
+  logger-only and edge log promotion, a `captureException` span exported
+  apart from its request): one per error/fatal occurrence. An error never
+  adds to `request_count`; warnings and info messages add nothing.
+  `duration_sum_ms` sums request latencies, so `duration_sum_ms /
+  request_count` is the mean latency. `error_count / request_count` is a
+  failed-request rate for a service whose errors all happen in requests;
+  errors outside requests can push it past 1 (a worker has errors and no
+  requests).
+- Rollup rows key on the **normalized** route (id-like path segments →
+  `:id`), so span-fed and metric-fed rows for the same endpoint sum
+  together and the SummingMergeTree key space stays bounded;
+  `runtime_metrics_1m` route values are templates, never raw paths.
+  (Metric-fed rollups get their route from `http.route` on
+  `http.server.duration` / `http.server.request.duration` data points —
+  OTel never puts raw URL paths on metrics, so the SDK must set the route
+  template; `@autter/runtime-node` does this for Express, and from 1.7.0
+  for Next.js from the `next.route` template Next puts on its own spans.)
 - One request is its **outermost** server span (`request-spans.ts`, per
   export batch). Walking up a span's parent links in the batch, its request
   is the highest server span reached in the same process (service,
@@ -339,30 +354,43 @@ Span-level:
   request: the request takes the best route among its server spans (an
   `http.route` template over a `url.path` / `http.target` raw path; on a
   tie the outermost span's), the outermost span's latency and minute, and
-  is an error when any of its server spans is. A server span whose parent
-  is not in the batch counts as a request, so when an exporter splits one
+  fails when any of its server spans does. A server span whose parent is
+  not in the batch counts as a request, so when an exporter splits one
   request's spans across batches, each batch counts it once.
-- Occurrences in the rollups, counted after the dedupe: one recorded in a
-  request the span-fed rollups count (on its server spans or any span below
-  them in the batch) rides that request — an error/fatal one makes it an
-  errored request — and adds nothing. Any other (captureException's
-  always-on spans, workers, consumers, a request whose spans feed no
-  rollups) is one event: `request_count` 1, `error_count` 1 if error/fatal,
-  no duration. For a request counted by its metric feed, that event comes
-  on top of the feed's count of the same request.
-- Double-count guards on `runtime_metrics_1m`: resources marked
-  `autter.metrics_wired` (set by `@autter/runtime-node`, which always
-  exports delta request metrics) get no span-fed request counts — their
-  spans are head-sampled, the metric feed is exact. Any OTel sender that
-  exports delta `http.server.request.duration` / `http.server.duration`
-  histograms can set it (`OTEL_RESOURCE_ATTRIBUTES=autter.metrics_wired=true`);
-  without it, its sampled server spans add to the metric counts. Spans
-  exported by error-linked tail retention (`autter.tail_retained`) feed no
-  request counts either. Only **delta**-temporality histograms fold into
-  rollups: cumulative points repeat lifetime totals every export, which a
-  SummingMergeTree would re-add each minute; cumulative senders are covered
-  by the span-fed fallback instead (so they must not set the flag). A
-  resource that sends both instruments (OTel's
+- Which feed counts a request. Its spans count it (`request_count` 1, its
+  latency, `error_count` 1 if it failed) unless the sender's metric feed
+  does, which is when its outermost server span
+  - carries `autter.metric_has_route` on a resource with both
+    `autter.metrics_wired` and `autter.metrics_routes`
+    (`@autter/runtime-node` 1.7.0+: its delta `http.server.duration`
+    counts every request, and it marks each request span whose data point
+    got the route), or
+  - carries `autter.tail_retained` (error-linked tail retention ships
+    such spans at ~100% next to that metric feed).
+  A metric-counted request adds no request from its spans; the metric
+  already counted a 5xx as a failed request, so an error recorded in it
+  adds nothing more, while an error recorded in a request the metric saw
+  succeed adds `error_count` 1 (once per request) on the route its data
+  point carried. `autter.metrics_wired` without `autter.metrics_routes`
+  (runtime-node before 1.7.0, whose Next.js metrics have no route) is not
+  enough: its spans keep feeding per-route counts, so a sampled request
+  is counted by both feeds, as before. So is a 1.7.0 request whose
+  metric got no route (Koa, Fastify or plain `http` without a router
+  instrumentation): its span keeps the path. Other OTel senders that
+  export delta HTTP duration histograms can opt in the same way (both
+  resource attributes, and `autter.metric_has_route=true` on each server
+  span whose data point has `http.route`); otherwise their sampled server
+  spans add to the metric counts.
+- What a batch cannot tell: a `captureException` span (runtime-node's
+  always-on exporter) arrives in a different batch from its request, so
+  its error counts even when the metric feed counted that request's 5xx;
+  an error-only point lands in the minute the request started, the metric
+  in the minute it was exported.
+- Only **delta**-temporality histograms fold into rollups: cumulative
+  points repeat lifetime totals every export, which a SummingMergeTree
+  would re-add each minute; cumulative senders are covered by the
+  span-fed fallback instead (so they must not set the flags). A resource
+  that sends both instruments (OTel's
   `OTEL_SEMCONV_STABILITY_OPT_IN=http/dup`) is counted from
   `http.server.request.duration` only, as the latency histograms are.
 - GenAI spans (`gen_ai.*` attributes; Vercel AI SDK inner `.doGenerate` /
@@ -438,7 +466,9 @@ dedupe (a server error on the same trace is still promoted).
 Event types: `exception`, `unhandled_rejection`, `session_start`, and
 `track_event` (carries a `name`; counted into `runtime_metrics_1m` as
 `request_count` on the synthetic route `event:<name>` — coarse usage
-counters, not an analytics event store).
+counters, not an analytics event store). Error and fatal events add
+`error_count` 1 on their page route and no `request_count` (a browser error
+is outside any server request); warnings and info messages add nothing.
 
 Forbidden at the schema level (rejected/stripped): full URLs with query
 strings, cookies, DOM content, form values, request headers/bodies, emails.

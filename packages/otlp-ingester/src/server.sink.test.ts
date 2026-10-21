@@ -153,16 +153,17 @@ test("browser errors reach the sink grouped with nonzero event counts", async ()
 		assert.ok(count > 0, "every grouped error has a nonzero event count");
 	}
 
-	// The same events also arrive as metric rollups, so the overview /
-	// services event counters agree with the grouped issues instead of 0.
+	// The same errors also arrive in the metric rollups' error_count, so the
+	// overview / services error counters agree with the grouped issues
+	// instead of 0. They are not requests (EI-26).
 	const totals = batch.metrics.reduce(
-		(acc: { events: number; errors: number }, p: any) => ({
-			events: acc.events + p.requestCount,
+		(acc: { requests: number; errors: number }, p: any) => ({
+			requests: acc.requests + p.requestCount,
 			errors: acc.errors + p.errorCount,
 		}),
-		{ events: 0, errors: 0 },
+		{ requests: 0, errors: 0 },
 	);
-	assert.equal(totals.events, 5);
+	assert.equal(totals.requests, 0);
 	assert.equal(totals.errors, 5);
 });
 
@@ -227,13 +228,14 @@ test("captureException-style internal error spans reach the sink with metrics", 
 	assert.equal(batch.occurrences.length, 1);
 	assert.ok(batch.occurrences[0].fingerprint);
 	const totals = batch.metrics.reduce(
-		(acc: { events: number; errors: number }, p: any) => ({
-			events: acc.events + p.requestCount,
+		(acc: { requests: number; errors: number }, p: any) => ({
+			requests: acc.requests + p.requestCount,
 			errors: acc.errors + p.errorCount,
 		}),
-		{ events: 0, errors: 0 },
+		{ requests: 0, errors: 0 },
 	);
-	assert.equal(totals.events, 1);
+	// An error outside any request: error_count only (EI-26).
+	assert.equal(totals.requests, 0);
 	assert.equal(totals.errors, 1);
 });
 
@@ -327,6 +329,10 @@ test("one error recorded on two spans reaches the sink once, with the same id wh
 			1,
 		),
 	);
-	const events = first.metrics.reduce((sum: number, p: { requestCount: number }) => sum + p.requestCount, 0);
-	assert.equal(events, 1);
+	// Tail-retained spans: the metric feed counts this request and its 500,
+	// so the spans add neither (EI-26; before, one event counted as a request).
+	const requests = first.metrics.reduce((sum: number, p: { requestCount: number }) => sum + p.requestCount, 0);
+	const errors = first.metrics.reduce((sum: number, p: { errorCount: number }) => sum + p.errorCount, 0);
+	assert.equal(requests, 0);
+	assert.equal(errors, 0);
 });

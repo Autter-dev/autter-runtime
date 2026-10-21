@@ -310,7 +310,10 @@ test("a server span whose parent is in another batch counts in its own", () => {
 
 // ── Metric feed vs spans ──────────────────────────────────────────────────
 
-const METRICS_WIRED = { "autter.metrics_wired": true };
+/** runtime-node 1.7.0+: delta request metrics that carry routes. */
+const ROUTED_METRICS = { "autter.metrics_wired": true, "autter.metrics_routes": true };
+/** runtime-node before 1.7.0: delta request metrics, Next.js ones without a route. */
+const METRICS_WIRED_ONLY = { "autter.metrics_wired": true };
 
 function durationMetrics(
 	service: string,
@@ -341,44 +344,88 @@ function durationMetrics(
 	};
 }
 
-const expressRequest: SpanSpec[] = [{
-	id: 1,
-	name: "GET /api/users/:id",
-	kind: SERVER,
-	end: 40,
-	attributes: { "http.route": "/api/users/:id", "http.request.method": "GET", "http.response.status_code": 200 },
-}];
+/** An HTTP server span as runtime-node 1.7.0 exports it: its metric data
+ * point got the route (`autter.metric_has_route`). */
+function routedRequest(extra: Partial<SpanSpec> = {}, attributes: Record<string, Value> = {}): SpanSpec {
+	return {
+		id: 1,
+		name: "GET /api/users/:id",
+		kind: SERVER,
+		end: 40,
+		...extra,
+		attributes: {
+			"http.route": "/api/users/:id",
+			"http.request.method": "GET",
+			"http.response.status_code": 200,
+			"autter.metric_has_route": true,
+			...attributes,
+		},
+	};
+}
 
-test("a resource whose metric feed counts its requests (autter.metrics_wired) gets no span-fed count", () => {
-	// @autter/runtime-node: a head-sampled request's span, and the delta
-	// http.server.duration histogram that counted the same request.
-	const traces = normalizeTraces(batch(expressRequest, "api", METRICS_WIRED));
-	const metrics = normalizeMetrics(durationMetrics("api", [{ name: "http.server.duration", count: 1, sum: 40 }], METRICS_WIRED));
+test("a request its routed metric counts (metrics_wired + metrics_routes) adds nothing from spans", () => {
+	// A head-sampled request's span, and the delta http.server.duration
+	// histogram that counted the same request under its route.
+	const traces = normalizeTraces(batch([routedRequest()], "api", ROUTED_METRICS));
+	const metrics = normalizeMetrics(durationMetrics("api", [{ name: "http.server.duration", count: 1, sum: 40 }], ROUTED_METRICS));
 	assert.deepEqual(traces.metricPoints, []);
 	assert.deepEqual(totals([...traces.metricPoints, ...metrics]), { requests: 1, errors: 0, durationMs: 40 });
+	assert.equal(metrics[0]?.route, "/api/users/:id");
 });
 
-test("the flag also holds for Next.js's nested server spans", () => {
-	const { metricPoints } = normalizeTraces(batch(nextRequest(), "web", METRICS_WIRED));
+test("Next.js on runtime-node 1.7.0: the HTTP span's metric has the route, the spans add nothing", () => {
+	const spans = nextRequest();
+	spans[2] = { ...spans[2]!, attributes: { ...spans[2]!.attributes, "http.route": "/blog/[slug]", "autter.metric_has_route": true } };
+	const { metricPoints } = normalizeTraces(batch(spans, "web", ROUTED_METRICS));
 	assert.deepEqual(metricPoints, []);
 });
 
-test("an error in a metrics-wired request is one error event, not a span-fed request", () => {
-	// The metric feed counts the request; the occurrence is not on a
-	// span-fed request, so it is an event of its own, as tail-retained
-	// error traces always were. The errored server span adds nothing.
-	const spans: SpanSpec[] = [
-		{ id: 2, parent: 1, name: "db.query", error: true, events: [exception(5, "QueryError", "relation missing")] },
-		{ ...expressRequest[0]!, error: true, attributes: { ...expressRequest[0]!.attributes, "http.response.status_code": 500 } },
-	];
-	const { occurrences, metricPoints } = normalizeTraces(batch(spans, "api", METRICS_WIRED));
-	assert.equal(occurrences.length, 1);
-	assert.deepEqual(totals(metricPoints), { requests: 1, errors: 1, durationMs: 0 });
+test("metrics_wired alone (runtime-node before 1.7.0) keeps span-fed per-route counts", () => {
+	// Its Next.js metrics have no route: without the spans, every request of
+	// the app would land on the empty route. Today's behaviour, nested
+	// server spans counted once.
+	const { metricPoints } = normalizeTraces(batch(nextRequest(), "web", METRICS_WIRED_ONLY));
+	assert.deepEqual(metricPoints.map((p) => [p.route, p.requestCount]), [["/blog/[slug]", 1]]);
 });
 
-test("without the flag, server spans are the fallback request count", () => {
+test("a request whose metric has no route (Koa, plain http) keeps its span-fed count", () => {
+	const plain: SpanSpec = { id: 1, name: "GET", kind: SERVER, end: 30, attributes: { "http.target": "/orders/42", "http.method": "GET", "http.status_code": 200 } };
+	const { metricPoints } = normalizeTraces(batch([plain], "api", ROUTED_METRICS));
+	assert.deepEqual(metricPoints.map((p) => [p.route, p.requestCount]), [["/orders/:id", 1]]);
+});
+
+test("a 5xx the metric feed counted adds no error from its exception in the same batch", () => {
+	const spans: SpanSpec[] = [
+		{ id: 2, parent: 1, name: "db.query", error: true, events: [exception(5, "QueryError", "relation missing")] },
+		routedRequest({ error: true }, { "http.response.status_code": 500 }),
+	];
+	const { occurrences, metricPoints } = normalizeTraces(batch(spans, "api", ROUTED_METRICS));
+	assert.equal(occurrences.length, 1);
+	assert.deepEqual(metricPoints, []);
+});
+
+test("errors in a request the metric feed saw succeed add one error, on its route", () => {
+	// Two different errors recorded in one 200 request: one failed request.
+	const spans: SpanSpec[] = [
+		{ id: 2, parent: 1, name: "cache.get", error: true, events: [exception(5, "CacheError", "cache down")] },
+		{ id: 3, parent: 1, name: "flags.get", error: true, events: [exception(6, "FlagError", "flags down")] },
+		routedRequest(),
+	];
+	const { occurrences, metricPoints } = normalizeTraces(batch(spans, "api", ROUTED_METRICS));
+	assert.equal(occurrences.length, 2);
+	assert.deepEqual(metricPoints.map((p) => [p.route, p.requestCount, p.errorCount]), [["/api/users/:id", 0, 1]]);
+});
+
+test("tail-retained request spans add no request; their 500 is the metric feed's", () => {
+	const spans = nextRequest().map((s) => ({ ...s, attributes: { ...s.attributes, "autter.tail_retained": true } }));
+	spans[2] = { ...spans[2]!, error: true, attributes: { ...spans[2]!.attributes, "http.status_code": 500 } };
+	const { metricPoints } = normalizeTraces(batch(spans));
+	assert.deepEqual(metricPoints, []);
+});
+
+test("without the flags, server spans are the fallback request count", () => {
 	// Plain OTel with no (or cumulative) request metrics.
-	const { metricPoints } = normalizeTraces(batch(expressRequest, "api"));
+	const { metricPoints } = normalizeTraces(batch([routedRequest({}, { "autter.metric_has_route": false })], "api"));
 	assert.deepEqual(totals(metricPoints), { requests: 1, errors: 0, durationMs: 40 });
 });
 
@@ -391,10 +438,22 @@ test("a resource sending both HTTP duration instruments counts each request once
 	assert.deepEqual(totals(points), { requests: 3, errors: 0, durationMs: 120 });
 });
 
-test("tail-retained request spans still add no span-fed count", () => {
-	const spans = nextRequest().map((s) => ({ ...s, attributes: { ...s.attributes, "autter.tail_retained": true } }));
-	const { metricPoints } = normalizeTraces(batch(spans));
-	assert.deepEqual(metricPoints, []);
+// ── Errors outside requests ───────────────────────────────────────────────
+
+test("an error outside any request adds to error_count only; a warning adds nothing", () => {
+	const { metricPoints } = normalizeTraces(batch([
+		{ id: 1, name: "jobs.sync", error: true, events: [exception(5, "SyncError", "upstream down")] },
+		{ id: 2, traceId: "b".repeat(32), name: "jobs.cleanup", events: [exception(6, "Message", "slow", { "autter.severity": "warning" })] },
+	]));
+	assert.deepEqual(metricPoints.map((p) => [p.requestCount, p.errorCount]), [[0, 1]]);
+});
+
+test("a captureException span exported apart from its request is an error outside a request", () => {
+	// runtime-node's always-on exporter: the request span is in another batch.
+	const { metricPoints } = normalizeTraces(batch([
+		{ id: 9, parent: 1, name: "Error", error: true, attributes: { "autter.severity": "error" }, events: [exception(5, "Error", "boom", { "autter.severity": "error" })] },
+	], "api", ROUTED_METRICS));
+	assert.deepEqual(metricPoints.map((p) => [p.requestCount, p.errorCount]), [[0, 1]]);
 });
 
 // ── requestMembership ─────────────────────────────────────────────────────

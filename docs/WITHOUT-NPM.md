@@ -52,10 +52,11 @@ How the signals map:
   occurrence is stored with that severity instead of `error`.
 - **Usage** — HTTP-server spans and the standard
   `http.server.request.duration` histogram fold into per-minute
-  request/error/latency rollups automatically, one count per request. When
-  you export that histogram with delta temporality, set
-  `autter.metrics_wired=true` in `OTEL_RESOURCE_ATTRIBUTES` so sampled
-  server spans don't count the same requests again.
+  request/error/latency rollups automatically, one count per request from
+  each feed (so a sampled request counts in both; see
+  [INTEGRATIONS.md](INTEGRATIONS.md#sampling-guidance-all-stacks) for the
+  attributes that make the histogram the only count). Errors outside a
+  request (jobs, workers) count as errors, never as requests.
 - **Memory pressure** — RSS or runtime heap gauges from the same OTLP metric
   exporter are stored by `service.instance.id` and can open a memory incident.
   See the [portable metric contract](MEMORY-PRESSURE.md). Process metrics

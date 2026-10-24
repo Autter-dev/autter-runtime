@@ -29,7 +29,7 @@ import { SourceMapCache, Symbolicator } from "./symbolicate.js";
 import {
 	logPromotionCandidates,
 	promotionLookups,
-	promotionRollups,
+	logRollups,
 } from "./log-promotion.js";
 import {
 	normalizeBrowserPayload,
@@ -835,7 +835,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		// and those are promoted to occurrences here — see log-promotion.ts.
 		const promoted = await promoteLogs(ctx, logs);
 		// Rollups count every promoted error, collapsed or suppressed ones too.
-		const metricPoints = promotionRollups(promoted);
+		const metricPoints = logRollups(logs, promoted);
 		const admitted = admit(ctx, req, promoted);
 		try {
 			await Promise.all([

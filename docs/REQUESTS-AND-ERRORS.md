@@ -347,6 +347,16 @@ as Node; exceptions are promoted log records. Delivery uses `ctx.waitUntil`
 never ship it to a browser. Next.js `middleware.ts` imports it as
 `@autter/runtime-next/edge`. See [packages/runtime-edge](../packages/runtime-edge/README.md).
 
+Each request is counted from its summary, so edge services get request and
+failed-request counts (error rate, release health): every record of the
+request carries `autter.request.counted_by = "summary"`, and the ingester
+adds the summary as one request, failed when its outcome is `failed`, its
+status ≥ 500 or it reported an error (`autter.request.error_reported`),
+and its promoted error records add nothing more. Set `countRequests: false`
+when another sender counts the same requests under the same service name
+(Next.js middleware reporting as the Node server's service: `next start`
+measures every request it serves).
+
 ## Wire reference
 
 | Attribute | Where |
@@ -360,4 +370,6 @@ never ship it to a browser. Next.js `middleware.ts` imports it as
 | `autter.error.internal` | span only (redacted JSON) |
 | `exception.cause.N.type` / `.message` / `.code` | exception event, summaries, error records |
 | `autter.capture.mode = "log"` | promoted error records (logger-only, edge) |
+| `autter.request.counted_by = "summary"` | every record of an edge request counted from its summary |
+| `autter.request.error_reported` | counted edge summaries whose request reported an error |
 | `autter.parent_trace_id` | consumer operations started from a carrier |

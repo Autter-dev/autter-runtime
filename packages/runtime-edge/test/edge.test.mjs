@@ -302,3 +302,52 @@ test("captureEdgeException skips an error withAutter already captured", async ()
 	await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, thrown);
 	assert.equal(h.records().filter((r) => r.attrs["autter.capture.mode"] === "log").length, 1);
 });
+
+test("every record of a request is marked counted by its summary; the summary says when an error was reported", async () => {
+	const h = harness();
+	const worker = withAutter(
+		{ apiKey: "k", service: "edge-api", fetch: h.fakeFetch, sampleRate: 0 },
+		async (request, _env, _ctx, rt) => {
+			if (request.url.endsWith("/sampled-out")) rt.captureException(new Error("sampled out"));
+			if (request.url.endsWith("/warn")) rt.warn("slow");
+			if (request.url.endsWith("/throw")) throw new Error("boom");
+			return new Response("ok");
+		},
+	);
+	for (const path of ["/ok", "/warn", "/sampled-out"]) await worker(new Request(`https://edge.test${path}`), {}, h.ctx);
+	await assert.rejects(worker(new Request("https://edge.test/throw"), {}, h.ctx), /boom/);
+	await Promise.all(h.pending);
+	const records = h.records();
+	assert.ok(records.length >= 6);
+	for (const record of records) assert.equal(record.attrs["autter.request.counted_by"], "summary", record.message);
+	const summaries = Object.fromEntries(
+		records.filter((r) => r.attrs["autter.event.type"] === "operation").map((r) => [r.attrs["http.route"], r.attrs]),
+	);
+	// A sampled-out captureException reports nothing, so it fails nothing.
+	assert.equal(summaries["/sampled-out"]["autter.request.error_reported"], undefined);
+	assert.equal(summaries["/ok"]["autter.request.error_reported"], undefined);
+	// A thrown error is never sampled out: reported, and the request failed.
+	assert.equal(summaries["/throw"]["autter.request.error_reported"], true);
+	assert.equal(summaries["/throw"]["autter.operation.outcome"], "failed");
+	assert.equal(records.filter((r) => r.attrs["autter.capture.mode"] === "log").length, 1);
+});
+
+test("countRequests: false leaves the request uncounted; captureEdgeException is never marked", async () => {
+	const h = harness();
+	const worker = withAutter(
+		{ apiKey: "k", service: "web", fetch: h.fakeFetch, countRequests: false },
+		async (_request, _env, _ctx, rt) => {
+			rt.captureException(new Error("handled"));
+			return new Response("ok");
+		},
+	);
+	await worker(new Request("https://edge.test/mw"), {}, h.ctx);
+	await Promise.all(h.pending);
+	await captureEdgeException({ apiKey: "k", service: "web-edge", fetch: h.fakeFetch }, new Error("cron failed"));
+	const records = h.records();
+	assert.equal(records.length, 3);
+	for (const record of records) {
+		assert.equal(record.attrs["autter.request.counted_by"], undefined, record.message);
+		assert.equal(record.attrs["autter.request.error_reported"], undefined, record.message);
+	}
+});

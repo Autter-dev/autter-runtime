@@ -111,6 +111,17 @@ export interface AutterEdgeOptions {
 	 * records the failed outcome.
 	 */
 	ignoreErrors?: IgnoreErrorPattern[];
+	/**
+	 * Count each request from its summary (default true). Every record of
+	 * the request carries `autter.request.counted_by = "summary"`, and an
+	 * ingester newer than 1.9.0 adds the summary to the service's request
+	 * and failed-request counts — an edge function has no other feed (older
+	 * ingesters ignore the mark). Set false when the same requests are
+	 * already counted under this service name by another sender, e.g.
+	 * Next.js middleware reporting as the Node server's service (`next
+	 * start` measures every request it serves).
+	 */
+	countRequests?: boolean;
 	/** @internal Override fetch (tests). */
 	fetch?: typeof fetch;
 }
@@ -552,7 +563,9 @@ function buildRuntime(
 	let outcomeMessage: string | undefined;
 	let error: unknown;
 	let errorThrown = false;
+	let errorReported = false;
 	let sealed = false;
+	const countRequest = opts.countRequests !== false;
 	const emitted: ReturnType<typeof createRuntimeEvent>[] = [];
 	const base = () => ({
 		"autter.operation.id": operationId,
@@ -560,6 +573,7 @@ function buildRuntime(
 		"autter.request.id": requestId,
 		"http.request.method": method,
 		"http.route": route,
+		...(countRequest ? { "autter.request.counted_by": "summary" } : {}),
 	});
 	const record = (
 		level: RuntimeLogLevel,
@@ -616,6 +630,7 @@ function buildRuntime(
 		const message = isErr ? err.message : String(err);
 		// Decided once per value (it is marked captured either way above).
 		if (!reportable({ type: isErr ? String(err.name ?? "") : "Error", message, crash })) return;
+		errorReported = true;
 		appendInlineLog(inline, "error", message, undefined, redact);
 		const split = splitFingerprint(safeAttributes(attrs));
 		record(
@@ -685,6 +700,9 @@ function buildRuntime(
 				"autter.operation.level": maxLevel(inline.level, level),
 				"http.response.status_code": status,
 				"autter.request.aborted": aborted,
+				// The reported error makes it a failed request in the counts,
+				// which then don't count the error record again.
+				...(countRequest && errorReported ? { "autter.request.error_reported": true } : {}),
 				...(error !== undefined ? errorAttributes(error) : {}),
 				...(inline.logsTruncated ? { "autter.operation.logs_truncated": true } : {}),
 				...(inline.logs.length ? { "autter.operation.logs": inline.logs } : {}),

@@ -34,6 +34,7 @@ from importlib import metadata
 from typing import Callable, Optional
 
 from google.protobuf import json_format
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -118,6 +119,29 @@ class OtlpStub:
                             "attributes": _attrs(span.attributes),
                             "events": [{"name": e.name, "attributes": _attrs(e.attributes)} for e in span.events],
                         })
+        return out
+
+    def histogram_points(self) -> list[dict]:
+        """Every received histogram data point, flattened (``/v1/metrics``)."""
+        with self._lock:
+            bodies = [r["body"] for r in self.requests if r["path"] == "/v1/metrics"]
+        out = []
+        for body in bodies:
+            for resource_metrics in ExportMetricsServiceRequest.FromString(body).resource_metrics:
+                resource = _attrs(resource_metrics.resource.attributes)
+                for scope_metrics in resource_metrics.scope_metrics:
+                    for metric in scope_metrics.metrics:
+                        if metric.WhichOneof("data") != "histogram":
+                            continue
+                        for point in metric.histogram.data_points:
+                            out.append({
+                                "resource": resource,
+                                "scope": scope_metrics.scope.name,
+                                "name": metric.name,
+                                "temporality": metric.histogram.aggregation_temporality,
+                                "attributes": _attrs(point.attributes),
+                                "count": point.count,
+                            })
         return out
 
     def wait_for(self, predicate: Callable[[list[dict]], bool], timeout: float = 20.0) -> list[dict]:

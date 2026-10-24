@@ -32,6 +32,23 @@ standard ``OTEL_*`` environment variables::
 
     init_tracing()  # before the framework instrumentor runs
 
+Request counts (opt-in: ``init_tracing(count_requests=True)`` or
+``AUTTER_COUNT_REQUESTS=true``). Without it the ingester counts the requests
+of the traces head sampling kept, so at a 10% ratio request counts read 10%
+of the traffic while every error is kept, and error rates read 10 times too
+high. :class:`CountRequests` sees every HTTP server span (sampled or not:
+:class:`RecordUnsampled` records them all) and records each request once, in
+a delta ``http.server.duration`` histogram (ms; ``http.route``,
+``http.request.method``, ``http.response.status_code`` from the span) that
+the ingester counts every request from. It marks the HTTP server spans it
+counted ``autter.metric_has_route = true`` and the resource
+``autter.metrics_wired`` / ``autter.metrics_routes``, so the ingester (1.8.0+)
+adds no request from those spans: each request is counted once, whether it
+was sampled, retained for an error, or not exported. The framework
+instrumentations' own ``http.server.duration`` / ``http.server.request.duration``
+are dropped from that meter provider (they would count every request a
+second time). Needs ``opentelemetry-exporter-otlp-proto-http`` for metrics.
+
 Copy this file and ``redact.py`` into your project. Needs ``opentelemetry-sdk``
 (tested with 1.20, 1.27 and 1.41 on Python 3.9, 1.45 on Python 3.14) and, for
 :func:`init_tracing`'s default exporter, ``opentelemetry-exporter-otlp-proto-http``.
@@ -47,7 +64,10 @@ import weakref
 from collections import OrderedDict
 from typing import Any, Optional, Sequence
 
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import Histogram, MeterProvider
+from opentelemetry.sdk.metrics.export import AggregationTemporality, MetricExporter, PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.view import DropAggregation, View
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
@@ -60,7 +80,7 @@ from opentelemetry.sdk.trace.sampling import (
     SamplingResult,
     TraceIdRatioBased,
 )
-from opentelemetry.trace import SpanContext, StatusCode, TraceFlags
+from opentelemetry.trace import SpanContext, SpanKind, StatusCode, TraceFlags
 from opentelemetry.trace.status import Status
 
 try:  # imported as part of a package
@@ -70,6 +90,10 @@ except ImportError:  # copied next to the app as a plain module
 
 __all__ = [
     "TAIL_RETAINED_ATTRIBUTE",
+    "METRIC_COUNTED_ATTRIBUTE",
+    "REQUEST_COUNT_RESOURCE_ATTRIBUTES",
+    "CountRequests",
+    "request_meter_provider",
     "RecordUnsampled",
     "RetainErrorTraces",
     "RedactingSpanExporter",
@@ -82,6 +106,22 @@ LOGGER = logging.getLogger("autter.runtime")
 #: Marks spans exported by error retention rather than head sampling. Same
 #: key and meaning as @autter/runtime-node's tail retention.
 TAIL_RETAINED_ATTRIBUTE = "autter.tail_retained"
+
+#: On an HTTP server span whose request :class:`CountRequests` counted in the
+#: delta histogram: the ingester counts that request from the metric only.
+#: Same key as @autter/runtime-node's (whose metric carries the route).
+METRIC_COUNTED_ATTRIBUTE = "autter.metric_has_route"
+
+#: Resource attributes of a service whose delta HTTP duration histogram counts
+#: its requests; the ingester honours :data:`METRIC_COUNTED_ATTRIBUTE` only
+#: with both. Never set them without that histogram: marked requests would
+#: then be counted by nothing.
+REQUEST_COUNT_RESOURCE_ATTRIBUTES = {"autter.metrics_wired": True, "autter.metrics_routes": True}
+
+#: The histogram :class:`CountRequests` records into, exported (renamed by a
+#: view) as ``http.server.duration``, the instrument the ingester counts.
+_REQUEST_INSTRUMENT = "autter.http.server.duration"
+_HTTP_SERVER_DURATIONS = ("http.server.duration", "http.server.request.duration")
 
 MAX_SPANS_PER_TRACE = 256
 MAX_BUFFERED_SPANS = 5_000
@@ -332,6 +372,134 @@ class RetainErrorTraces(SpanProcessor):
             self._drop(trace_id)
 
 
+def _http_method(span: ReadableSpan) -> Optional[str]:
+    attributes = span.attributes or {}
+    method = attributes.get("http.request.method") or attributes.get("http.method")
+    return str(method) if method else None
+
+
+def _counted_request(span: ReadableSpan) -> bool:
+    """An HTTP server span: what the HTTP instrumentations open per request."""
+    return span.kind is SpanKind.SERVER and _http_method(span) is not None
+
+
+def _request_point(span: ReadableSpan) -> dict:
+    attributes = span.attributes or {}
+    point = {"http.request.method": _http_method(span)}
+    route = attributes.get("http.route")
+    if isinstance(route, str) and route:
+        point["http.route"] = route
+    status = attributes.get("http.response.status_code", attributes.get("http.status_code"))
+    try:
+        if status is not None:
+            point["http.response.status_code"] = int(status)
+    except (TypeError, ValueError):
+        pass
+    return point
+
+
+class CountRequests(SpanProcessor):
+    """Counts every HTTP request once, sampled or not, in a delta histogram.
+
+    Wraps the exporting processor (``RetainErrorTraces(...)``) under a
+    provider whose sampler is :class:`RecordUnsampled`, so it sees every span.
+    For each HTTP server span (kind SERVER with ``http.request.method`` or
+    ``http.method``) that is its process's local root it records one point in
+    ``meter_provider``'s request histogram (see :func:`request_meter_provider`),
+    and it passes every HTTP server span on marked
+    :data:`METRIC_COUNTED_ATTRIBUTE`, nested ones included. The ingester then
+    counts each such request from the metric and none from its spans: one
+    count per request, with a 5xx counted failed by the metric, and an error
+    recorded in a request that answered below 500 counted once from its span.
+    The resource must carry :data:`REQUEST_COUNT_RESOURCE_ATTRIBUTES`.
+    ``force_flush`` and ``shutdown`` reach the meter provider too.
+    """
+
+    def __init__(self, processor: SpanProcessor, meter_provider: MeterProvider):
+        self._processor = processor
+        self._meter_provider = meter_provider
+        self._histogram = meter_provider.get_meter("autter.runtime").create_histogram(
+            _REQUEST_INSTRUMENT,
+            unit="ms",
+            description="Duration of HTTP server requests, one point per request",
+        )
+
+    def on_start(self, span, parent_context=None) -> None:
+        self._processor.on_start(span, parent_context=parent_context)
+
+    def _on_ending(self, span) -> None:  # SDK 1.39+ hook
+        on_ending = getattr(self._processor, "_on_ending", None)
+        if on_ending is not None:
+            on_ending(span)
+
+    def on_end(self, span: ReadableSpan) -> None:
+        if _counted_request(span) and span.start_time is not None and span.end_time is not None:
+            if _is_local_root(span):
+                try:
+                    self._histogram.record(max(span.end_time - span.start_time, 0) / 1e6, _request_point(span))
+                except Exception:  # never fail the request over a metric
+                    LOGGER.debug("[autter-runtime] request count not recorded", exc_info=True)
+            attributes = dict(span.attributes or {})
+            attributes[METRIC_COUNTED_ATTRIBUTE] = True
+            span = _CopiedSpan(span, attributes=attributes)
+        self._processor.on_end(span)
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        spans = self._processor.force_flush(timeout_millis)
+        return self._meter_provider.force_flush(timeout_millis) and spans
+
+    def shutdown(self) -> None:
+        self._processor.shutdown()
+        self._meter_provider.shutdown()
+
+
+def _prefers_delta_histograms(exporter: MetricExporter) -> bool:
+    preferred = getattr(exporter, "_preferred_temporality", None) or {}
+    return preferred.get(Histogram) is AggregationTemporality.DELTA
+
+
+def request_meter_provider(
+    resource: Resource, exporter: Optional[MetricExporter] = None
+) -> Optional[MeterProvider]:
+    """The meter provider :class:`CountRequests` records into: histograms
+    exported with delta temporality (the ingester sums deltas; it ignores
+    cumulative points), :class:`CountRequests`' histogram exported as
+    ``http.server.duration``, and the framework instrumentations'
+    ``http.server.duration`` / ``http.server.request.duration`` dropped. Other
+    instruments export as usual.
+
+    ``exporter`` defaults to ``OTLPMetricExporter`` (``OTEL_EXPORTER_OTLP_*``)
+    preferring delta histograms. One that does not prefer delta for
+    histograms gets ``None`` (with a warning): counting then stays off.
+    The export interval is ``OTEL_METRIC_EXPORT_INTERVAL`` (default 60 s; the
+    ingester's latency histograms need two minutes or less).
+    """
+    if exporter is None:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+
+        exporter = OTLPMetricExporter(preferred_temporality={Histogram: AggregationTemporality.DELTA})
+    if not _prefers_delta_histograms(exporter):
+        LOGGER.warning(
+            "[autter-runtime] request counts are off: the metric exporter does not export histograms "
+            "with delta temporality, and the ingester does not count cumulative ones."
+        )
+        return None
+    return MeterProvider(
+        resource=resource,
+        metric_readers=[PeriodicExportingMetricReader(exporter)],
+        views=[
+            View(instrument_name=_REQUEST_INSTRUMENT, name="http.server.duration"),
+            *(View(instrument_name=name, aggregation=DropAggregation()) for name in _HTTP_SERVER_DURATIONS),
+        ],
+        # CountRequests.shutdown (run by the TracerProvider's) shuts it down.
+        shutdown_on_exit=False,
+    )
+
+
+def _env_flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _redacted(span: ReadableSpan) -> ReadableSpan:
     events = [Event(event.name, redact_attributes(event.attributes), event.timestamp) for event in span.events]
     status = span.status
@@ -403,6 +571,8 @@ def init_tracing(
     resource: Optional[Resource] = None,
     redact: bool = True,
     set_global: bool = True,
+    count_requests: Optional[bool] = None,
+    metric_exporter: Optional[MetricExporter] = None,
 ) -> TracerProvider:
     """A TracerProvider that head-samples as configured and always exports
     errors, registered as the global provider.
@@ -415,6 +585,16 @@ def init_tracing(
     * ``resource``: default ``Resource.create()``, which reads
       ``OTEL_SERVICE_NAME`` and ``OTEL_RESOURCE_ATTRIBUTES``.
     * ``redact``: wrap the exporter in :class:`RedactingSpanExporter`.
+    * ``count_requests`` (default: ``AUTTER_COUNT_REQUESTS=true``): count
+      every HTTP request, sampled or not (:class:`CountRequests`), in a delta
+      histogram sent through ``metric_exporter`` (default
+      ``OTLPMetricExporter`` preferring delta histograms, which reads the same
+      ``OTEL_EXPORTER_OTLP_*`` variables; see :func:`request_meter_provider`).
+      With ``set_global`` its meter provider is registered as the global one,
+      so add your own instruments (a memory gauge) to it rather than
+      registering another. It stays off, with a warning, when a meter
+      provider is already registered: its own HTTP duration histograms,
+      if delta, would count every request a second time.
 
     Call it once per process before the framework instrumentor runs (after
     fork in prefork servers: gunicorn without ``--preload`` imports the WSGI
@@ -438,6 +618,22 @@ def init_tracing(
                     description,
                 )
             return existing
+    if resource is None:
+        resource = Resource.create()
+    meter_provider = None
+    if count_requests if count_requests is not None else _env_flag("AUTTER_COUNT_REQUESTS"):
+        if set_global and isinstance(metrics.get_meter_provider(), MeterProvider):
+            LOGGER.warning(
+                "[autter-runtime] init_tracing(count_requests=True): a MeterProvider is already registered, so "
+                "request counts are off. Register none before init_tracing(): its meter provider replaces it."
+            )
+        else:
+            counted = resource.merge(Resource(REQUEST_COUNT_RESOURCE_ATTRIBUTES))
+            meter_provider = request_meter_provider(counted, metric_exporter)
+            if meter_provider is not None:
+                # Only with the histogram: these tell the ingester that marked
+                # requests are counted by the metric, not by their spans.
+                resource = counted
     if exporter is None:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
@@ -446,9 +642,14 @@ def init_tracing(
         exporter = RedactingSpanExporter(exporter)
     provider = TracerProvider(
         sampler=RecordUnsampled(sampler if sampler is not None else head_sampler_from_env()),
-        resource=resource if resource is not None else Resource.create(),
+        resource=resource,
     )
-    provider.add_span_processor(RetainErrorTraces(BatchSpanProcessor(exporter)))
+    processor: SpanProcessor = RetainErrorTraces(BatchSpanProcessor(exporter))
+    if meter_provider is not None:
+        processor = CountRequests(processor, meter_provider)
+    provider.add_span_processor(processor)
     if set_global:
+        if meter_provider is not None:
+            metrics.set_meter_provider(meter_provider)
         trace.set_tracer_provider(provider)
     return provider

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -141,6 +142,70 @@ class FlaskRecipe(unittest.TestCase):
         extra = {"OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES"} if sys.platform == "darwin" else None
         spans, stub, output = self.run_gunicorn("--preload", extra=extra)
         self.check(spans, stub, output)
+
+    def test_count_requests_counts_every_request_once(self):
+        # AUTTER_COUNT_REQUESTS=true: every request is one point in the delta
+        # http.server.duration histogram, at sampling ratio 0 too; the error
+        # traces exported anyway are marked as counted by it.
+        stub = OtlpStub()
+        self.addCleanup(stub.close)
+        port = free_port()
+        gunicorn = os.path.join(os.path.dirname(sys.executable), "gunicorn")
+        env = recipe_env(stub, SERVICE, extra={"AUTTER_COUNT_REQUESTS": "true", "OTEL_METRIC_EXPORT_INTERVAL": "200"})
+        app = App([gunicorn, "-w", "2", "-b", f"127.0.0.1:{port}", "--no-control-socket", "app:app"], env, HERE, port)
+        expected = {
+            "/ok": 3,
+            "/invoices/<int:invoice_id>/summary": 2,
+            "/invoices/<int:invoice_id>/late-fee": 1,
+            "/invoices/<int:invoice_id>": 1,
+        }
+
+        def counted(route):
+            return sum(p["count"] for p in stub.histogram_points() if p["attributes"].get("http.route") == route)
+
+        def unrouted():
+            return sum(p["count"] for p in stub.histogram_points() if "http.route" not in p["attributes"])
+
+        try:
+            for _ in range(3):
+                self.assertEqual(app.get("/ok")[0], 200)
+            for invoice_id in (31, 32):
+                self.assertEqual(app.get(f"/invoices/{invoice_id}/summary")[0], 500)
+            self.assertEqual(app.get("/invoices/31/late-fee")[0], 422)
+            self.assertEqual(app.get("/invoices/31")[0], 404)
+            self.assertEqual(app.get("/no/such/page")[0], 404)
+            stub.wait_for(lambda s: len([x for x in s if x["kind"] == "SERVER"]) >= 3)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and (
+                any(counted(route) < n for route, n in expected.items()) or unrouted() < 1
+            ):
+                time.sleep(0.05)
+        finally:
+            output = app.stop()
+
+        points = stub.histogram_points()
+        # Only the helper's histogram: Flask's own http.server.duration is dropped.
+        self.assertEqual({(p["name"], p["scope"]) for p in points}, {("http.server.duration", "autter.runtime")}, output)
+        for point in points:
+            self.assertEqual(point["temporality"], 1)  # AGGREGATION_TEMPORALITY_DELTA
+            self.assertIs(point["resource"]["autter.metrics_wired"], True)
+            self.assertIs(point["resource"]["autter.metrics_routes"], True)
+            self.assertEqual(point["resource"]["service.name"], SERVICE)
+        for route, n in expected.items():
+            self.assertEqual(counted(route), n, route)
+        statuses = sorted((p["attributes"]["http.route"], p["attributes"]["http.response.status_code"], p["count"])
+                          for p in points if p["attributes"].get("http.route") in expected)
+        self.assertEqual(sum(c for r, status, c in statuses if status == 500), 2)
+        # A 404 without a route and the readiness probes on /health count too.
+        self.assertEqual(unrouted(), 1)
+        self.assertGreaterEqual(counted("/health"), 1)
+
+        spans = [s for s in stub.spans() if s["kind"] == "SERVER"]
+        self.assertEqual(len(spans), 3)  # the error traces only, at ratio 0
+        for span in spans:
+            self.assertIs(span["attributes"]["autter.metric_has_route"], True)
+            self.assertIs(span["attributes"]["autter.tail_retained"], True)
+            self.assertIs(span["resource"]["autter.metrics_wired"], True)
 
 
 if __name__ == "__main__":

@@ -135,6 +135,11 @@ export default withAutter(
 Zero dependencies; request summaries, request ids and coded errors over
 `/v1/logs`, delivered through `ctx.waitUntil`. Needs a **server** key from a
 secret binding. Next.js `middleware.ts`: import from `@autter/runtime-next/edge`.
+Each request is counted from its summary (request and failed-request counts,
+release health): the records carry `autter.request.counted_by = "summary"`
+(`runtime-edge` after 1.2.0, ingester after 1.9.0). Pass `countRequests:
+false` where another sender already counts the same requests under the same
+service name, e.g. middleware reporting as the Node server's service.
 
 ## Next.js
 
@@ -310,6 +315,52 @@ provider = TracerProvider(sampler=RecordUnsampled(ParentBased(TraceIdRatioBased(
 provider.add_span_processor(RetainErrorTraces(BatchSpanProcessor(RedactingSpanExporter(OTLPSpanExporter()))))
 trace.set_tracer_provider(provider)
 ```
+
+### Request counts (opt-in)
+
+Without a metric feed, the ingester counts the requests of the traces head
+sampling kept, while retention keeps every error: at a 10% ratio, request
+counts read a tenth of the traffic and error rates (release health, the
+post-deploy fix watch) read ten times too high. A Python meter provider's
+default **cumulative** `http.server.duration` is not counted at all.
+`init_tracing(count_requests=True)`, or `AUTTER_COUNT_REQUESTS=true`, counts
+every request once:
+
+```bash
+AUTTER_COUNT_REQUESTS=true   # with the OTEL_* variables above; needs opentelemetry-exporter-otlp-proto-http
+```
+
+- `CountRequests` sees every HTTP server span, sampled or not
+  (`RecordUnsampled` records them all), and records one point per request
+  (each local-root span with `http.request.method` / `http.method`) in a
+  **delta** `http.server.duration` histogram (ms, with the span's
+  `http.route`, method and status code), exported to `/v1/metrics` through
+  `OTLPMetricExporter` and the same `OTEL_EXPORTER_OTLP_*` variables every
+  `OTEL_METRIC_EXPORT_INTERVAL` (default 60 s).
+- The HTTP server spans it counted are exported with
+  `autter.metric_has_route = true`, and the resource carries
+  `autter.metrics_wired` and `autter.metrics_routes`, so the ingester
+  (1.8.0+) adds no request from those spans: a head-sampled request is
+  counted by the histogram only, a retained error trace adds its failure
+  once (a 5xx is the histogram's; an error in a request answered below 500
+  adds one error from its span), and an unsampled healthy request is
+  counted though never exported.
+- Its meter provider is registered as the global one, with the framework
+  instrumentations' own `http.server.duration` / `http.server.request.duration`
+  dropped (they would count every request again). Add your own instruments,
+  such as a memory gauge, to it with `metrics.get_meter(...)`; do not
+  register another meter provider. If one is already registered when
+  `init_tracing()` runs, counting stays off with a warning, and so it does
+  with a metric exporter that does not prefer delta histograms: the flags
+  are only set next to the histogram that honours them.
+- Non-HTTP server spans (gRPC) are not counted by it and keep their
+  span-fed counts.
+
+Wiring the pieces yourself: build the meter provider with
+`request_meter_provider(resource)`, add `REQUEST_COUNT_RESOURCE_ATTRIBUTES`
+to the tracer provider's resource, and wrap the exporting processor:
+`CountRequests(RetainErrorTraces(BatchSpanProcessor(...)), meter_provider)`.
+The Flask recipe tests it under gunicorn.
 
 **Zero-code (`opentelemetry-instrument`).** The `opentelemetry-distro`
 wrapper takes its sampler from `OTEL_TRACES_SAMPLER`, and no standard
@@ -525,8 +576,10 @@ temporality, `http.route` on the data point), add
 `autter.metrics_wired=true,autter.metrics_routes=true` to
 `OTEL_RESOURCE_ATTRIBUTES` and set `autter.metric_has_route=true` on each
 server span whose data point carries `http.route` (`@autter/runtime-node`
-1.7.0+ does all of this for you). Cumulative histograms are not counted,
-so leave the flags off with them. LLM/GenAI spans are the exception — send
+1.7.0+ does all of this for you, and so does `adapters/python`'s
+`init_tracing(count_requests=True)`: see
+[Request counts](#request-counts-opt-in)). Cumulative histograms are not
+counted, so leave the flags off with them. LLM/GenAI spans are the exception — send
 them at 100% (see above).
 
 One consequence of plain head sampling to know about: an error recorded on

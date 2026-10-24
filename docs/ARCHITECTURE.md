@@ -119,7 +119,25 @@ and `autter.capture.mode = "log"`. `/v1/logs` promotes such records (severity
 ≥ error) to server occurrences — fingerprinted, written to
 `runtime_error_occurrences`, counted in `runtime_metrics_1m` (`error_count`
 only: a log record names no request the rollups count) and forwarded to
-the sink. A record is skipped when its trace id already produced an
+the sink.
+
+**Requests counted from their summary.** An edge function has no spans and
+no `http.server.duration` histogram, so its request summary is the only
+record of the request. `@autter/runtime-edge` (after 1.2.0) marks every
+record of a request `autter.request.counted_by = "summary"` (unless
+`countRequests: false`), and `/v1/logs` (`logRollups`, log-promotion.ts)
+counts a marked `kind = request` summary in `runtime_metrics_1m`:
+`request_count` 1, its duration, and `error_count` 1 when it failed —
+outcome `failed`, status ≥ 500, or `autter.request.error_reported` (an
+error the SDK reported in the request, as an error occurrence recorded in a
+request fails it on the trace path). A promoted error record carrying the
+mark adds no `error_count`: its request's summary counts that failure once.
+The decision is per record, so a request whose records an exporter splits
+over two batches is counted once. Nothing else sets the mark: Node and
+Next.js summaries are counted by the histogram or spans and never by their
+summaries, and unmarked summaries and promoted records count exactly as
+before. Like the request rollup above, an exporter retry after a lost 2xx
+counts twice. A record is skipped when its trace id already produced an
 occurrence in the same batch or, per a ClickHouse lookup, within ±60 s for
 the same org/repo (the lookup ignores the candidates' own deterministic
 ids, so a retried batch never dedupes against itself). A failed lookup
@@ -580,14 +598,17 @@ Span-level:
 - `status_code` from `http.response.status_code` / `http.status_code`.
 - Usage rollups (`runtime_metrics_1m`, 1-minute buckets). **`request_count`
   counts requests and only requests**: server requests from the span-fed
-  and metric-fed feeds below, plus the browser's synthetic usage counters
+  and metric-fed feeds below and from edge request summaries marked
+  `autter.request.counted_by = "summary"` (see Requests counted from their
+  summary), plus the browser's synthetic usage counters
   (`event:<name>` track events, `browser.longtask` and
   `browser.resource:*` timings), which keep their own routes. **`error_count`
   counts failed requests** (a 5xx or errored server span, or an error/fatal
   occurrence recorded in the request: once per request however many) **and
   errors outside any request** (workers, jobs, consumers, browser-only,
-  logger-only and edge log promotion, a `captureException` span exported
-  apart from its request): one per error/fatal occurrence. An error never
+  logger-only log promotion, edge errors outside a counted request, a
+  `captureException` span exported apart from its request): one per
+  error/fatal occurrence. An error never
   adds to `request_count`; warnings and info messages add nothing.
   `duration_sum_ms` sums request latencies, so `duration_sum_ms /
   request_count` is the mean latency. `error_count / request_count` is a
@@ -629,9 +650,13 @@ Span-level:
   - carries `autter.tail_retained` on a resource with
     `autter.metrics_wired` (runtime-node's error-linked tail retention
     ships such spans at ~100% next to its metric feed).
+  `adapters/python`'s `init_tracing(count_requests=True)` sends the same
+  shape: a delta histogram with a point for every request (recorded from
+  every HTTP server span, sampled or not), each HTTP server span marked
+  `autter.metric_has_route`, and both resource attributes.
   A request that carries `autter.tail_retained` on a resource without a
-  metric feed (the Python retention in `adapters/python`) is counted by
-  neither: it was exported because it failed, so it is no sample of the
+  metric feed (the Python retention in `adapters/python` without
+  `count_requests`) is counted by neither: it was exported because it failed, so it is no sample of the
   traffic, and adds only its failure, `error_count` 1, on its route.
   A metric-counted request adds no request from its spans; the metric
   already counted a 5xx as a failed request, so an error recorded in it

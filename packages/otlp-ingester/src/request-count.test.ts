@@ -446,6 +446,56 @@ test("tail-retained without a metric feed (Python retention): no request, its fa
 	);
 });
 
+test("Python with count_requests: every request from the helper's histogram, each failure once", () => {
+	// adapters/python init_tracing(count_requests=True) at a 10% ratio: its
+	// delta histogram counted all 10 requests (one 500, one handled error
+	// answered 422); the spans exported are the one head-sampled request and
+	// the two error traces retention kept, each marked as metric-counted.
+	const resource = { "service.version": "9c1e4f2a7b3d", ...ROUTED_METRICS };
+	const point = (route: string, status: number, count: number) => ({
+		attributes: kv({ "http.route": route, "http.request.method": "GET", "http.response.status_code": status }),
+		startTimeUnixNano: at(0),
+		timeUnixNano: at(60_000),
+		count,
+		sum: count * 20,
+		explicitBounds: [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000],
+		bucketCounts: [0, 0, 0, count, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+	});
+	const metrics = normalizeMetrics({
+		resourceMetrics: [{
+			resource: { attributes: kv({ "service.name": "billing-flask", "deployment.environment": "production", ...resource }) },
+			scopeMetrics: [{
+				scope: { name: "autter.runtime" },
+				metrics: [{
+					name: "http.server.duration",
+					histogram: {
+						aggregationTemporality: 1,
+						dataPoints: [point("/ok", 200, 8), point("/invoices/<int:invoice_id>/summary", 500, 1), point("/invoices/<int:invoice_id>/late-fee", 422, 1)],
+					},
+				}],
+			}],
+		}],
+	} as OtlpMetricsRequest);
+	const flaskSpan = (id: number, route: string, status: number, extra: Partial<SpanSpec> = {}, attributes: Record<string, Value> = {}): SpanSpec => ({
+		id,
+		traceId: id.toString(16).padStart(32, "0"),
+		name: `GET ${route}`,
+		kind: SERVER,
+		end: 20,
+		...extra,
+		attributes: { "http.method": "GET", "http.route": route, "http.status_code": status, "autter.metric_has_route": true, ...attributes },
+	});
+	const traces = normalizeTraces(batch([
+		flaskSpan(1, "/ok", 200),
+		flaskSpan(2, "/invoices/<int:invoice_id>/summary", 500, { error: true, events: [exception(5, "ZeroDivisionError", "division by zero")] }, { "autter.tail_retained": true }),
+		flaskSpan(3, "/invoices/<int:invoice_id>/late-fee", 422, { events: [exception(5, "KeyError", "'XYZ'", { "autter.handled": true })] }, { "autter.tail_retained": true }),
+	], "billing-flask", resource));
+	assert.equal(traces.occurrences.length, 2);
+	assert.deepEqual(totals([...traces.metricPoints, ...metrics]), { requests: 10, errors: 2, durationMs: 200 });
+	// Spans add only the handled error the histogram saw succeed, on its route.
+	assert.deepEqual(traces.metricPoints.map((p) => [p.route, p.requestCount, p.errorCount]), [["/invoices/<int:invoice_id>/late-fee", 0, 1]]);
+});
+
 test("without the flags, server spans are the fallback request count", () => {
 	// Plain OTel with no (or cumulative) request metrics.
 	const { metricPoints } = normalizeTraces(batch([routedRequest({}, { "autter.metric_has_route": false })], "api"));

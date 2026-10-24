@@ -8,7 +8,7 @@ Plain OpenTelemetry for Python services, with errors kept from every trace
 | --- | --- | --- |
 | [`django`](django) | `manage.py runserver` (WSGI module `shop/wsgi.py`) | `init_tracing()` + `DjangoInstrumentor` in `wsgi.py`; Django's 500, a handled exception, a chained cause with credentials redacted, a span of your own recording the same error, 404s kept out (`shop/middleware.py`); the zero-code `opentelemetry-instrument` variant |
 | [`fastapi`](fastapi) | `uvicorn app:app` | `FastAPIInstrumentor`; Starlette's 500, a handled exception in a sync route, an `ExceptionGroup` from `asyncio.TaskGroup` (3.11+), `HTTPException` not recorded |
-| [`flask`](flask) | `gunicorn -w 2 app:app`, with and without `--preload` | `FlaskInstrumentor`; Flask's 500, a handled exception, `abort(404)` not recorded |
+| [`flask`](flask) | `gunicorn -w 2 app:app`, with and without `--preload` | `FlaskInstrumentor`; Flask's 500, a handled exception, `abort(404)` not recorded; `AUTTER_COUNT_REQUESTS=true` counting every request once at sampling ratio 0 |
 | [`celery`](celery) | `celery -A tasks worker` (prefork, `worker_process_init`), and a solo worker thread on the memory broker | `CeleryInstrumentor`; failing tasks grouped per task, a handled exception in a task |
 
 Each app imports `autter_tracing` (and through it `redact`) from

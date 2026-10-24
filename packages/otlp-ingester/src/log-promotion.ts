@@ -106,7 +106,7 @@ export function promotionLookups(
  * `autter.request.counted_by = "summary"`: the request this record belongs to
  * is counted in the usage rollups by its request summary (the record of
  * `autter.operation.kind = "request"` carrying the same mark), because no
- * other feed sees it. `@autter/runtime-edge` (after 1.2.0) puts it on every
+ * other feed sees it. `@autter/runtime-edge` (1.3.0+) puts it on every
  * record of a request: an edge function has no trace pipeline and no
  * `http.server.duration` histogram, so without it edge services had error
  * counts and no requests. Nothing else sets it: Node and Next.js summaries

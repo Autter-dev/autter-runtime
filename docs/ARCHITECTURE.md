@@ -123,7 +123,7 @@ the sink.
 
 **Requests counted from their summary.** An edge function has no spans and
 no `http.server.duration` histogram, so its request summary is the only
-record of the request. `@autter/runtime-edge` (after 1.2.0) marks every
+record of the request. `@autter/runtime-edge` (1.3.0+) marks every
 record of a request `autter.request.counted_by = "summary"` (unless
 `countRequests: false`), and `/v1/logs` (`logRollups`, log-promotion.ts)
 counts a marked `kind = request` summary in `runtime_metrics_1m`:

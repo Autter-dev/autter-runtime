@@ -1,8 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [1.10.0] - 2026-10-24
 
-Packages (versions not bumped yet): `otlp-ingester`, `runtime-edge`; `adapters/python` (copied, not published). Request counts for services the error rate was wrong for: edge functions had errors and no requests, and Python services counted only the requests head sampling kept while every error was retained, so their error rates read about 1/sampleRate too high. Any deploy order works: an ingester before this ignores the new edge attributes (edge requests stay uncounted, as before), an older `runtime-edge` sends no mark (its summaries stay uncounted), and the Python opt-in needs only an ingester from 1.8.0.
+Packages: `otlp-ingester` 1.10.0, `runtime-edge` 1.3.0; `adapters/python` (copied, not published); `runtime-browser` 1.7.0, `runtime-node` 1.8.0, `runtime-next` 1.8.0 (its `/edge` entry picks up `runtime-edge` 1.3.0 through `^1.2.0`) and `runtime-cli` 1.2.0 are unchanged. Compat feature `edge_request_counts`. Request counts for services the error rate was wrong for: edge functions had errors and no requests, and Python services counted only the requests head sampling kept while every error was retained, so their error rates read about 1/sampleRate too high. Any deploy order works: an ingester before this ignores the new edge attributes (edge requests stay uncounted, as before), an older `runtime-edge` sends no mark (its summaries stay uncounted), and the Python opt-in needs only an ingester from 1.8.0.
 
 ### Features
 

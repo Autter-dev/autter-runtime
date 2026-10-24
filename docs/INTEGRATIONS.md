@@ -137,7 +137,7 @@ Zero dependencies; request summaries, request ids and coded errors over
 secret binding. Next.js `middleware.ts`: import from `@autter/runtime-next/edge`.
 Each request is counted from its summary (request and failed-request counts,
 release health): the records carry `autter.request.counted_by = "summary"`
-(`runtime-edge` after 1.2.0, ingester after 1.9.0). Pass `countRequests:
+(`runtime-edge` 1.3.0+, ingester 1.10.0+). Pass `countRequests:
 false` where another sender already counts the same requests under the same
 service name, e.g. middleware reporting as the Node server's service.
 

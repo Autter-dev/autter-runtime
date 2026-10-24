@@ -282,6 +282,16 @@ MANIFEST: dict[str, Any] = json.loads(
                 "0021-occurrence-collapsed-count"
             ],
             "sdks": {}
+        },
+        {
+            "id": "edge_request_counts",
+            "title": "Edge requests counted from their request summaries",
+            "ingester": "1.10.0",
+            "migrations": [],
+            "route": "/v1/logs",
+            "sdks": {
+                "@autter/runtime-edge": "1.3.0"
+            }
         }
     ]
 }

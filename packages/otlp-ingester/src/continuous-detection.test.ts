@@ -63,7 +63,7 @@ test("browser timing is aggregated; failed outcome becomes an issue", () => {
 	assert.equal(result.occurrences[0]?.message, "checkout: not ready for [redacted]");
 });
 
-test("pprof samples are bounded, decoded, and source map contents are dropped", async () => {
+test("pprof samples are bounded, decoded, and source maps keep only in-app contents", async () => {
 	const type = protobuf.parse(`syntax = "proto3";
 		message Profile { repeated ValueType sample_type = 1; repeated Sample sample = 2;
 			repeated Location location = 4; repeated Function function = 5; repeated string string_table = 6; }
@@ -82,8 +82,21 @@ test("pprof samples are bounded, decoded, and source map contents are dropped", 
 	const unavailableStore = new ClickHouseStore({ ...loadConfig(), clickhouseUrl: "" });
 	await assert.rejects(unavailableStore.insertProfileSamples({ orgId: "org-a", repositoryId: "repo-a" }, samples));
 	assert.throws(() => decodeProfile(Buffer.alloc(1024 * 1024 + 1), { service: "api", environment: "prod", release: "", traceId: "" }));
-	const sourceMap = validateSourceMap({ release: "abc", filename: "https://example.com/app.js?q=1", map: { version: 3, mappings: "AAAA", sources: ["src/app.ts"], sourcesContent: ["secret"] } });
+	// RF-05: in-app sources keep their content (context lines on issues);
+	// dependency and ignore-listed sources lose theirs.
+	const sourceMap = validateSourceMap({
+		release: "abc",
+		filename: "https://example.com/app.js?q=1",
+		map: {
+			version: 3,
+			mappings: "AAAA",
+			sources: ["src/app.ts", "../node_modules/vendor/index.js", "src/generated.js"],
+			sourcesContent: ["export const app = 1;", "vendor secret", "ignored secret"],
+			ignoreList: [2],
+		},
+	});
 	assert.equal(sourceMap?.filename, "/app.js");
+	assert.deepEqual(JSON.parse(sourceMap!.map).sourcesContent, ["export const app = 1;", null, null]);
 	assert.equal(sourceMap?.map.includes("secret"), false);
 });
 

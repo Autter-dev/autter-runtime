@@ -451,7 +451,12 @@ per byte of map JSON; a general-purpose decoder takes about 14), plus names,
 sources and scope tables. A map that would take more than half the budget —
 about 10 MiB of JSON at the default — is not kept: its frames are resolved in
 one pass over the encoded `mappings` for the whole stack, so it never flushes
-the other maps, at the cost of fetching it again for the next event.
+the other maps, at the cost of fetching it again for the next event. A map's
+`sourcesContent` is never part of its entry, so it caches exactly as it would
+without it: the contents of a cached map are kept in a separate store, one
+file per entry, bounded the same way (same budget, least recently used first,
+a file over half the budget not kept) and dropped with the map. A frame whose
+file was not kept resolves as usual, without context lines.
 
 **Lookup.** Symbolication calls
 `lookupSourceMap(client, database, { orgId, repositoryId, release, filename, debugId, suffix })`

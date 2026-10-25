@@ -148,6 +148,43 @@ test("ignore-listed sources are not in-app", async () => {
 	assert.equal(frame!.function, "invariantImpl");
 });
 
+test("source contents never weigh on the map's cache entry: a map caches exactly as without them", async () => {
+	const content = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+	const big = content + "\n" + "x".repeat(400_000);
+	const withContents = buildMap([10, 50, 90, 130], { sourcesContent: [big, null, null, null] });
+	// Same weight as the map without contents, whatever their size.
+	assert.equal(parseSourceMap(withContents).bytes, parseSourceMap(BUILD_A.map).bytes);
+	assert.equal(parseSourceMap(withContents).map.sourcesContent, undefined);
+	assert.equal(parseSourceMap(withContents).contentOf(0), big);
+	// A budget that only fits the map: still decoded and kept (not bypassed),
+	// and the contents live in their own store.
+	const weight = parseSourceMap(BUILD_A.map).bytes;
+	const cache = new SourceMapCache({ maxBytes: weight * 2 + 1, maxContentBytes: 4 * 1024 * 1024 });
+	const calls: SourceMapKey[] = [];
+	const symbolicator = new Symbolicator(fetcherFor({ "/assets/index-abc12345.js": withContents }, calls), cache);
+	const frames = parseStackFrames(stack(BUILD_A.url, [11, 51, 91]));
+	const [first] = await symbolicator.symbolicate(frames, scope);
+	assert.equal(cache.bypassed, 0);
+	assert.equal(cache.bytes, weight);
+	assert.ok(cache.contentBytes > 2 * big.length, `${cache.contentBytes} content bytes`);
+	assert.equal(first!.contextLine, "line 12");
+	// A cache hit reads the contents from their store: no refetch, same lines.
+	const [again] = await symbolicator.symbolicate(frames, scope);
+	assert.equal(calls.length, 1);
+	assert.deepEqual(again, first);
+	// Evicting the map drops its contents too.
+	const fetchOther: MapFetcher = async () => BUILD_A.map;
+	await cache.get({ ...scope, release: "r2", filename: "/a.js" }, fetchOther);
+	await cache.get({ ...scope, release: "r3", filename: "/a.js" }, fetchOther);
+	assert.equal(cache.size, 2);
+	assert.equal(cache.contentBytes, 0);
+	// A file over half the content budget is not kept: the frame resolves, without lines.
+	const tight = new Symbolicator(fetcherFor({ "/assets/index-abc12345.js": withContents }), new SourceMapCache({ maxContentBytes: big.length }));
+	const [unkept] = await tight.symbolicate(frames, scope);
+	assert.equal(unkept!.resolved, true);
+	assert.equal("contextLine" in unkept!, false);
+});
+
 test("context lines come only from sourcesContent: the line and 5 on each side (RF-05)", async () => {
 	assert.equal(CONTEXT_LINES, 5);
 	const content = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\r\n");

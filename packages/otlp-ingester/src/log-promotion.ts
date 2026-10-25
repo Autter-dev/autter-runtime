@@ -1,4 +1,5 @@
 import { normalizeRoute } from "./fingerprint.js";
+import { mergeLatency, requestLatency } from "./latency.js";
 import type { RuntimeLogRecord } from "./logs.js";
 import type {
 	RuntimeMetricPoint,
@@ -119,6 +120,11 @@ export const COUNTED_BY_ATTRIBUTE = "autter.request.counted_by";
  * `autter.capture.mode = "log"` record), which makes it a failed request. */
 export const ERROR_REPORTED_ATTRIBUTE = "autter.request.error_reported";
 
+function withLatency(durationMs: number) {
+	const latency = requestLatency(durationMs);
+	return latency ? { latency } : {};
+}
+
 export function countedBySummary(attributes: Record<string, unknown> | null | undefined): boolean {
 	return attributes?.[COUNTED_BY_ATTRIBUTE] === "summary";
 }
@@ -157,9 +163,13 @@ export function logRollups(
 			existing.requestCount += rest.requestCount;
 			existing.errorCount += rest.errorCount;
 			existing.durationSumMs += rest.durationSumMs;
+			const latency = mergeLatency(existing.latency, rest.latency);
+			if (latency) existing.latency = latency;
 			return;
 		}
-		rollups.set(key, { ...rest, bucketAt, sessionCount: 0 });
+		const { latency, ...counts } = rest;
+		const copy = mergeLatency(undefined, latency);
+		rollups.set(key, { ...counts, bucketAt, sessionCount: 0, ...(copy ? { latency: copy } : {}) });
 	};
 	for (const row of rows) {
 		if (row.kind !== "request" || !countedBySummary(row.attributes)) continue;
@@ -177,9 +187,14 @@ export function logRollups(
 			requestCount: 1,
 			errorCount: failed ? 1 : 0,
 			durationSumMs: row.durationMs,
+			...withLatency(row.durationMs),
 		});
 	}
 	for (const occ of promoted) {
+		// A handled warning (a deliberate fallback) or a caught error is an
+		// occurrence, never a counted failure.
+		if (occ.severity !== "error" && occ.severity !== "fatal") continue;
+		if (occ.attributes?.["autter.handled"] === true) continue;
 		// Its request's summary counts this failure.
 		if (countedBySummary(occ.attributes)) continue;
 		// One error of its own, in `error_count` only — what the trace path

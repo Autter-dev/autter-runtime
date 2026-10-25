@@ -231,7 +231,8 @@ export class SinkForwarder {
 			orgId: ctx.orgId,
 			repositoryId: ctx.repositoryId,
 			occurrences: occurrences.map(sinkOccurrence),
-			metrics: metricPoints.map((p) => ({
+			// Latency samples feed runtime_route_latency_1m only (IP-02).
+			metrics: metricPoints.map(({ latency: _latency, ...p }) => ({
 				...p,
 				bucketAt: p.bucketAt.toISOString(),
 			})),

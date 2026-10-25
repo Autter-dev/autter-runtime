@@ -33,7 +33,12 @@
  *   },
  */
 
-import { latencyTableDDL } from "./latency.js";
+import {
+	latencyTableDDL,
+	routeLatencyInputDDL,
+	routeLatencyTableDDL,
+	routeLatencyViewDDL,
+} from "./latency.js";
 import { profileTableDDL } from "./profiles.js";
 import {
 	SOURCE_MAP_DEBUG_COLUMNS,
@@ -287,6 +292,14 @@ export const MIGRATIONS: Migration[] = [
 			(column) =>
 				`ALTER TABLE {db}.runtime_error_occurrences ADD COLUMN IF NOT EXISTS ${column}`,
 		),
+	},
+	// Per-route p50/p95/p99 in the 1-minute rollups (IP-02, latency.ts): a
+	// Null input table the ingester writes latency samples to, the
+	// AggregatingMergeTree keyed like runtime_metrics_1m, and the view between
+	// them. Additive: runtime_metrics_1m and its readers are unchanged.
+	{
+		id: "0022-route-latency-1m",
+		statements: [routeLatencyInputDDL("{db}"), routeLatencyTableDDL("{db}"), routeLatencyViewDDL("{db}")],
 	},
 ];
 

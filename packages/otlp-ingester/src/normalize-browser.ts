@@ -254,11 +254,17 @@ export function normalizeBrowserPayload(
 			event.severity,
 			TYPE_TO_SEVERITY[event.type] ?? "error",
 		);
+		const context = event.context ? scrubContext(event.context) : undefined;
+		// runtime-browser 1.8.0 sends an Error passed to `console.error` with
+		// the log line as `autter.log.message` only (its bundle is size-capped):
+		// mark it the way the server SDKs mark a caught error.
+		const logged = event.type === "exception" && typeof context?.["autter.log.message"] === "string";
 		// A browser error belongs to no server request: it counts in
 		// `error_count` only (fatal/error severity), never `request_count`,
 		// so a page that only reports errors still shows them without
-		// inventing requests. Warnings and info messages count nothing.
-		if (severity === "fatal" || severity === "error") {
+		// inventing requests. A handled (caught) error is an occurrence but
+		// no counted failure; warnings and info count nothing.
+		if ((severity === "fatal" || severity === "error") && !logged) {
 			bumpRollup(event.route ? (event.route.split("?")[0] ?? "") : "", occurredAt, { errorCount: 1 });
 		}
 
@@ -283,7 +289,15 @@ export function normalizeBrowserPayload(
 				...(event.filename ? { filename: event.filename.split("?")[0] } : {}),
 				...(event.line !== undefined ? { line: event.line } : {}),
 				...(event.column !== undefined ? { column: event.column } : {}),
-				...(event.context ? { context: scrubContext(event.context) } : {}),
+				...(context ? { context } : {}),
+				...(logged
+					? {
+							"autter.handled": true,
+							"autter.handling": "caught",
+							"autter.log.source": typeof context?.["autter.log.source"] === "string" ? context["autter.log.source"] : "console",
+							"autter.log.message": context?.["autter.log.message"],
+						}
+					: {}),
 			},
 			occurredAt,
 			...liftErrorFields(event.context),

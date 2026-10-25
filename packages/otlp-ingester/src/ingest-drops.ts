@@ -27,6 +27,9 @@ import type { IngestContext } from "./types.js";
  *   (loop-collapse.ts); its payload was not stored, its count is, on the
  *   minute's collapsed sample (`collapsed_count`). `records` counts payloads
  *   not stored.
+ *   `caught_limited` (1.11.0) is the same kind, counted by the SDK: caught
+ *   errors and deliberate fallbacks its burst limit left out, whose count
+ *   rides on the next record of their kind (`autter.caught.dropped`).
  * - `suppressed`: occurrences a suppression rule set by the user dropped or
  *   sampled out (suppression.ts).
  *
@@ -101,6 +104,8 @@ export const DROP_REASONS = {
 	// ── collapsed: counted on the minute's sample, payload not stored (1.9.0) ──
 	/** Occurrences of a looping error past the first LOOP_COLLAPSE_AFTER of the minute. */
 	collapsed: { kind: "collapsed" },
+	/** Caught errors / deliberate fallbacks an SDK's burst limit left out (`autter.caught.dropped` on the next record of their kind). */
+	caught_limited: { kind: "collapsed" },
 	// ── suppressed: a suppression rule set by the user left them out (1.9.0) ──
 	/** Occurrences a `drop` rule matched, or a `sample` rule sampled out. */
 	suppressed: { kind: "suppressed" },
@@ -167,6 +172,17 @@ function countJson(root: unknown, path: readonly string[]): number {
 }
 
 const METRIC_KINDS = ["gauge", "sum", "histogram", "exponentialHistogram", "summary"] as const;
+
+/** Records an SDK's burst limit left out, from the `autter.caught.dropped`
+ * the records it did send carry (`caught_limited`). */
+export function caughtLimitedRecords(attributes: Array<Record<string, unknown> | null | undefined>): number {
+	let total = 0;
+	for (const attrs of attributes) {
+		const value = Number(attrs?.["autter.caught.dropped"]);
+		if (Number.isSafeInteger(value) && value > 0) total += Math.min(value, 1_000_000);
+	}
+	return total;
+}
 
 function countJsonDataPoints(root: unknown): number {
 	let points = 0;

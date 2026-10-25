@@ -7,6 +7,7 @@ import { extractLlmCall } from "./llm.js";
 import { BREADCRUMBS_ATTRIBUTE, breadcrumbsField } from "./breadcrumbs.js";
 import { dedupeTraceSignals, hasAutterKey, hasNextContext, type TraceSignal } from "./trace-dedupe.js";
 import { requestMembership, type RequestMembership } from "./request-spans.js";
+import { histogramLatency, mergeLatency, requestLatency, type LatencySamples } from "./latency.js";
 import {
 	asSeverity,
 	type RuntimeLlmCall,
@@ -276,8 +277,11 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				const startedAt = nanosToDate(span.startTimeUnixNano);
 				const durationMs = spanDurationMs(span);
 				const kind = spanKind(span.kind);
+				// An exception the app handled (`autter.handled`: caught and
+				// logged, or a deliberate fallback) never fails its span.
 				const hasFailureEvent = (span.events ?? []).some((event) =>
-					event.name === "exception" || (event.name === "autter.outcome"
+					(event.name === "exception" && attrMap(event.attributes).get("autter.handled") !== "true")
+					|| (event.name === "autter.outcome"
 						&& attrMap(event.attributes).get("autter.outcome.status") === "error"));
 				const isError =
 					statusCode !== null && statusCode >= 400 && statusCode < 500
@@ -354,7 +358,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							traceId: span.traceId ?? null,
 							sessionId: null,
 							attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
-								...(handled ? { "autter.handled": true, "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) }),
+								...(handled ? { "autter.handled": true, ...(eventAttrs.has("autter.sampled") ? { "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) } : {}) }),
 							occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 							// Event attributes first: one span can carry several
 							// exceptions, each with its own code.
@@ -486,6 +490,10 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	deduped.members.forEach((members, i) => {
 		const occ = occurrences[i]!;
 		if (occ.severity !== "fatal" && occ.severity !== "error") return;
+		// An error the app handled (caught and logged, a deliberate fallback)
+		// is an occurrence and an issue, but no failure: it never fails its
+		// request and never counts in `error_count`.
+		if (occ.attributes?.["autter.handled"] === true) return;
 		const request = members.map(requestOfSignal).find((r) => r !== undefined);
 		if (request) {
 			request.hasErrorOccurrence = true;
@@ -522,6 +530,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					errorCount: failed ? 1 : 0,
 					// The request's latency is its outermost span's.
 					durationSumMs: span.durationMs,
+					...withLatency(requestLatency(span.durationMs)),
 				});
 				break;
 			case "metrics": {
@@ -709,6 +718,10 @@ function methodFromSpan(span: RuntimeSpanRow): string | null {
 	return typeof raw === "string" && raw.trim() ? raw.trim().toUpperCase().slice(0, 16) : null;
 }
 
+function withLatency(latency: LatencySamples | undefined): { latency?: LatencySamples } {
+	return latency ? { latency } : {};
+}
+
 function minuteBucket(date: Date): Date {
 	return new Date(Math.floor(date.getTime() / 60_000) * 60_000);
 }
@@ -730,13 +743,16 @@ function addToRollup(
 	const key = rollupKey(point);
 	const existing = rollups.get(key);
 	if (!existing) {
-		rollups.set(key, { ...point });
+		const latency = mergeLatency(undefined, point.latency);
+		rollups.set(key, { ...point, ...withLatency(latency) });
 		return;
 	}
 	existing.requestCount += point.requestCount;
 	existing.errorCount += point.errorCount;
 	existing.durationSumMs += point.durationSumMs;
 	existing.sessionCount += point.sessionCount;
+	const latency = mergeLatency(existing.latency, point.latency);
+	if (latency) existing.latency = latency;
 }
 
 // HTTP-server duration instruments we know how to fold into rollups.
@@ -801,6 +817,11 @@ export function normalizeMetrics(
 						errorCount: statusCode !== null && statusCode >= 500 ? count : 0,
 						durationSumMs: (dataPoint.sum ?? 0) * multiplier,
 						sessionCount: 0,
+						// p50/p95/p99 from the same buckets (IP-02, latency.ts).
+						...withLatency(histogramLatency(
+							(dataPoint.explicitBounds ?? []).map((bound) => Number(bound) * multiplier),
+							(dataPoint.bucketCounts ?? []).map(Number),
+						)),
 					});
 				}
 			}

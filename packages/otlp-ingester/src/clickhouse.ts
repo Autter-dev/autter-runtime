@@ -4,7 +4,13 @@ import {
 	type ClickHouseSettings,
 } from "@clickhouse/client";
 import type { IngesterConfig } from "./config.js";
-import { latencyTableDDL, type LatencyHistogram } from "./latency.js";
+import {
+	latencyTableDDL,
+	routeLatencyInputDDL,
+	routeLatencyTableDDL,
+	routeLatencyViewDDL,
+	type LatencyHistogram,
+} from "./latency.js";
 import { profileTableDDL, type ProfileSample } from "./profiles.js";
 import { memoryTableDDL, platformEventTableDDL, type MemorySample, type PlatformEvent } from "./memory.js";
 import { sourceMapTableDDL, type SourceMapCheck, type ValidSourceMap } from "./source-maps.js";
@@ -112,6 +118,10 @@ export class ClickHouseStore {
 		return [
 			`CREATE DATABASE IF NOT EXISTS ${db}`,
 			latencyTableDDL(db, metricsTtlDays),
+			// Per-route p50/p95/p99 (IP-02): input, rollup, then its view.
+			routeLatencyInputDDL(db),
+			routeLatencyTableDDL(db, metricsTtlDays),
+			routeLatencyViewDDL(db),
 			profileTableDDL(db),
 			memoryTableDDL(db),
 			platformEventTableDDL(db),
@@ -659,6 +669,25 @@ export class ClickHouseStore {
 				error_count: Math.max(0, Math.round(p.errorCount)),
 				duration_sum_ms: p.durationSumMs,
 				session_count: Math.max(0, Math.round(p.sessionCount)),
+			})),
+		});
+		// Their percentiles: the view folds these into runtime_route_latency_1m.
+		const latency = points.filter((p) => p.latency && p.latency.valuesMs.length > 0);
+		if (latency.length === 0) return;
+		await this.getClient().insert({
+			table: this.table("runtime_route_latency_input"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: latency.map((p) => ({
+				org_id: ctx.orgId,
+				repository_id: ctx.repositoryId,
+				service: p.service,
+				environment: p.environment,
+				release: p.release ?? "",
+				route: p.route,
+				bucket_at: p.bucketAt.toISOString(),
+				values_ms: p.latency!.valuesMs,
+				weights: p.latency!.weights.map((weight) => Math.max(0, Math.round(weight))),
 			})),
 		});
 	}

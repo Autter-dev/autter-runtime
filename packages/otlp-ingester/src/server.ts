@@ -8,6 +8,7 @@ import { KeyResolver, RateLimiter } from "./auth.js";
 import { countTruncations } from "./context.js";
 import {
 	autterKeyHash,
+	caughtLimitedRecords,
 	cumulativeHttpHistogramPoints,
 	dataPointsInRequest,
 	dropRoute,
@@ -808,6 +809,7 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		countAccepted(ctx, req, [
 			{ reason: "spans_over_limit", records: overLimit },
 			{ reason: "attributes_truncated", records: truncated },
+			{ reason: "caught_limited", records: caughtLimitedRecords(occurrences.map((o) => o.attributes)) },
 		]);
 	}));
 
@@ -857,6 +859,8 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		countAccepted(ctx, req, [
 			{ reason: "log_records_over_limit", records: stats.overLimit },
 			{ reason: "attributes_truncated", records: truncated },
+			// Every record, promoted or not (the SDK's own count records too).
+			{ reason: "caught_limited", records: caughtLimitedRecords(logs.map((row) => row.attributes)) },
 		]);
 	}));
 

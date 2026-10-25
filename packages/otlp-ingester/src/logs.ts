@@ -43,9 +43,9 @@ export interface RuntimeLogRecord {
 	aiCalls: number;
 	/**
 	 * Not persisted on runtime_logs. Set for logger-only/edge error records
-	 * (`autter.capture.mode = "log"`, severity ≥ error, `exception.*`
-	 * present): the occurrence /v1/logs promotes into issue grouping —
-	 * see log-promotion.ts.
+	 * (`autter.capture.mode = "log"`, severity ≥ error, or a handled warning
+	 * such as `runtimeContext.degraded`, with `exception.*` present): the
+	 * occurrence /v1/logs promotes into issue grouping — see log-promotion.ts.
 	 */
 	occurrence?: RuntimeOccurrenceInput;
 }
@@ -208,13 +208,16 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 					ai && typeof ai === "object" && !Array.isArray(ai)
 						? (ai as Record<string, unknown>)
 						: {};
+				// Warnings too when handled: `runtimeContext.degraded` (a
+				// deliberate fallback) is recorded at warning severity.
 				const occurrence =
 					attributes["autter.capture.mode"] === "log" &&
-					(severity === "error" || severity === "fatal") &&
+					(severity === "error" || severity === "fatal" ||
+						(severity === "warning" && attributes["autter.handled"] === true)) &&
 					hasException(attributes)
 						? {
 								source: "server" as const,
-								severity: severity as "error" | "fatal",
+								severity: severity as "error" | "fatal" | "warning",
 								service,
 								environment,
 								release: release || null,

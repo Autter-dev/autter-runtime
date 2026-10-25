@@ -1,4 +1,5 @@
 import type { Breadcrumb } from "./breadcrumbs.js";
+import type { LatencySamples } from "./latency.js";
 import type { SuppressionRule } from "./suppression.js";
 
 export type RuntimeSource = "browser" | "server";
@@ -231,6 +232,13 @@ export interface RuntimeMetricPoint {
 	errorCount: number;
 	durationSumMs: number;
 	sessionCount: number;
+	/**
+	 * Latency samples behind `durationSumMs` (IP-02, latency.ts), written to
+	 * `runtime_route_latency_1m`. Absent when the feed has no durations
+	 * (errors outside requests, browser usage counters). Not forwarded to
+	 * the sink.
+	 */
+	latency?: LatencySamples;
 }
 
 /**

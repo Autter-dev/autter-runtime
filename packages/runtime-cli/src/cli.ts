@@ -28,11 +28,11 @@ const USAGE = `autter-runtime — readable stack traces for Autter Runtime
 Usage:
   autter-runtime sourcemaps setup [dir] [--dry-run] [--install] [--json]
   autter-runtime sourcemaps verify <dir> [--endpoint <url>] [--url-prefix <prefix>]
-                [--ignore <glob>]... [--allow-maps] [--json]
+                [--ignore <glob>]... [--allow-maps] [--server] [--json]
   autter-runtime sourcemaps inject <dir> [--dry-run] [--json]
   autter-runtime sourcemaps upload <dir> [--release <r>] [--url-prefix <prefix>]
                 [--endpoint <url>] [--concurrency <n>] [--delete-after-upload]
-                [--best-effort] [--dry-run] [--json]
+                [--no-sources-content] [--best-effort] [--dry-run] [--json]
   autter-runtime doctor ...      (provided by @autter/runtime-node)
 
 setup   Wires source map upload into the project in [dir] (default "."):
@@ -48,23 +48,31 @@ verify  Checks a production build before deploy: every bundle has a debug
         ingester. Exit 0: ok (upload unverified without a key); 1: problems.
 inject  Gives every .js/.mjs/.cjs bundle that has a source map a debug id
         derived from its bytes: a "//# debugId=" comment, a one-line snippet
-        that registers it for @autter/runtime-browser, and "debugId" in the
-        .map. Running it again changes nothing.
+        that registers it for the Autter SDKs (browser, Node and edge), and
+        "debugId" in the .map. Works on browser and server output alike
+        (Vite, webpack, Next.js, tsup, esbuild). Running it again changes
+        nothing.
 upload  Sends every map to <endpoint>/v1/sourcemaps with AUTTER_RUNTIME_KEY,
         in parallel, skipping maps the ingester already has. Each map carries
         the bundle's function scopes ("x_autter_scopes"), so stack frames are
-        named after the function they are in, not the call site.
+        named after the function they are in, not the call site, and the
+        original source of your own files ("sourcesContent", never your
+        dependencies'), so issues show the lines around each frame.
 
 Options:
   --release <r>          Default: $GITHUB_SHA, $VERCEL_GIT_COMMIT_SHA,
                          $CF_PAGES_COMMIT_SHA, $GIT_SHA, then git rev-parse HEAD
   --url-prefix <prefix>  Where <dir> is served from: "/" (default), "/static/",
-                         or "https://cdn.example.com/app/"
+                         or "https://cdn.example.com/app/". For server output,
+                         any tail of the path the server runs it from
+                         ("/dist/" for /app/dist/server.js) or "/"
   --endpoint <url>       Ingester base URL. Default: $AUTTER_ENDPOINT,
                          $AUTTER_RUNTIME_ENDPOINT, $OTEL_EXPORTER_OTLP_ENDPOINT,
                          then https://otlp.autter.dev
   --concurrency <n>      Parallel uploads (default 8)
   --delete-after-upload  Delete each .map once the ingester has it
+  --no-sources-content   upload: send maps without your files' source (issues
+                         then show no lines around a frame)
   --best-effort          For build scripts: never fail. Without a key, or when
                          the upload fails, report it and exit 0; with
                          --delete-after-upload, every .map under <dir> is then
@@ -72,6 +80,8 @@ Options:
   --install              setup: also run the package manager's install
   --ignore <glob>        verify: JS files that are not bundles (repeatable)
   --allow-maps           verify: report leftover .map files without failing
+  --server               verify: <dir> is server output (tsup, esbuild, webpack
+                         or Next server bundles): leftover maps are fine there
   --dry-run              Show what would change or be uploaded; write and send nothing
   --json                 Print the result as JSON
   -h, --help             Show this help
@@ -118,6 +128,8 @@ const SOURCEMAPS_OPTIONS = {
 	install: { type: "boolean" },
 	ignore: { type: "string", multiple: true },
 	"allow-maps": { type: "boolean" },
+	server: { type: "boolean" },
+	"no-sources-content": { type: "boolean" },
 	"dry-run": { type: "boolean" },
 	json: { type: "boolean" },
 	help: { type: "boolean", short: "h" },
@@ -127,8 +139,8 @@ const SOURCEMAPS_OPTIONS = {
 const ACTION_FLAGS: Record<string, string[]> = {
 	setup: ["dry-run", "install"],
 	inject: ["dry-run"],
-	upload: ["release", "url-prefix", "endpoint", "concurrency", "delete-after-upload", "best-effort", "dry-run"],
-	verify: ["endpoint", "url-prefix", "release", "ignore", "allow-maps"],
+	upload: ["release", "url-prefix", "endpoint", "concurrency", "delete-after-upload", "no-sources-content", "best-effort", "dry-run"],
+	verify: ["endpoint", "url-prefix", "release", "ignore", "allow-maps", "server"],
 };
 
 async function sourcemaps(argv: string[]): Promise<number> {
@@ -182,6 +194,7 @@ async function sourcemaps(argv: string[]): Promise<number> {
 			release: values.release,
 			ignore: values.ignore,
 			allowMaps: Boolean(values["allow-maps"]),
+			server: Boolean(values.server),
 		});
 		if (values.json) console.log(JSON.stringify(result, null, 2));
 		else for (const line of formatVerify(result)) console.log(line);
@@ -224,6 +237,7 @@ async function sourcemaps(argv: string[]): Promise<number> {
 			concurrency,
 			dryRun,
 			deleteAfterUpload,
+			...(values["no-sources-content"] ? { sourcesContent: false } : {}),
 			log: (line) => console.error(line),
 		});
 	if (!bestEffort) summary = await run();

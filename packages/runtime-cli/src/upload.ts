@@ -8,8 +8,9 @@ import { resolveRelease } from "./release.js";
 import { computeScopes, SCOPES_KEY } from "./scopes.js";
 
 export const DEFAULT_ENDPOINT = "https://otlp.autter.dev";
-/** Largest map the ingester stores: characters of JSON without
- * `sourcesContent` (otlp-ingester's SOURCE_MAP_MAX_CHARS). */
+/** Largest map the ingester stores (otlp-ingester's SOURCE_MAP_MAX_CHARS):
+ * characters of JSON without `sourcesContent`; the in-app sources' content
+ * that is sent fits in what is left of it, in UTF-8 bytes (storedMapJson). */
 export const MAX_MAP_CHARS = 32 * 1024 * 1024;
 /** The ingester's `/v1/sourcemaps` body limit, counted after the gzip body
  * is inflated: the map plus room for the rest of the request. */
@@ -50,6 +51,11 @@ export interface UploadOptions {
 	/** Delete each `.map` (and its `sourceMappingURL` comment) once the
 	 * ingester has it, so maps are never deployed. */
 	deleteAfterUpload?: boolean;
+	/** Send the original source of your own files (`sourcesContent`, when the
+	 * bundler wrote it), so issues show the lines around each frame of your
+	 * code. Dependencies' sources are never sent. Default true; false sends
+	 * maps without it (`--no-sources-content`). */
+	sourcesContent?: boolean;
 	log?: (line: string) => void;
 	env?: NodeJS.ProcessEnv;
 	cwd?: string;
@@ -96,10 +102,81 @@ export function servedFilename(urlPrefix: string | undefined, path: string): str
 	return `${prefix.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 }
 
-/** The map as the ingester stores it: `sourcesContent` removed, compact JSON. */
-export function storedMapJson(map: Record<string, unknown>): string {
-	const { sourcesContent: _omitted, ...safe } = map;
-	return JSON.stringify(safe);
+// ── The stored map: a byte-for-byte copy of otlp-ingester's source-maps.ts
+// (storedSourcesContent / storedSourceMapJson), so the hash the CLI sends is
+// the one the ingester stores and unchanged maps are skipped. Change both.
+
+/** Dependency paths (otlp-ingester stack-frames.ts isInAppPath): their sources are never sent. */
+const NOT_IN_APP_PATH_PARTS = ["node_modules/", "/site-packages/", "/dist-packages/", "/vendor/", "/.pnpm/"];
+const NOT_IN_APP_PATH_PREFIXES = ["node:", "internal/"];
+const EXTENSION_SCHEMES = ["chrome-extension:", "moz-extension:", "safari-extension:", "safari-web-extension:", "webkit-masked-url:"];
+
+/** Whether a map's `sources` entry is the app's own code (the ingester's in-app path rule). */
+export function isInAppSource(path: string): boolean {
+	if (!path) return true;
+	const normalized = path.replace(/\\/g, "/");
+	if (NOT_IN_APP_PATH_PARTS.some((part) => normalized.includes(part))) return false;
+	if (NOT_IN_APP_PATH_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return false;
+	const lower = normalized.toLowerCase();
+	return !EXTENSION_SCHEMES.some((scheme) => lower.startsWith(scheme));
+}
+
+const SOURCES_CONTENT_WRAPPER_BYTES = Buffer.byteLength(',"sourcesContent":[]');
+const NULL_ENTRY_BYTES = 4;
+
+/**
+ * The `sourcesContent` the ingester keeps, or null to leave it out: in-app
+ * sources only (not ignore-listed, not under node_modules/ etc.), whole
+ * files, smallest first, while the JSON fits `limit` UTF-8 bytes given the
+ * `baseBytes` of the map without it.
+ */
+export function storedSourcesContent(
+	fields: Record<string, unknown>,
+	baseBytes: number,
+	limit: number = MAX_MAP_CHARS,
+): Array<string | null> | null {
+	const { sources, sourcesContent } = fields;
+	if (!Array.isArray(sources) || !Array.isArray(sourcesContent) || sources.length === 0) return null;
+	const ignored = new Set<number>();
+	for (const list of [fields.ignoreList, fields.x_google_ignoreList]) {
+		if (!Array.isArray(list)) continue;
+		for (const index of list) if (Number.isInteger(index)) ignored.add(index as number);
+	}
+	const count = sources.length;
+	const candidates: Array<{ index: number; content: string; bytes: number }> = [];
+	for (let index = 0; index < count; index++) {
+		const source: unknown = sources[index];
+		const content: unknown = sourcesContent[index];
+		if (typeof source !== "string" || typeof content !== "string") continue;
+		if (ignored.has(index) || !isInAppSource(source)) continue;
+		candidates.push({ index, content, bytes: Buffer.byteLength(JSON.stringify(content)) });
+	}
+	if (candidates.length === 0) return null;
+	candidates.sort((a, b) => a.bytes - b.bytes || a.index - b.index);
+	let remaining = limit - baseBytes - SOURCES_CONTENT_WRAPPER_BYTES - NULL_ENTRY_BYTES * count - (count - 1);
+	const kept: Array<string | null> = new Array<string | null>(count).fill(null);
+	let any = false;
+	for (const candidate of candidates) {
+		const extra = candidate.bytes - NULL_ENTRY_BYTES;
+		if (extra > remaining) break;
+		remaining -= extra;
+		kept[candidate.index] = candidate.content;
+		any = true;
+	}
+	return any ? kept : null;
+}
+
+/**
+ * The map as the ingester stores it, compact JSON: every field as given,
+ * then `sourcesContent` bounded by storedSourcesContent (left out when
+ * nothing is kept, or with `sourcesContent: false`).
+ */
+export function storedMapJson(map: Record<string, unknown>, options: { sourcesContent?: boolean } = {}): string {
+	const { sourcesContent: _content, ...rest } = map;
+	const base = JSON.stringify(rest);
+	if (options.sourcesContent === false) return base;
+	const content = storedSourcesContent(map, Buffer.byteLength(base));
+	return content ? JSON.stringify({ ...rest, sourcesContent: content }) : base;
 }
 
 interface Prepared extends UploadItem {
@@ -135,6 +212,7 @@ async function prepare(
 	release: string,
 	log: (line: string) => void,
 	compress: boolean,
+	sourcesContent: boolean,
 ): Promise<Prepared | { error: string }> {
 	let map: Record<string, unknown>;
 	try {
@@ -153,9 +231,12 @@ async function prepare(
 	// already in the map are replaced or dropped.
 	const { [SCOPES_KEY]: _stale, ...plain } = map;
 	const scopes = computeScopes(code, map);
-	let json = storedMapJson(plain);
+	// In-app sources' content rides along (RF-05: context lines on issues),
+	// bounded so it never pushes a map over the limit.
+	const stored = { sourcesContent };
+	let json = storedMapJson(plain, stored);
 	if ("scopes" in scopes) {
-		const scoped = storedMapJson({ ...plain, [SCOPES_KEY]: scopes.scopes });
+		const scoped = storedMapJson({ ...plain, [SCOPES_KEY]: scopes.scopes }, stored);
 		if (fits(scoped, uploadBody(release, filename, debugId, scoped))) json = scoped;
 		else if (fits(json, uploadBody(release, filename, debugId, json))) {
 			log(`warning: ${bundle.path}: its map is over 32 MB with function scopes, so it is uploaded without them (frames keep call-site names)`);
@@ -198,7 +279,7 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 
 	const items: Prepared[] = [];
 	for (const bundle of await findBundles(dir, options.files)) {
-		const prepared = await prepare(bundle, options.urlPrefix, release, log, !options.dryRun);
+		const prepared = await prepare(bundle, options.urlPrefix, release, log, !options.dryRun, options.sourcesContent !== false);
 		if ("error" in prepared) {
 			summary.failed.push({ path: bundle.path, filename: servedFilename(options.urlPrefix, bundle.path), error: prepared.error });
 		} else if (prepared.mapChars > MAX_MAP_CHARS || prepared.bytes > MAX_UPLOAD_BYTES) {

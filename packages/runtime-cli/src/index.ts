@@ -41,9 +41,11 @@ export {
 	UPLOAD_KEY_PREFIX,
 	MAX_MAP_CHARS,
 	MAX_UPLOAD_BYTES,
+	isInAppSource,
 	resolveEndpoint,
 	servedFilename,
 	storedMapJson,
+	storedSourcesContent,
 	uploadDir,
 	type UploadItem,
 	type UploadOptions,
@@ -55,6 +57,7 @@ export { gitHead, RELEASE_ENV_VARS, RELEASE_RE, resolveRelease, type ResolvedRel
 export {
 	formatUploadSummary,
 	processBuildOutput,
+	serverUrlPrefix,
 	type AutterSourceMapsOptions,
 	type BuildOutputResult,
 } from "./build.js";

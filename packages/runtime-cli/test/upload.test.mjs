@@ -8,12 +8,16 @@ import { fileURLToPath } from "node:url";
 import {
 	FatalUploadError,
 	injectDir,
+	isInAppSource,
 	MAX_MAP_CHARS,
 	resolveEndpoint,
 	resolveRelease,
 	servedFilename,
+	storedMapJson,
 	uploadDir,
 } from "../dist/index.js";
+import { isInAppPath } from "../../otlp-ingester/dist/stack-frames.js";
+import { storedSourceMapJson } from "../../otlp-ingester/dist/source-maps.js";
 import { read, readJson, SERVER_KEY, SIMPLE_MAP, startIngester, tempDir, UPLOAD_KEY, writeFiles } from "./helpers.mjs";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -46,13 +50,64 @@ test("upload sends every map with its debug id, and the ingester accepts them", 
 		assert.equal(row.tenant, "org-a/repo-a");
 		assert.equal(row.release, "abc123");
 		assert.equal(row.debugId, result.debugId);
-		assert.equal(row.map.includes("secret source"), false, "sourcesContent never leaves the machine");
+		// The app's own source rides along (RF-05: context lines on issues).
+		assert.deepEqual(JSON.parse(row.map).sourcesContent, ["secret source"]);
 		// The client's content hash is the one the ingester stores, so the
 		// next run can skip this map.
 		const item = summary.uploaded.find((u) => u.path === result.path);
 		assert.equal(item.hash, row.contentHash);
 		assert.equal(item.hash, createHash("sha256").update(row.map).digest("hex"));
 	}
+});
+
+test("dependencies' sources are never sent, and --no-sources-content sends none", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const map = {
+		...SIMPLE_MAP,
+		sources: ["../src/app.ts", "../node_modules/react/index.js", "../src/vendor-shim.js"],
+		sourcesContent: ["app source", "react source", "shim source"],
+		x_google_ignoreList: [2],
+		mappings: "AAAA;ACAA;ACAA",
+	};
+	const dir = tempDir({ "app.js": "a\nb\nc\n", "app.js.map": map });
+	const summary = await uploadDir(dir, { ...quiet, release: "abc123", endpoint: ingester.url, key: SERVER_KEY });
+	assert.deepEqual(summary.failed, []);
+	assert.deepEqual(JSON.parse(ingester.rows[0].map).sourcesContent, ["app source", null, null]);
+	assert.equal(summary.uploaded[0].hash, ingester.rows[0].contentHash);
+
+	const without = tempDir({ "app.js": "a\nb\nc\n", "app.js.map": map });
+	const plain = await uploadDir(without, { ...quiet, release: "def456", endpoint: ingester.url, key: SERVER_KEY, sourcesContent: false });
+	const row = ingester.rows.find((r) => r.release === "def456");
+	assert.equal("sourcesContent" in JSON.parse(row.map), false);
+	assert.equal(row.map.includes("app source"), false);
+	assert.equal(plain.uploaded[0].hash, row.contentHash, "the ingester stores what was sent, so re-runs still skip it");
+
+	// The CLI flag.
+	const flagged = tempDir({ "app.js": "a\nb\nc\n", "app.js.map": map });
+	const run = await cli(["sourcemaps", "upload", flagged, "--release", "ghi789", "--endpoint", ingester.url, "--no-sources-content"], { AUTTER_RUNTIME_KEY: SERVER_KEY });
+	assert.equal(run.code, 0, run.stderr);
+	assert.equal("sourcesContent" in JSON.parse(ingester.rows.find((r) => r.release === "ghi789").map), false);
+});
+
+test("the stored map matches the ingester's byte for byte (in-app rule and bounds are mirrored)", () => {
+	for (const path of ["../src/app.ts", "webpack://shop/./node_modules/x/i.js", "../.pnpm/zod@3/lib/i.js", "C:\\app\\vendor\\x.js", "node:fs", "internal/x", "chrome-extension://abc/x.js", ""]) {
+		assert.equal(isInAppSource(path), isInAppPath(path), path);
+	}
+	const map = {
+		version: 3,
+		sources: ["a.ts", "b.ts", "node_modules/c.js", "d.ts"],
+		sourcesContent: ["b".repeat(5000), "é".repeat(100), "c", "a".repeat(10)],
+		ignoreList: [3],
+		names: [],
+		mappings: "AAAA",
+		x_autter_scopes: { version: 1, names: [], scopes: "" },
+	};
+	assert.equal(storedMapJson(map), storedSourceMapJson(map));
+	// Near the limit: the same contents are dropped on both sides.
+	const padded = { ...map, names: ["n".repeat(MAX_MAP_CHARS - 5200)] };
+	assert.equal(storedMapJson(padded), storedSourceMapJson(padded));
+	assert.deepEqual(JSON.parse(storedMapJson(padded)).sourcesContent, [null, "é".repeat(100), null, null]);
 });
 
 test("a second upload skips maps the ingester already has, and re-sends changed ones", async (t) => {

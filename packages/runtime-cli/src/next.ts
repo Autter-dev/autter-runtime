@@ -1,6 +1,12 @@
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { logMapsNotGenerated, processBuildOutput, shouldGenerateMaps, type AutterSourceMapsOptions } from "./build.js";
+import {
+	logMapsNotGenerated,
+	processBuildOutput,
+	serverUrlPrefix,
+	shouldGenerateMaps,
+	type AutterSourceMapsOptions,
+} from "./build.js";
 import { findMapFiles } from "./files.js";
 import { AutterSourceMapsWebpackPlugin } from "./webpack.js";
 
@@ -16,6 +22,10 @@ type NextConfigFunction = (
 interface WebpackContextLike {
 	isServer: boolean;
 	dev: boolean;
+	/** "nodejs" or "edge" on server compilations. */
+	nextRuntime?: string;
+	/** The project directory. */
+	dir?: string;
 }
 interface WebpackConfigLike {
 	devtool?: string | false;
@@ -53,6 +63,17 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 	// can be uploaded (see shouldGenerateMaps), and never left in .next/static.
 	const ownMaps = !publicMaps && shouldGenerateMaps(options);
 	const deleteAfterUpload = options.deleteAfterUpload ?? !publicMaps;
+	// Server output (RF-05): `.next/server` (Node and edge) gets debug ids and
+	// its maps uploaded too, stored under `/<distDir>/server/` so the ingester
+	// matches the path Node runs it from (`/var/task/.next/server/app/page.js`).
+	// Maps the user (`experimental.serverSourceMaps`) or Next configured stay;
+	// maps the wrapper turned on are deleted after the upload step.
+	const serverBundles = options.serverBundles !== false;
+	const userServerMaps = config.experimental?.serverSourceMaps !== undefined;
+	const ownServerMaps = serverBundles && !userServerMaps && shouldGenerateMaps(options);
+	// A server compilation whose devtool the user's webpack function chose:
+	// those maps are theirs, uploaded but never deleted.
+	let serverDevtoolPreset = false;
 	let notified = false;
 	const notifyNoMaps = () => {
 		if (!publicMaps && !ownMaps && !notified) {
@@ -70,10 +91,12 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 	const wrapped: NextConfigObject = {
 		...config,
 		webpack(webpackConfig: WebpackConfigLike, context: WebpackContextLike): WebpackConfigLike {
+			// Next's own devtool, before the user's function may change it.
+			const nextDevtool = webpackConfig.devtool;
 			const result = typeof userWebpack === "function" ? userWebpack(webpackConfig, context) : webpackConfig;
-			// Client production builds only: Next reverts devtool changes in dev,
-			// and server bundles never reach the browser SDK.
-			if (!context.isServer && !context.dev) {
+			// Production builds only: Next reverts devtool changes in dev.
+			if (context.dev) return result;
+			if (!context.isServer) {
 				// Without a key Next's own setting stays (no client maps); the
 				// webpack plugin or the after-compile hook says so once.
 				if (ownMaps) result.devtool = "hidden-source-map";
@@ -86,6 +109,27 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 						),
 					];
 				}
+				return result;
+			}
+			if (!serverBundles) return result;
+			// Maps the user's webpack function asked for stay theirs. Otherwise,
+			// with a key, the wrapper owns server maps: hidden ones, whatever
+			// Next set (on 15.4.1+ its devtool follows the serverSourceMaps flag
+			// the wrapper itself turned on for Turbopack).
+			const preset = Boolean(result.devtool) && (result.devtool !== nextDevtool || !ownServerMaps);
+			if (preset) serverDevtoolPreset = true;
+			const turnedOn = !preset && ownServerMaps;
+			if (turnedOn) result.devtool = "hidden-source-map";
+			// Older Next: the plugin on each server compilation (Node and edge)
+			// does the work, when it will find maps.
+			if (!useHook && (turnedOn || preset)) {
+				result.plugins = [
+					...(result.plugins ?? []),
+					new AutterSourceMapsWebpackPlugin(
+						{ ...options, deleteAfterUpload: options.deleteAfterUpload ?? turnedOn },
+						{ ownMaps: turnedOn, server: true },
+					),
+				];
 			}
 			return result;
 		},
@@ -93,14 +137,17 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 	if (useHook) {
 		// Turbopack emits client maps only with productionBrowserSourceMaps; the
 		// hook hides them (drops the sourceMappingURL comment) after the build
-		// and deletes them once the upload step is over.
+		// and deletes them once the upload step is over. Server maps likewise
+		// come from experimental.serverSourceMaps.
 		if (ownMaps) wrapped.productionBrowserSourceMaps = true;
+		if (ownServerMaps) wrapped.experimental = { ...config.experimental, serverSourceMaps: true };
 		const userHook = config.compiler?.runAfterProductionCompile as ((ctx: unknown) => unknown) | undefined;
 		wrapped.compiler = {
 			...config.compiler,
 			async runAfterProductionCompile(ctx: { distDir?: string; projectDir?: string } = {}) {
 				if (typeof userHook === "function") await userHook(ctx);
-				const distDir = ctx.distDir ?? resolve(ctx.projectDir ?? process.cwd(), String(config.distDir ?? ".next"));
+				const projectDir = ctx.projectDir ?? process.cwd();
+				const distDir = ctx.distDir ?? resolve(projectDir, String(config.distDir ?? ".next"));
 				const staticDir = join(distDir, "static");
 				notifyNoMaps();
 				await processBuildOutput({
@@ -113,6 +160,19 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 					// Every client map (JS and CSS): .next/static is deployed as is.
 					maps: ownMaps ? await findMapFiles(staticDir) : undefined,
 				});
+				if (!serverBundles) return;
+				const serverDir = join(distDir, "server");
+				const ownServer = ownServerMaps && !serverDevtoolPreset;
+				await processBuildOutput({
+					dir: serverDir,
+					urlPrefix: serverUrlPrefix(projectDir, serverDir),
+					options: { ...options, deleteAfterUpload: options.deleteAfterUpload ?? ownServer },
+					deleteAfterUpload: ownServer,
+					stripSourceMappingUrl: ownServer,
+					ownMaps: ownServer,
+					maps: ownServer ? await findMapFiles(serverDir) : undefined,
+					server: true,
+				});
 			},
 		};
 	}
@@ -123,8 +183,11 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
  * Next.js config wrapper: hidden source maps for client production builds,
  * debug ids injected into every client chunk, maps uploaded after the build
  * when AUTTER_RUNTIME_KEY (or `key`) is set, then deleted whatever the
- * upload's outcome (without a key, no maps are turned on at all). Works with webpack builds, and
- * with Turbopack builds on Next.js 15.4.1+ (`compiler.runAfterProductionCompile`).
+ * upload's outcome (without a key, no maps are turned on at all). The server
+ * output (`.next/server`, Node and edge) gets the same, stored under
+ * `/.next/server/` (RF-05; `serverBundles: false` leaves it alone). Works
+ * with webpack builds, and with Turbopack builds on Next.js 15.4.1+
+ * (`compiler.runAfterProductionCompile`).
  *
  * ```js
  * // next.config.mjs

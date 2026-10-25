@@ -173,3 +173,42 @@ test("--ignore globs", () => {
 	assert.ok(!globToRegExp("assets/*.js").test("assets/deep/x.js"));
 	assert.ok(globToRegExp("**/legacy-?.js").test("a/b/legacy-1.js"));
 });
+
+test("--server: server output keeps its maps without failing, and Next server manifests are not bundles (RF-05)", async () => {
+	const root = tempDir({
+		"package.json": "{}",
+		"dist/server.js": "module.exports = 1;\n",
+		"dist/server.js.map": SIMPLE_MAP,
+		".next/server/app/page.js": "exports.id = 1;\n",
+		".next/server/app/page.js.map": SIMPLE_MAP,
+		".next/server/middleware-manifest.js": "self.__MIDDLEWARE_MANIFEST={}\n",
+		".next/server/app/page_client-reference-manifest.js": "globalThis.__RSC_MANIFEST={}\n",
+	});
+	const dist = join(root, "dist");
+	await injectDir(dist);
+	// As browser output, the leftover map fails the check; as server output it is a note.
+	assert.equal((await verifyDir(dist, { env: {} })).ok, false);
+	const server = await verifyDir(dist, { env: {}, server: true });
+	assert.deepEqual(server.failures, []);
+	assert.equal(server.ok, true);
+	assert.equal(server.server, true);
+	assert.deepEqual(server.maps, ["server.js.map"]);
+
+	const next = join(root, ".next/server");
+	await injectDir(next);
+	const result = await verifyDir(next, { env: {}, server: true });
+	assert.deepEqual(result.failures, []);
+	assert.deepEqual(
+		result.bundles.map((b) => [b.path, b.status]),
+		[
+			["app/page.js", "ok"],
+			["app/page_client-reference-manifest.js", "skipped"],
+			["middleware-manifest.js", "skipped"],
+		],
+	);
+
+	const run = await cli(["sourcemaps", "verify", dist, "--server"]);
+	assert.equal(run.code, 0, run.stdout);
+	assert.match(run.stdout, /note {4}server\.js\.map: source map in the server output/);
+	assert.match(run.stdout, /1 source map\(s\) left \(server output\)/);
+});

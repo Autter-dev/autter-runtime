@@ -1,5 +1,11 @@
 import { dirname, resolve } from "node:path";
-import { logMapsNotGenerated, processBuildOutput, shouldGenerateMaps, type AutterSourceMapsOptions } from "./build.js";
+import {
+	logMapsNotGenerated,
+	processBuildOutput,
+	serverUrlPrefix,
+	shouldGenerateMaps,
+	type AutterSourceMapsOptions,
+} from "./build.js";
 import { removeSourceMaps } from "./files.js";
 
 export type { AutterSourceMapsOptions } from "./build.js";
@@ -13,6 +19,7 @@ interface UserConfigLike {
 }
 interface ResolvedConfigLike {
 	base?: string;
+	root?: string;
 	build?: { sourcemap?: SourcemapSetting; ssr?: boolean | string };
 }
 interface OutputOptionsLike {
@@ -40,6 +47,9 @@ export interface AutterSourceMapsPlugin {
  * chunk a debug id after the bundle is written, and uploads the maps when
  * AUTTER_RUNTIME_KEY (or `key`) is set. Maps it turned on are deleted after
  * the upload step whatever its outcome; without a key it turns none on.
+ * SSR builds and Vite 6 server environments are uploaded too (RF-05), under
+ * their output directory's path in the project (`/dist/server/`), unless
+ * `serverBundles: false`.
  *
  * ```ts
  * // vite.config.ts
@@ -52,6 +62,8 @@ export function autterSourceMaps(options: AutterSourceMapsOptions = {}): AutterS
 	let enabledMaps = false;
 	let ssr = false;
 	let base = "/";
+	let root = process.cwd();
+	const serverBundles = options.serverBundles !== false;
 	return {
 		name: "autter-runtime-sourcemaps",
 		apply: "build",
@@ -59,8 +71,8 @@ export function autterSourceMaps(options: AutterSourceMapsOptions = {}): AutterS
 		config(config) {
 			isVite = true;
 			const current = config.build?.sourcemap;
-			// SSR builds are never uploaded, so they get no maps from us.
-			if ((current === undefined || current === false) && !config.build?.ssr) {
+			// SSR builds get maps only when server bundles are uploaded (RF-05).
+			if ((current === undefined || current === false) && (serverBundles || !config.build?.ssr)) {
 				if (!shouldGenerateMaps(options)) {
 					logMapsNotGenerated(options);
 					return undefined;
@@ -72,6 +84,7 @@ export function autterSourceMaps(options: AutterSourceMapsOptions = {}): AutterS
 		},
 		configResolved(config) {
 			ssr = Boolean(config.build?.ssr);
+			if (config.root) root = config.root;
 			// A relative base ("./") is resolved against the page at run time;
 			// "/" is the right guess for where the assets are then served.
 			if (config.base && /^(\/|[a-z][\w+.-]*:\/\/)/i.test(config.base)) base = config.base;
@@ -96,11 +109,30 @@ export function autterSourceMaps(options: AutterSourceMapsOptions = {}): AutterS
 			const maps = Object.values(bundle)
 				.filter((file) => file.fileName.endsWith(".map"))
 				.map((file) => resolve(dir, file.fileName));
-			// Server bundles (Vite SSR builds or a Vite 6+ server environment)
-			// never reach the browser SDK: nothing to upload, and maps we
-			// turned on for them go.
+			const files = Object.values(bundle)
+				.filter((file) => file.type === "chunk")
+				.map((file) => resolve(dir, file.fileName));
+			// Server bundles (Vite SSR builds or a Vite 6+ server environment):
+			// uploaded under their directory's path in the project, which the
+			// ingester matches against the path Node runs them from (RF-05).
 			const environment = (this as { environment?: { config?: { consumer?: string } } } | undefined)?.environment;
-			if (ssr || environment?.config?.consumer === "server") {
+			const server = ssr || environment?.config?.consumer === "server";
+			if (server && serverBundles) {
+				await processBuildOutput({
+					dir,
+					files,
+					maps,
+					urlPrefix: serverUrlPrefix(root, dir),
+					options,
+					deleteAfterUpload: enabledMaps,
+					ownMaps: enabledMaps,
+					server: true,
+				});
+				return;
+			}
+			// `serverBundles: false`: server output is left alone, and maps we
+			// turned on for it go.
+			if (server) {
 				if (enabledMaps && options.deleteAfterUpload !== false) {
 					try {
 						const removed = await removeSourceMaps(maps);
@@ -113,9 +145,6 @@ export function autterSourceMaps(options: AutterSourceMapsOptions = {}): AutterS
 				}
 				return;
 			}
-			const files = Object.values(bundle)
-				.filter((file) => file.type === "chunk")
-				.map((file) => resolve(dir, file.fileName));
 			await processBuildOutput({
 				dir,
 				files,

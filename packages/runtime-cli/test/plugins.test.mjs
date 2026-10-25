@@ -6,7 +6,7 @@ import { rollup } from "rollup";
 import { hasDebugIdSnippet, readDebugIdComment } from "../dist/index.js";
 import { withAutterSourceMaps } from "../dist/next.js";
 import { autterSourceMaps } from "../dist/vite.js";
-import { AutterSourceMapsWebpackPlugin } from "../dist/webpack.js";
+import { AutterSourceMapsWebpackPlugin, isServerTarget } from "../dist/webpack.js";
 import { ScopeIndex } from "../../otlp-ingester/dist/source-map-scopes.js";
 import { decodeMappings, read, readJson, SERVER_KEY, SIMPLE_MAP, startIngester, tempDir, writeFiles } from "./helpers.mjs";
 
@@ -152,7 +152,7 @@ test("Rollup keeps maps the user turned on, and their sourceMappingURL: uploaded
 	assert.equal(mapsUnder(keyless).length, 2);
 });
 
-test("Vite: turns on hidden maps, uses `base` as the URL prefix, skips SSR builds", async (t) => {
+test("Vite: turns on hidden maps, uses `base` as the URL prefix, uploads SSR builds under their directory (RF-05)", async (t) => {
 	const ingester = await startIngester();
 	t.after(ingester.close);
 	const plugin = autterSourceMaps({ ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-1" });
@@ -170,16 +170,33 @@ test("Vite: turns on hidden maps, uses `base` as the URL prefix, skips SSR build
 
 	// A user who set sourcemap themselves keeps it.
 	assert.equal(autterSourceMaps(silent).config({ build: { sourcemap: true } }), undefined);
-	// Server bundles (Vite ≤5 SSR, or a Vite 6 server environment) are skipped.
+	// Server bundles (Vite ≤5 SSR, or a Vite 6 server environment) get debug
+	// ids and are stored under their directory in the project, not `base`:
+	// the ingester matches that against the path Node runs them from.
+	const project = tempDir({ "dist/server/entry.js": "x\n", "dist/server/entry.js.map": SIMPLE_MAP });
+	const ssrOut = join(project, "dist/server");
 	const ssr = autterSourceMaps({ ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-1" });
-	ssr.config({});
-	ssr.configResolved({ base: "/", build: { ssr: true } });
-	const ssrOut = tempDir({ "entry.js": "x\n", "entry.js.map": SIMPLE_MAP });
+	assert.deepEqual(ssr.config({ build: { ssr: true } }), { build: { sourcemap: "hidden" } });
+	ssr.configResolved({ base: "/app/", root: project, build: { ssr: true } });
 	await ssr.writeBundle.call({}, { dir: ssrOut }, { "entry.js": { type: "chunk", fileName: "entry.js" } });
+	assert.deepEqual(ingester.rows.map((r) => r.filename), ["/app/assets/index-abc.js", "/dist/server/entry.js"]);
+	assert.equal(readDebugIdComment(read(ssrOut, "entry.js")), ingester.rows[1].debugId);
+	const envProject = tempDir({ "build/ssr/entry.mjs": "x\n", "build/ssr/entry.mjs.map": SIMPLE_MAP });
 	const env = autterSourceMaps({ ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-1" });
-	await env.writeBundle.call({ environment: { config: { consumer: "server" } } }, { dir: ssrOut }, { "entry.js": { type: "chunk", fileName: "entry.js" } });
-	assert.equal(readDebugIdComment(read(ssrOut, "entry.js")), null);
-	assert.equal(ingester.rows.length, 1);
+	env.configResolved({ base: "/", root: envProject, build: {} });
+	await env.writeBundle.call({ environment: { config: { consumer: "server" } } }, { dir: join(envProject, "build/ssr") }, {
+		"entry.mjs": { type: "chunk", fileName: "entry.mjs" },
+	});
+	assert.equal(ingester.rows.at(-1).filename, "/build/ssr/entry.mjs");
+
+	// serverBundles: false leaves server output exactly as it was.
+	const off = autterSourceMaps({ ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-1", serverBundles: false });
+	assert.equal(off.config({ build: { ssr: true } }), undefined, "no maps turned on for SSR");
+	off.configResolved({ base: "/", root: project, build: { ssr: true } });
+	const untouched = tempDir({ "entry.js": "x\n", "entry.js.map": SIMPLE_MAP });
+	await off.writeBundle.call({}, { dir: untouched }, { "entry.js": { type: "chunk", fileName: "entry.js" } });
+	assert.equal(readDebugIdComment(read(untouched, "entry.js")), null);
+	assert.equal(ingester.rows.length, 3);
 });
 
 test("Vite: no key → no maps turned on; a failed upload → every map it turned on (JS and CSS) deleted; your own maps untouched", async (t) => {
@@ -220,7 +237,7 @@ test("Vite: no key → no maps turned on; a failed upload → every map it turne
 	assert.deepEqual(mapsUnder(ownOut), ["assets/index-abc.css.map", "assets/index-abc.js.map"]);
 	assert.match(read(ownOut, "assets/index-abc.css"), /sourceMappingURL/);
 
-	// A Vite 6 server environment is never uploaded: maps we turned on for it go.
+	// A Vite 6 server environment whose upload fails: maps we turned on for it go too.
 	const env = autterSourceMaps({ ...silent, key: SERVER_KEY, endpoint: failing.url, release: "rel-1" });
 	env.config({});
 	const serverOut = tempDir({ "entry.js": "x\n", "entry.js.map": SIMPLE_MAP });
@@ -228,9 +245,19 @@ test("Vite: no key → no maps turned on; a failed upload → every map it turne
 		"entry.js": { type: "chunk", fileName: "entry.js" },
 		"entry.js.map": { type: "asset", fileName: "entry.js.map" },
 	});
+	assert.equal(failing.uploads().length, 3, "the plugin's, your own maps', and the server environment's");
 	assert.deepEqual(mapsUnder(serverOut), []);
-	// SSR builds get no maps from the plugin at all.
-	assert.equal(autterSourceMaps({ ...silent, key: SERVER_KEY }).config({ build: { ssr: true } }), undefined);
+	// With serverBundles: false, maps we turned on for a server environment go without an upload.
+	const off = autterSourceMaps({ ...silent, key: SERVER_KEY, endpoint: failing.url, release: "rel-1", serverBundles: false });
+	off.config({});
+	const offOut = tempDir({ "entry.js": "x\n", "entry.js.map": SIMPLE_MAP });
+	await off.writeBundle.call({ environment: { config: { consumer: "server" } } }, { dir: offOut }, {
+		"entry.js": { type: "chunk", fileName: "entry.js" },
+		"entry.js.map": { type: "asset", fileName: "entry.js.map" },
+	});
+	assert.equal(failing.uploads().length, 3);
+	assert.deepEqual(mapsUnder(offOut), []);
+	assert.equal(readDebugIdComment(read(offOut, "entry.js")), null);
 });
 
 /** Just enough of webpack's Compiler/Compilation for the plugin. */
@@ -300,6 +327,35 @@ test("webpack: no key → no devtool; unreachable ingester → maps it turned on
 	assert.deepEqual(mapsUnder(ownOut), ["css/main.css.map", "js/main.123.js.map"]);
 });
 
+test("webpack: a Node target is a server bundle, stored under its output directory in the project (RF-05)", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const project = tempDir({ "dist/server.js": "module.exports = 1;\n", "dist/server.js.map": SIMPLE_MAP });
+	const compiler = { ...fakeCompiler({ mode: "production", target: "node18" }), context: project };
+	new AutterSourceMapsWebpackPlugin({ ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-1", urlPrefix: "/static/" }).apply(compiler);
+	assert.equal(compiler.options.devtool, "hidden-source-map");
+	await compiler.taps[0].fn({
+		outputOptions: { path: join(project, "dist"), publicPath: "/static/" },
+		getAssets: () => [{ name: "server.js" }, { name: "server.js.map" }],
+	});
+	// Neither output.publicPath nor the urlPrefix option: those are for browsers.
+	assert.deepEqual(ingester.rows.map((r) => r.filename), ["/dist/server.js"]);
+	assert.equal(readDebugIdComment(read(project, "dist/server.js")), ingester.rows[0].debugId);
+	assert.equal(existsSync(join(project, "dist/server.js.map")), false, "the maps it turned on go");
+	// Other server targets; browser targets stay browser bundles.
+	assert.equal(isServerTarget("async-node"), true);
+	assert.equal(isServerTarget(["node", "es2020"]), true);
+	assert.equal(isServerTarget("electron-main"), true);
+	assert.equal(isServerTarget("web"), false);
+	assert.equal(isServerTarget(["browserslist"]), false);
+	assert.equal(isServerTarget(false), false);
+	// serverBundles: false: a server build is left alone.
+	const off = fakeCompiler({ mode: "production", target: "node" });
+	new AutterSourceMapsWebpackPlugin({ ...silent, key: SERVER_KEY, serverBundles: false }).apply(off);
+	assert.equal(off.options.devtool, undefined);
+	assert.equal(off.taps.length, 0);
+});
+
 /** A project directory whose node_modules has `next` at `version`. */
 function nextProject(version) {
 	const dir = tempDir({ "package.json": { name: "app" }, "node_modules/next/package.json": { name: "next", version } });
@@ -333,25 +389,56 @@ test("Next 15.4.1+: hidden client maps, and the after-compile hook injects, uplo
 	assert.equal(client.marker, true, "the user's webpack function still runs");
 	assert.equal(client.devtool, "hidden-source-map");
 	assert.equal(client.plugins.length, 0, "the after-compile hook does the work, for webpack and Turbopack alike");
-	const server = config.webpack({ devtool: "source-map" }, { isServer: true, dev: false });
-	assert.equal(server.devtool, "source-map");
+	// Server compilations (Node and edge) get hidden maps too (RF-05): the
+	// wrapper owns them, whatever Next set (its devtool follows the
+	// serverSourceMaps flag the wrapper turns on for Turbopack).
+	assert.equal(config.experimental.serverSourceMaps, true);
+	const server = config.webpack({ devtool: "source-map" }, { isServer: true, dev: false, nextRuntime: "nodejs" });
+	assert.equal(server.devtool, "hidden-source-map");
+	assert.equal((server.plugins ?? []).length, 0, "the after-compile hook does the server work too");
 
 	const distDir = join(project, ".next");
 	writeFiles(distDir, {
 		"static/chunks/app-1.js": "console.log(1);\n//# sourceMappingURL=app-1.js.map\n",
 		"static/chunks/app-1.js.map": SIMPLE_MAP,
 		"static/BUILD/_buildManifest.js": "self.__BUILD_MANIFEST={}\n",
-		"server/page.js": "x\n",
-		"server/page.js.map": SIMPLE_MAP,
+		"server/app/page.js": "x\n//# sourceMappingURL=page.js.map\n",
+		"server/app/page.js.map": SIMPLE_MAP,
+		"server/middleware-manifest.js": "self.__MIDDLEWARE_MANIFEST={}\n",
 	});
 	await config.compiler.runAfterProductionCompile({ distDir, projectDir: project });
 	assert.ok(calls.includes("user hook"));
-	assert.deepEqual(ingester.rows.map((r) => r.filename), ["/docs/_next/static/chunks/app-1.js"]);
+	// Server maps are stored under the server directory's path in the project,
+	// which the ingester matches against /var/task/.next/server/app/page.js.
+	assert.deepEqual(ingester.rows.map((r) => r.filename), ["/docs/_next/static/chunks/app-1.js", "/.next/server/app/page.js"]);
 	const chunk = read(distDir, "static/chunks/app-1.js");
 	assert.equal(readDebugIdComment(chunk), ingester.rows[0].debugId);
 	assert.doesNotMatch(chunk, /sourceMappingURL/);
 	assert.equal(existsSync(join(distDir, "static/chunks/app-1.js.map")), false);
-	assert.equal(readDebugIdComment(read(distDir, "server/page.js")), null, "server output is untouched");
+	const page = read(distDir, "server/app/page.js");
+	assert.equal(readDebugIdComment(page), ingester.rows[1].debugId);
+	assert.doesNotMatch(page, /sourceMappingURL/);
+	assert.equal(existsSync(join(distDir, "server/app/page.js.map")), false, "server maps the wrapper turned on go after upload");
+	assert.equal(read(distDir, "server/middleware-manifest.js"), "self.__MIDDLEWARE_MANIFEST={}\n", "files without maps are untouched");
+
+	// serverBundles: false leaves the server output and Next's settings alone.
+	const off = withAutterSourceMaps({}, { ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-1", serverBundles: false });
+	assert.equal(off.experimental, undefined);
+	assert.equal(off.webpack({ devtool: false }, { isServer: true, dev: false }).devtool, false);
+	writeFiles(distDir, { "server/app/other.js": "y\n", "server/app/other.js.map": SIMPLE_MAP });
+	await off.compiler.runAfterProductionCompile({ distDir, projectDir: project });
+	assert.equal(readDebugIdComment(read(distDir, "server/app/other.js")), null);
+	assert.ok(existsSync(join(distDir, "server/app/other.js.map")));
+
+	// A devtool the user's own webpack function chose for the server stays, and so do its maps.
+	const userDevtool = withAutterSourceMaps(
+		{ webpack: (cfg, ctx) => { if (ctx.isServer) cfg.devtool = "source-map"; return cfg; } },
+		{ ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-1" },
+	);
+	assert.equal(userDevtool.webpack({ devtool: false }, { isServer: true, dev: false }).devtool, "source-map");
+	await userDevtool.compiler.runAfterProductionCompile({ distDir, projectDir: project });
+	assert.ok(readDebugIdComment(read(distDir, "server/app/other.js")), "injected and uploaded");
+	assert.ok(existsSync(join(distDir, "server/app/other.js.map")), "but not deleted");
 });
 
 test("older Next: the webpack plugin runs in client production builds; a config function is wrapped too", async (t) => {
@@ -363,6 +450,15 @@ test("older Next: the webpack plugin runs in client production builds; a config 
 	assert.equal(client.devtool, "hidden-source-map");
 	assert.ok(client.plugins[0] instanceof Object && typeof client.plugins[0].apply === "function");
 	assert.equal(config.webpack({ plugins: [] }, { isServer: false, dev: true }).plugins.length, 0);
+	// Server compilations (Node and edge) get hidden maps and the plugin too
+	// (RF-05); no serverSourceMaps flag before 15.4.1.
+	assert.equal(config.experimental, undefined);
+	for (const nextRuntime of ["nodejs", "edge"]) {
+		const server = config.webpack({ devtool: false, plugins: [] }, { isServer: true, dev: false, nextRuntime });
+		assert.equal(server.devtool, "hidden-source-map");
+		assert.equal(server.plugins.length, 1);
+	}
+	assert.equal(config.webpack({ plugins: [] }, { isServer: true, dev: true }).plugins.length, 0);
 
 	const fn = withAutterSourceMaps(async (phase) => ({ env: { phase } }), silent);
 	const resolved = await fn("phase-production-build", { defaultConfig: {} });
@@ -398,7 +494,7 @@ test("Next without a key: client maps stay off, and the hook says so once", asyn
 	assert.equal(compiler.options.devtool, false);
 });
 
-test("Next: a rejected upload still deletes every client map the wrapper turned on (JS and CSS); server maps and public maps stay", async (t) => {
+test("Next: a rejected upload still deletes every map the wrapper turned on (client JS and CSS, and server); public maps stay", async (t) => {
 	const logs = captureLogs(t);
 	const project = nextProject("15.5.0");
 	inDir(t, project);
@@ -421,7 +517,7 @@ test("Next: a rejected upload still deletes every client map the wrapper turned 
 	assert.deepEqual(mapsUnder(join(distDir, "static")), []);
 	assert.doesNotMatch(read(distDir, "static/chunks/app-1.js"), /sourceMappingURL/);
 	assert.equal(read(distDir, "static/css/app.css"), "a{}\n");
-	assert.ok(existsSync(join(distDir, "server/page.js.map")), "server output is untouched");
+	assert.equal(existsSync(join(distDir, "server/page.js.map")), false, "server maps the wrapper turned on go too (RF-05)");
 	assert.match(logs.find((line) => line.includes("removed")), /removed 2 source map\(s\) this plugin generated, so they are not deployed: the upload failed \(AUTTER_RUNTIME_KEY is a publishable client key/);
 
 	// productionBrowserSourceMaps set by the user: their public maps stay, even when the upload fails.

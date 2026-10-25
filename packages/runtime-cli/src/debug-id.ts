@@ -34,14 +34,17 @@ export function readDebugIdComment(code: string): string | null {
 	return found;
 }
 
-/** Property the browser SDK reads: `globalThis._autterDebugIds[stack] = id`. */
+/** Property the SDKs read: `globalThis._autterDebugIds[stack] = id` (the
+ * browser SDK, and the Node and edge SDKs' `autter.debug_ids`, RF-05). */
 export const DEBUG_ID_REGISTRY = "_autterDebugIds";
 
 /**
  * One line of ES5 that records this bundle's id under the stack of an Error
  * created inside it — the stack's first frame names the script URL the
- * browser actually loaded, which the SDK maps back to the id. `g.Error` keeps
- * working when the bundle shadows `Error` at top level. Never throws.
+ * browser loaded, or the file Node or an edge runtime ran, which the SDK
+ * maps back to the id. `g.Error` keeps working when the bundle shadows
+ * `Error` at top level. Never throws. The same snippet goes into browser
+ * and server bundles.
  */
 export function debugIdSnippet(id: string): string {
 	return (

@@ -5,7 +5,9 @@
  * output (it exposes the original source), no `sourceMappingURL` may point at
  * a map that isn't there, and, with a key, every bundle's map must be on the
  * ingester (`/v1/sourcemaps/check` by debug id, ingester 1.7.0+). Without a
- * key the upload state is reported as unverified.
+ * key the upload state is reported as unverified. `server` checks a server
+ * bundle directory (RF-05): the same, except leftover maps are reported
+ * without failing, since server output is not served to browsers.
  */
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -27,6 +29,10 @@ export interface VerifyOptions {
 	ignore?: string[];
 	/** Report leftover .map files without failing (a step that runs before they are removed). */
 	allowMaps?: boolean;
+	/** A server bundle directory (tsup, esbuild, webpack or Next server
+	 * output): leftover maps are reported, not failures — browsers never load
+	 * them, and Node's own `--enable-source-maps` may use them. */
+	server?: boolean;
 	env?: NodeJS.ProcessEnv;
 	cwd?: string;
 	fetch?: typeof fetch;
@@ -47,8 +53,10 @@ export interface VerifyResult {
 	dir: string;
 	ok: boolean;
 	bundles: VerifyBundle[];
-	/** `.map` files in the directory (deploy risks unless allowMaps). */
+	/** `.map` files in the directory (deploy risks unless allowMaps or server). */
 	maps: string[];
+	/** True when checked as server output (`--server`). */
+	server?: boolean;
 	upload: {
 		/** verified: every checked bundle's map is on the ingester; missing: some are not;
 		 * unverified: not checked (no key, or an ingester that can't answer); error: the check failed. */
@@ -65,9 +73,12 @@ export interface VerifyResult {
 const CHECK_BATCH = 500;
 const SNIPPET_ID_RE = /\(g\._autterDebugIds=g\._autterDebugIds\|\|\{\}\)\[s\]="([0-9a-f-]{36})"/;
 
-/** JS files that are generated or copied, never a bundle the browser SDK reports from. */
+/** JS files that are generated or copied, never a bundle an SDK reports from. */
 const NOT_BUNDLES: Array<[RegExp, string]> = [
 	[/(^|\/)_(build|ssg|middleware|clientMiddleware)Manifest\.js$/, "Next.js build manifest"],
+	// .next/server: middleware-build-manifest.js, next-font-manifest.js,
+	// server-reference-manifest.js, page_client-reference-manifest.js, …
+	[/(^|\/)[\w.-]*[-_]manifest\.js$/, "Next.js server manifest"],
 	[/(^|\/)chunks\/polyfills-[\w-]+\.js$/, "Next.js polyfills, copied prebuilt without a source map"],
 	[/(^|\/)(sw|service-worker|serviceWorker|firebase-messaging-sw|mockServiceWorker)\.js$/, "service worker (the browser SDK doesn't run there)"],
 	[/(^|\/)workbox-[\w-]+\.js$/, "service worker runtime (the browser SDK doesn't run there)"],
@@ -126,6 +137,7 @@ export async function verifyDir(dir: string, options: VerifyOptions = {}): Promi
 		ok: true,
 		bundles: [],
 		maps: [],
+		...(options.server ? { server: true } : {}),
 		upload: { status: "unverified", endpoint: null, reason: null, checked: 0, missing: 0 },
 		failures: [],
 	};
@@ -135,7 +147,7 @@ export async function verifyDir(dir: string, options: VerifyOptions = {}): Promi
 		const path = relPath(file);
 		if (file.endsWith(".map")) {
 			result.maps.push(path);
-			if (!options.allowMaps) {
+			if (!options.allowMaps && !options.server) {
 				fail(path, "source map in the deploy output: it exposes your original source. Delete it after upload (upload --delete-after-upload, or the bundler plugin) or keep it out of the deploy");
 			}
 			continue;
@@ -178,14 +190,17 @@ export async function verifyDir(dir: string, options: VerifyOptions = {}): Promi
 			bundle.reasons.push("has the debug id snippet but no //# debugId= comment: run `autter-runtime sourcemaps inject` on it again");
 		} else if (!hasDebugIdSnippet(code)) {
 			bundle.reasons.push(
-				"has a //# debugId= comment but no registration snippet, so the browser SDK can't report its id: run `autter-runtime sourcemaps inject` on it",
+				"has a //# debugId= comment but no registration snippet, so the SDK can't report its id: run `autter-runtime sourcemaps inject` on it",
 			);
 		} else if (snippetId && snippetId !== commentId) {
 			bundle.reasons.push(`its snippet registers debug id ${snippetId} but its comment says ${commentId}: run inject on the original build output`);
 		}
 		const url = readSourceMappingUrl(code);
 		if (url?.startsWith("data:")) {
-			bundle.reasons.push("carries an inline source map (data: URL): your original source ships with the bundle. Use hidden or external maps");
+			// On a server the inlined source never reaches a browser.
+			if (!options.server) {
+				bundle.reasons.push("carries an inline source map (data: URL): your original source ships with the bundle. Use hidden or external maps");
+			}
 		} else if (url && !/^[a-z][\w+.-]*:/i.test(url) && !url.startsWith("/")) {
 			let target = url.split(/[?#]/)[0]!;
 			try {
@@ -305,7 +320,13 @@ export function formatVerify(result: VerifyResult): string[] {
 	}
 	for (const map of result.maps) {
 		const failure = result.failures.find((f) => f.path === map);
-		lines.push(failure ? `FAILED  ${map}: ${failure.reason}` : `warning ${map}: source map in the output (allowed by --allow-maps; remove it before deploying)`);
+		lines.push(
+			failure
+				? `FAILED  ${map}: ${failure.reason}`
+				: result.server
+					? `note    ${map}: source map in the server output (browsers never load it)`
+					: `warning ${map}: source map in the output (allowed by --allow-maps; remove it before deploying)`,
+		);
 	}
 	for (const failure of result.failures.filter((f) => f.path === ".")) lines.push(`FAILED  ${failure.reason}`);
 	const u = result.upload;
@@ -319,7 +340,7 @@ export function formatVerify(result: VerifyResult): string[] {
 	const counted = result.bundles.filter((b) => b.status !== "skipped");
 	lines.push(
 		result.ok
-			? `ok: ${counted.length} bundle(s) with debug ids, ${result.maps.length ? `${result.maps.length} source map(s) left (--allow-maps)` : "no source maps left"}${u.status === "unverified" ? ", upload not verified" : ""}`
+			? `ok: ${counted.length} bundle(s) with debug ids, ${result.maps.length ? `${result.maps.length} source map(s) left (${result.server ? "server output" : "--allow-maps"})` : "no source maps left"}${u.status === "unverified" ? ", upload not verified" : ""}`
 			: `${result.failures.length} problem(s) in ${result.dir}`,
 	);
 	return lines;

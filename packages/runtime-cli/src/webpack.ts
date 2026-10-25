@@ -1,5 +1,11 @@
 import { resolve } from "node:path";
-import { logMapsNotGenerated, processBuildOutput, shouldGenerateMaps, type AutterSourceMapsOptions } from "./build.js";
+import {
+	logMapsNotGenerated,
+	processBuildOutput,
+	serverUrlPrefix,
+	shouldGenerateMaps,
+	type AutterSourceMapsOptions,
+} from "./build.js";
 import { BUNDLE_RE } from "./files.js";
 
 export type { AutterSourceMapsOptions } from "./build.js";
@@ -13,7 +19,9 @@ interface CompilationLike {
 	getAssets(): ReadonlyArray<{ name: string }>;
 }
 interface CompilerLike {
-	options: { mode?: string; devtool?: string | false };
+	options: { mode?: string; devtool?: string | false; target?: unknown };
+	/** The project directory webpack resolves from (`context`). */
+	context?: string;
 	outputPath?: string;
 	hooks: {
 		afterEmit: {
@@ -22,12 +30,27 @@ interface CompilerLike {
 	};
 }
 
+/** webpack `target`s that build for a server runtime (Node, Electron main). */
+const SERVER_TARGET_RE = /^(?:async-)?node|^electron-(?:main|preload)/;
+
+/** Whether a webpack `target` (string, list or false) builds server code. */
+export function isServerTarget(target: unknown): boolean {
+	const targets = Array.isArray(target) ? target : [target];
+	return targets.some((value) => typeof value === "string" && SERVER_TARGET_RE.test(value));
+}
+
 /**
  * webpack 5 plugin: turns on `hidden-source-map` in production builds that
  * have no `devtool`, gives every emitted JS asset a debug id after emit, and
  * uploads the maps when AUTTER_RUNTIME_KEY (or `key`) is set. Maps it turned
  * on are deleted after the upload step whatever its outcome; without a key
  * it turns none on. Development builds are left alone.
+ *
+ * Builds for a Node target (`target: "node"`, `"async-node"`,
+ * `"electron-main"`) are server bundles (RF-05): their maps are stored under
+ * the output directory's path in the project (`/dist/`), which the ingester
+ * matches against the path Node runs them from, not under
+ * `output.publicPath`. `serverBundles: false` leaves them alone.
  *
  * ```js
  * // webpack.config.js
@@ -38,13 +61,16 @@ interface CompilerLike {
 export class AutterSourceMapsWebpackPlugin {
 	constructor(
 		private readonly options: AutterSourceMapsOptions = {},
-		/** Set by withAutterSourceMaps, which chooses the devtool itself. */
-		private readonly internal: { ownMaps?: boolean } = {},
+		/** Set by withAutterSourceMaps, which chooses the devtool itself and
+		 * knows which compilations are Next's server ones. */
+		private readonly internal: { ownMaps?: boolean; server?: boolean } = {},
 	) {}
 
 	apply(compiler: CompilerLike): void {
 		const mode = compiler.options.mode ?? (process.env.NODE_ENV === "development" ? "development" : undefined);
 		if (mode === "development") return;
+		const server = this.internal.server ?? isServerTarget(compiler.options.target);
+		if (server && this.options.serverBundles === false) return;
 		// Plugins are applied before webpack reads `devtool`, so this takes effect.
 		let enabledMaps = this.internal.ownMaps ?? false;
 		if (!compiler.options.devtool) {
@@ -59,7 +85,9 @@ export class AutterSourceMapsWebpackPlugin {
 			const dir = compilation.outputOptions.path ?? compiler.outputPath;
 			if (!dir) return;
 			const publicPath = compilation.outputOptions.publicPath;
-			const urlPrefix = typeof publicPath === "string" && publicPath !== "auto" && publicPath !== "" ? publicPath : "/";
+			const urlPrefix = server
+				? serverUrlPrefix(compiler.context ?? process.cwd(), dir)
+				: typeof publicPath === "string" && publicPath !== "auto" && publicPath !== "" ? publicPath : "/";
 			const assets = compilation.getAssets().map((asset) => asset.name);
 			const files = assets.filter((name) => BUNDLE_RE.test(name)).map((name) => resolve(dir, name));
 			// Every map webpack emitted (JS and CSS alike).
@@ -72,6 +100,7 @@ export class AutterSourceMapsWebpackPlugin {
 				options: this.options,
 				deleteAfterUpload: enabledMaps,
 				ownMaps: enabledMaps,
+				...(server ? { server: true } : {}),
 			});
 		});
 	}

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { relative, sep } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 import { findBundles, removeSourceMaps } from "./files.js";
 import { injectDir, type InjectResult } from "./inject.js";
 import { uploadDir, type UploadSummary } from "./upload.js";
@@ -36,6 +36,29 @@ export interface AutterSourceMapsOptions {
 	failOnError?: boolean;
 	/** No log output. */
 	silent?: boolean;
+	/** Send your own files' original source with each map (`sourcesContent`,
+	 * when the bundler wrote it), so issues show the lines around each frame
+	 * of your code. Dependencies' sources are never sent. Default true. */
+	sourcesContent?: boolean;
+	/** Server bundles too (default true): Vite SSR builds and server
+	 * environments, webpack builds for a Node target, and Next.js server
+	 * output get debug ids and their maps uploaded, so errors in your backend
+	 * resolve to its original files and lines. False leaves server output
+	 * exactly as the bundler wrote it. */
+	serverBundles?: boolean;
+}
+
+/**
+ * Where a server bundle directory's maps are stored: its path relative to
+ * the project (`/dist/server/`, `/.next/server/`), never the public URL
+ * prefix. The ingester matches a stored path as a suffix of the path the
+ * process runs the bundle from (`/app/dist/server/entry.js`,
+ * `/var/task/.next/server/app/page.js`), and the directory keeps server and
+ * browser maps of one release apart. "/" for a directory outside the project.
+ */
+export function serverUrlPrefix(projectRoot: string, dir: string): string {
+	const rel = relative(projectRoot, dir).split(sep).join("/");
+	return !rel || rel.startsWith("..") || isAbsolute(rel) ? "/" : `/${rel.replace(/\/+$/, "")}/`;
 }
 
 export interface BuildOutputResult {
@@ -108,6 +131,9 @@ export async function processBuildOutput(input: {
 	/** Map files the build emitted (absolute), when the bundler lists them;
 	 * the maps of `files` (or of every bundle under `dir`) are added. */
 	maps?: string[];
+	/** Server output (RF-05): `urlPrefix` is serverUrlPrefix(), which the
+	 * public `options.urlPrefix` never overrides. */
+	server?: boolean;
 }): Promise<BuildOutputResult> {
 	const { options } = input;
 	const log = (line: string) => {
@@ -147,12 +173,13 @@ export async function processBuildOutput(input: {
 			result.upload = await uploadDir(input.dir, {
 				files: input.files,
 				release: options.release,
-				urlPrefix: options.urlPrefix ?? input.urlPrefix,
+				urlPrefix: input.server ? input.urlPrefix : (options.urlPrefix ?? input.urlPrefix),
 				endpoint: options.endpoint,
 				key: key ?? undefined,
 				dryRun: options.dryRun,
 				concurrency: options.concurrency,
 				deleteAfterUpload: options.deleteAfterUpload ?? input.deleteAfterUpload,
+				...(options.sourcesContent === false ? { sourcesContent: false } : {}),
 				log,
 			});
 			for (const line of formatUploadSummary(result.upload)) log(line);

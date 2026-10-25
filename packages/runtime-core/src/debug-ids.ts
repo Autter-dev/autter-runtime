@@ -57,7 +57,7 @@ export function firstFramePath(stack: string): string | null {
  */
 export function debugIdsForStacks(stacks: readonly string[]): Record<string, string> | undefined {
 	try {
-		const registry = (globalThis as Record<string, unknown>)[REGISTRY];
+		const registry = (globalThis as unknown as Record<string, unknown>)[REGISTRY];
 		if (!registry || typeof registry !== "object") return undefined;
 		const texts = stacks.filter((stack) => typeof stack === "string" && stack !== "");
 		if (texts.length === 0) return undefined;

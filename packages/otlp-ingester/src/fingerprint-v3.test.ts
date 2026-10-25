@@ -3,18 +3,25 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fingerprintOccurrence, occurrenceFingerprint } from "./fingerprint.js";
 import {
+	CAUSE_V1,
+	causeTypeToken,
+	causeV1Fingerprint,
 	frameTokenFile,
 	frameTokenFunction,
 	framesV3Fingerprint,
 	occurrenceIdentity,
+	type CauseLink,
 } from "./fingerprint-v3.js";
 import { STACK_FIXTURES } from "./stack-fixtures.js";
 import { parseStackFrames } from "./stack-frames.js";
 import type { RuntimeOccurrenceInput, StackFrame } from "./types.js";
 
 /**
- * frames-v3 (contract §2). The vectors are shared with the platform mirror
- * (EI-19, runtime-frames-fingerprint.ts) and cross-checked at merge.
+ * frames-v3 (contract §2) and cause-v1 (RF-06). The vectors are shared with
+ * the platform mirror (EI-19, runtime-frames-fingerprint.ts) and
+ * cross-checked at merge. An entry with `causes` also pins cause-v1: the
+ * chain is the input's own exception followed by `causes`, and `cause` is
+ * the expected `{ fingerprint, parts }` (null: no candidate).
  */
 const vectors = JSON.parse(
 	readFileSync(new URL("./fingerprint-v3-vectors.json", import.meta.url), "utf8"),
@@ -23,6 +30,8 @@ const vectors = JSON.parse(
 	input: { service: string; errorType: string; message: string; frames: StackFrame[] };
 	fingerprint: string;
 	parts: string[];
+	causes?: CauseLink[];
+	cause?: { fingerprint: string; parts: string[] } | null;
 }>;
 
 function input(overrides: Partial<RuntimeOccurrenceInput> = {}): RuntimeOccurrenceInput {
@@ -65,7 +74,31 @@ for (const vector of vectors) {
 		assert.equal(result.fingerprint, vector.fingerprint);
 		assert.deepEqual(result.record, { scheme: "frames-v3", parts: vector.parts });
 	});
+	if (vector.causes) {
+		test(`cause-v1 vector: ${vector.name}`, () => {
+			const result = causeV1Fingerprint({
+				service: vector.input.service,
+				chain: [{ type: vector.input.errorType, frames: vector.input.frames }, ...vector.causes!],
+			});
+			if (vector.cause === null) {
+				assert.equal(result, null);
+				return;
+			}
+			assert.ok(result && vector.cause);
+			assert.match(result.fingerprint, /^[0-9a-f]{32}$/);
+			assert.equal(result.fingerprint, vector.cause.fingerprint);
+			assert.deepEqual(result.record, { scheme: CAUSE_V1, parts: vector.cause.parts });
+		});
+	}
 }
+
+test("cause-v1 vectors: at least 8 cases, wrapped and raw forms paired", () => {
+	const withCauses = vectors.filter((vector) => vector.causes);
+	assert.ok(withCauses.length >= 8, `${withCauses.length} cause-v1 vectors`);
+	const byName = (prefix: string) => withCauses.find((vector) => vector.name.startsWith(prefix))!.cause!.fingerprint;
+	assert.equal(byName("cause-v1 js: a wrapped fetch failure"), byName("cause-v1 js: the raw fetch failure"));
+	assert.equal(byName("cause-v1 jvm: the root of a Caused by chain"), byName("cause-v1 jvm: the root cause reported unwrapped"));
+});
 
 test("token rules: prefixes, short unresolved names, anonymous and file runs", () => {
 	const fn = (name: string | null, resolved = false) => frameTokenFunction({ function: name, resolved });
@@ -161,17 +194,26 @@ test("python: frames-v3 groups by the crash site, not the framework entry frames
 
 // ── Candidate list (contract §1/§4) ────────────────────────────────────────
 
-test("uncoded occurrences carry [frames-v3, message-v1]; the legacy identity is unchanged", () => {
+test("uncoded occurrences carry [frames-v3, message-v1, cause-v1]; the legacy identity is unchanged", () => {
 	const occurrence = input({ stack: STACK_FIXTURES.java!.primary });
 	const identity = occurrenceIdentity(occurrence, parseStackFrames(occurrence.stack));
 	assert.deepEqual(identity.legacy, occurrenceFingerprint(occurrence));
+	// cause-v1 comes after every existing scheme (RF-06): an existing issue
+	// is always found by frames-v3 or message-v1 first.
 	assert.deepEqual(
 		identity.candidates.map((c) => c.scheme),
-		["frames-v3", "message-v1"],
+		["frames-v3", "message-v1", "cause-v1"],
 	);
-	assert.equal(identity.candidates.at(-1)!.fingerprint, fingerprintOccurrence(occurrence));
+	assert.equal(identity.candidates[1]!.fingerprint, fingerprintOccurrence(occurrence));
 	for (const candidate of identity.candidates) assert.match(candidate.fingerprint, /^[0-9a-f]{32}$/);
 	assert.equal(identity.record?.scheme, "frames-v3");
+	// The JVM fixture is wrapped: its root cause's frame, class name only.
+	assert.deepEqual(identity.causeRecord, { scheme: "cause-v1", parts: ["IllegalStateException", "require@orderloader.java"] });
+	// No in-app frame anywhere: no cause-v1, and the legacy one is last again.
+	const vendored = input({ stack: "TypeError: x\n    at f (/app/node_modules/lib/index.js:1:2)" });
+	const plain = occurrenceIdentity(vendored, parseStackFrames(vendored.stack));
+	assert.deepEqual(plain.candidates.map((c) => c.scheme), ["frames-v3", "message-v1"]);
+	assert.equal(plain.causeRecord, null);
 });
 
 test("coded occurrences carry [code-v1] only: the explicit scheme is the legacy one", () => {
@@ -182,6 +224,128 @@ test("coded occurrences carry [code-v1] only: the explicit scheme is the legacy 
 	]);
 	assert.equal(identity.legacy.scheme, "code-v1");
 	assert.equal(identity.record, null);
+	assert.equal(identity.causeRecord, null);
+});
+
+// ── cause-v1: a wrapped error groups with its root cause (RF-06) ───────────
+
+function cause(occurrence: RuntimeOccurrenceInput, causes?: CauseLink[]): string | undefined {
+	const identity = occurrenceIdentity(occurrence, parseStackFrames(occurrence.stack), causes);
+	return identity.candidates.find((c) => c.scheme === "cause-v1")?.fingerprint;
+}
+
+const RAW_FETCH = [
+	"TypeError: fetch failed",
+	"    at node:internal/deps/undici/undici:13502:13",
+	"    at async fetchCart (/app/src/cart.ts:8:3)",
+	"    at async checkout (/app/src/checkout.ts:12:5)",
+].join("\n");
+const WRAPPER = [
+	"Error: checkout failed",
+	"    at checkout (/app/src/checkout.ts:14:11)",
+	"    at async handle (/app/src/routes.ts:30:5)",
+].join("\n");
+
+test("cause-v1 js: a wrapped fetch failure and its raw form are one identity (the plan's done-when)", () => {
+	const raw = input({ errorType: "TypeError", message: "fetch failed", stack: RAW_FETCH });
+	const wrapped = input({
+		errorType: "Error",
+		message: "checkout failed",
+		stack: WRAPPER,
+		attributes: {
+			"exception.cause.1.type": "TypeError",
+			"exception.cause.1.message": "fetch failed",
+			"exception.cause.1.stacktrace": RAW_FETCH,
+		},
+	});
+	assert.ok(cause(raw));
+	assert.equal(cause(wrapped), cause(raw));
+	// frames-v3 still tells them apart, so existing issues never merge by it.
+	assert.notEqual(v3({ ...wrapped }), v3({ ...raw }));
+	// Wrapped twice: still the root's.
+	const twice = input({
+		errorType: "Error",
+		message: "request failed",
+		stack: "Error: request failed\n    at handle (/app/src/routes.ts:31:9)",
+		attributes: {
+			"exception.cause.1.type": "Error",
+			"exception.cause.1.stacktrace": WRAPPER,
+			"exception.cause.2.type": "TypeError",
+			"exception.cause.2.stacktrace": RAW_FETCH,
+		},
+	});
+	assert.equal(cause(twice), cause(raw));
+	// Another root type at the same frame is another identity.
+	assert.notEqual(cause(input({ ...raw, errorType: "RangeError" })), cause(raw));
+});
+
+test("cause-v1 js: without cause stacks (older SDKs), a failure wrapped where it was called still groups", () => {
+	const direct = RAW_FETCH.replace("    at async fetchCart (/app/src/cart.ts:8:3)\n", "");
+	const raw = input({ errorType: "TypeError", message: "fetch failed", stack: direct });
+	const wrapped = input({ errorType: "Error", message: "checkout failed", stack: WRAPPER, attributes: { "exception.cause.1.type": "TypeError" } });
+	assert.equal(cause(wrapped), cause(raw));
+});
+
+test("cause-v1 uses the causes it is given (symbolicated at ingest) over the stack text", () => {
+	const wrapped = input({ errorType: "Error", stack: WRAPPER, attributes: { "exception.cause.1.type": "TypeError", "exception.cause.1.stacktrace": RAW_FETCH } });
+	const resolved: CauseLink[] = [{
+		type: "TypeError",
+		frames: [{ function: "loadCart", module: null, filename: "webpack://shop/./src/cart.ts", lineno: 8, colno: 3, inApp: true, resolved: true }],
+	}];
+	const identity = occurrenceIdentity(wrapped, parseStackFrames(wrapped.stack), resolved);
+	assert.deepEqual(identity.causeRecord?.parts, ["TypeError", "loadCart@cart.ts"]);
+});
+
+test("cause-v1 jvm, python and .NET: a chained exception groups with its root reported alone", () => {
+	// JVM: the last top-level "Caused by:" is the root.
+	const jvmRoot = input({
+		errorType: "java.lang.IllegalStateException",
+		message: "order not loaded",
+		stack: "java.lang.IllegalStateException: order not loaded\n\tat com.example.orders.OrderLoader.require(OrderLoader.java:57)\n\tat com.example.orders.OrderService.load(OrderService.java:20)",
+	});
+	assert.equal(cause(input({ errorType: "java.lang.NullPointerException", stack: STACK_FIXTURES.java!.primary })), cause(jvmRoot));
+	// Python: the first traceback block is the root; OTel reports the short class name.
+	const chained = [
+		"Traceback (most recent call last):",
+		'  File "/app/db/pool.py", line 30, in acquire',
+		"    conn = self._connect()",
+		"TimeoutError: pool exhausted",
+		"",
+		"The above exception was the direct cause of the following exception:",
+		"",
+		"Traceback (most recent call last):",
+		'  File "/app/orders/service.py", line 51, in place',
+		"    raise OrderError('could not place order') from err",
+		"orders.errors.OrderError: could not place order",
+	].join("\n");
+	const pyRoot = input({
+		errorType: "TimeoutError",
+		message: "pool exhausted",
+		stack: ["Traceback (most recent call last):", '  File "/app/db/pool.py", line 31, in acquire', "TimeoutError: pool exhausted"].join("\n"),
+	});
+	assert.equal(cause(input({ errorType: "OrderError", stack: chained })), cause(pyRoot));
+	// .NET: the innermost exception (first frame segment) is the root.
+	const wrapped = [
+		"System.InvalidOperationException: Checkout failed",
+		" ---> System.ArgumentNullException: Value cannot be null. (Parameter 'cart')",
+		"   at Shop.Cart.Total(Cart cart) in /src/Shop/Cart.cs:line 14",
+		"   --- End of inner exception stack trace ---",
+		"   at Shop.Checkout.Submit(Order order) in /src/Shop/Checkout.cs:line 61",
+	].join("\n");
+	const dotnetRoot = input({
+		errorType: "System.ArgumentNullException",
+		stack: "System.ArgumentNullException: Value cannot be null. (Parameter 'cart')\n   at Shop.Cart.Total(Cart cart) in /src/Shop/Cart.cs:line 16",
+	});
+	assert.equal(cause(input({ errorType: "System.InvalidOperationException", stack: wrapped })), cause(dotnetRoot));
+});
+
+test("cause-v1 type tokens drop the package or namespace", () => {
+	assert.equal(causeTypeToken("java.lang.IllegalStateException"), "IllegalStateException");
+	assert.equal(causeTypeToken("System.Net.Sockets.SocketException"), "SocketException");
+	assert.equal(causeTypeToken("requests.exceptions.ConnectionError"), "ConnectionError");
+	assert.equal(causeTypeToken("ActiveRecord::RecordNotFound"), "RecordNotFound");
+	assert.equal(causeTypeToken(" TypeError "), "TypeError");
+	assert.equal(causeTypeToken(""), "");
 });
 
 test("a stackless error hashes its normalised message under frames-v3", () => {

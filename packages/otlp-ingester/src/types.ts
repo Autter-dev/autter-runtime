@@ -112,8 +112,9 @@ export interface StackFrame {
 
 /**
  * Every grouping scheme an issue identity can come from (contract §1).
- * The ingester computes `manual-v1`, `code-v1`, `frames-v3` and
- * `message-v1`; `rule-v1` and `external-v1` exist only on the platform.
+ * The ingester computes `manual-v1`, `code-v1`, `frames-v3`, `message-v1`
+ * and `cause-v1` (RF-06); `rule-v1` and `external-v1` exist only on the
+ * platform.
  */
 export type FingerprintSchemeV2 =
 	| "manual-v1"
@@ -121,6 +122,7 @@ export type FingerprintSchemeV2 =
 	| "code-v1"
 	| "frames-v3"
 	| "message-v1"
+	| "cause-v1"
 	| "external-v1";
 
 export interface FingerprintCandidate {
@@ -152,8 +154,9 @@ export interface RuntimeOccurrence extends RuntimeOccurrenceInput {
 	/** Parsed (and, for bundled JS, symbolicated) frames, innermost first, ≤ 50. */
 	frames?: StackFrame[];
 	/**
-	 * Every applicable identity, highest precedence first (manual-v1,
-	 * code-v1, frames-v3, message-v1); always ends with the legacy one.
+	 * Every applicable identity, in precedence order (manual-v1, code-v1,
+	 * frames-v3, message-v1, cause-v1); always includes the legacy one,
+	 * which is last unless a cause-v1 candidate follows it.
 	 */
 	fingerprints?: FingerprintCandidate[];
 	/** What went into the frames-v3 fingerprint, when one was computed. */

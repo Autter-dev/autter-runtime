@@ -453,8 +453,11 @@ export class SinkForwarder {
  * keep their legacy meaning. 1.9.0 adds `count`: the occurrences this
  * record stands for, sent only when above 1 (a loop-collapse sample:
  * 1 + collapsedCount, see loop-collapse.ts); consumers add `count ?? 1` to
- * their event counts. Older consumers ignore unknown keys, so the version
- * stays 1.
+ * their event counts. Unreleased (RF-06): `fingerprints` may end with a
+ * `cause-v1` candidate after the legacy one; consumers that do not know the
+ * scheme drop it (the platform validates schemes one by one). RF-05: in-app
+ * frames' context lines are up to 5 on each side (3 before). Older consumers
+ * ignore unknown keys, so the version stays 1.
  */
 export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 	const {

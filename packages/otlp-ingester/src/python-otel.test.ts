@@ -163,7 +163,8 @@ for (const { framework, scenarios } of expectations) {
 						scenario.errorType,
 						...scenario.inAppFrames.map((f) => `${f.function}@${f.filename.split("/").pop()}`),
 					]);
-					assert.deepEqual(identity.candidates.map((c) => c.scheme), ["frames-v3", "message-v1"]);
+					// In-app frames exist, so the root-cause candidate follows (RF-06).
+					assert.deepEqual(identity.candidates.map((c) => c.scheme), ["frames-v3", "message-v1", "cause-v1"]);
 				}
 
 				if (scenario.requestCount !== undefined) {
@@ -349,7 +350,7 @@ test("a Django 500 posted as the Python exporter posts it reaches the sink with 
 		occurrence.frames.filter((f: StackFrame) => f.inApp).map((f: StackFrame) => [f.function, f.filename, f.lineno]),
 		django.inAppFrames!.map((f) => [f.function, f.filename, f.lineno]),
 	);
-	assert.deepEqual(occurrence.fingerprints.map((c: { scheme: string }) => c.scheme), ["frames-v3", "message-v1"]);
+	assert.deepEqual(occurrence.fingerprints.map((c: { scheme: string }) => c.scheme), ["frames-v3", "message-v1", "cause-v1"]);
 	assert.deepEqual(occurrence.fingerprintRecord, {
 		scheme: "frames-v3",
 		parts: ["shop.payments.PaymentDeclined", "charge_card@payments.py", "charge@views.py"],

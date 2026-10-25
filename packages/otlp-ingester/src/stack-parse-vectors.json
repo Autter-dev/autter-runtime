@@ -378,6 +378,22 @@
 				"inApp": true,
 				"resolved": false
 			}
+		],
+		"causes": [
+			{
+				"type": "TimeoutError",
+				"frames": [
+					{
+						"function": "acquire",
+						"module": null,
+						"filename": "/app/db/pool.py",
+						"lineno": 30,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
 		]
 	},
 	{
@@ -537,6 +553,22 @@
 				"inApp": false,
 				"resolved": false
 			}
+		],
+		"causes": [
+			{
+				"type": "java.lang.IllegalStateException",
+				"frames": [
+					{
+						"function": "require",
+						"module": "com.example.orders.OrderLoader",
+						"filename": "OrderLoader.java",
+						"lineno": 55,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
 		]
 	},
 	{
@@ -671,6 +703,22 @@
 				"colno": null,
 				"inApp": true,
 				"resolved": false
+			}
+		],
+		"causes": [
+			{
+				"type": "System.NullReferenceException",
+				"frames": [
+					{
+						"function": "Calculate",
+						"module": "Shop.Pricing",
+						"filename": "/src/Shop/Pricing.cs",
+						"lineno": 20,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
 			}
 		]
 	},
@@ -1276,6 +1324,22 @@
 				"inApp": true,
 				"resolved": false
 			}
+		],
+		"causes": [
+			{
+				"type": "KeyError",
+				"frames": [
+					{
+						"function": "load",
+						"module": null,
+						"filename": "/srv/app/orders/loader.py",
+						"lineno": 12,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
 		]
 	},
 	{
@@ -1411,6 +1475,22 @@
 				"inApp": true,
 				"resolved": false
 			}
+		],
+		"causes": [
+			{
+				"type": "KeyError",
+				"frames": [
+					{
+						"function": "load",
+						"module": null,
+						"filename": "/srv/app/orders/fanout.py",
+						"lineno": 37,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
 		]
 	},
 	{
@@ -1434,6 +1514,22 @@
 				"colno": null,
 				"inApp": true,
 				"resolved": false
+			}
+		],
+		"causes": [
+			{
+				"type": "KeyError",
+				"frames": [
+					{
+						"function": "load_with_cause",
+						"module": null,
+						"filename": "/srv/app/orders/fanout.py",
+						"lineno": 44,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
 			}
 		]
 	},
@@ -1483,6 +1579,31 @@
 				"inApp": true,
 				"resolved": false
 			}
+		],
+		"causes": [
+			{
+				"type": "ExceptionGroup",
+				"frames": [
+					{
+						"function": "validate",
+						"module": null,
+						"filename": "/srv/app/orders/fanout.py",
+						"lineno": 32,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					},
+					{
+						"function": "handle_group",
+						"module": null,
+						"filename": "/srv/app/orders/fanout.py",
+						"lineno": 55,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
 		]
 	},
 	{
@@ -1529,6 +1650,67 @@
 				"colno": null,
 				"inApp": false,
 				"resolved": false
+			}
+		],
+		"causes": [
+			{
+				"type": "json.decoder.JSONDecodeError",
+				"frames": [
+					{
+						"function": "raw_decode",
+						"module": null,
+						"filename": "/usr/local/lib/python3.14/json/decoder.py",
+						"lineno": 361,
+						"colno": null,
+						"inApp": false,
+						"resolved": false
+					},
+					{
+						"function": "decode",
+						"module": null,
+						"filename": "/usr/local/lib/python3.14/json/decoder.py",
+						"lineno": 345,
+						"colno": null,
+						"inApp": false,
+						"resolved": false
+					},
+					{
+						"function": "loads",
+						"module": null,
+						"filename": "/usr/local/lib/python3.14/json/__init__.py",
+						"lineno": 352,
+						"colno": null,
+						"inApp": false,
+						"resolved": false
+					},
+					{
+						"function": "parse",
+						"module": null,
+						"filename": "/srv/app/orders/importer.py",
+						"lineno": 7,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					},
+					{
+						"function": "import_orders",
+						"module": null,
+						"filename": "/srv/app/orders/importer.py",
+						"lineno": 11,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					},
+					{
+						"function": "main",
+						"module": null,
+						"filename": "/srv/app/orders/importer.py",
+						"lineno": 16,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
 			}
 		]
 	},
@@ -1743,6 +1925,22 @@
 				"inApp": false,
 				"resolved": false
 			}
+		],
+		"causes": [
+			{
+				"type": "java.lang.IllegalStateException",
+				"frames": [
+					{
+						"function": "require",
+						"module": "com.example.orders.OrderLoader",
+						"filename": "OrderLoader.java",
+						"lineno": 55,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
 		]
 	},
 	{
@@ -1901,6 +2099,22 @@
 				"colno": null,
 				"inApp": true,
 				"resolved": false
+			}
+		],
+		"causes": [
+			{
+				"type": "System.ArgumentNullException",
+				"frames": [
+					{
+						"function": "Total",
+						"module": "Shop.Cart",
+						"filename": "/src/Shop/Cart.cs",
+						"lineno": 14,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
 			}
 		]
 	},

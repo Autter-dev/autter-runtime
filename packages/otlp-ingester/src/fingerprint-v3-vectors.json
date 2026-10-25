@@ -1156,5 +1156,410 @@
 			"TypeError",
 			"Cart@cart.tsx"
 		]
+	},
+	{
+		"name": "cause-v1 js: a wrapped fetch failure hashes its root cause's innermost in-app frame",
+		"input": {
+			"service": "checkout-api",
+			"errorType": "Error",
+			"message": "checkout failed",
+			"frames": [
+				{
+					"function": "checkout",
+					"module": null,
+					"filename": "src/checkout.ts",
+					"lineno": 14,
+					"colno": 11,
+					"inApp": true,
+					"resolved": true
+				},
+				{
+					"function": "handle",
+					"module": null,
+					"filename": "src/routes.ts",
+					"lineno": 30,
+					"colno": 5,
+					"inApp": true,
+					"resolved": true
+				}
+			]
+		},
+		"fingerprint": "5385cc9ec1809815f24b0d9038ce18ca",
+		"parts": [
+			"Error",
+			"checkout@checkout.ts",
+			"handle@routes.ts"
+		],
+		"causes": [
+			{
+				"type": "TypeError",
+				"frames": [
+					{
+						"function": null,
+						"module": null,
+						"filename": "node:internal/deps/undici/undici",
+						"lineno": 13502,
+						"colno": 13,
+						"inApp": false,
+						"resolved": false
+					},
+					{
+						"function": "fetchCart",
+						"module": null,
+						"filename": "src/cart.ts",
+						"lineno": 8,
+						"colno": 3,
+						"inApp": true,
+						"resolved": true
+					},
+					{
+						"function": "checkout",
+						"module": null,
+						"filename": "src/checkout.ts",
+						"lineno": 12,
+						"colno": 5,
+						"inApp": true,
+						"resolved": true
+					}
+				]
+			}
+		],
+		"cause": {
+			"fingerprint": "540aa54b5f5d969a9e9b4684458107a2",
+			"parts": [
+				"TypeError",
+				"fetchCart@cart.ts"
+			]
+		}
+	},
+	{
+		"name": "cause-v1 js: the raw fetch failure (no cause) is its own root: same cause-v1 as wrapped",
+		"input": {
+			"service": "checkout-api",
+			"errorType": "TypeError",
+			"message": "fetch failed",
+			"frames": [
+				{
+					"function": null,
+					"module": null,
+					"filename": "node:internal/deps/undici/undici",
+					"lineno": 13502,
+					"colno": 13,
+					"inApp": false,
+					"resolved": false
+				},
+				{
+					"function": "fetchCart",
+					"module": null,
+					"filename": "src/cart.ts",
+					"lineno": 8,
+					"colno": 3,
+					"inApp": true,
+					"resolved": true
+				},
+				{
+					"function": "checkout",
+					"module": null,
+					"filename": "src/checkout.ts",
+					"lineno": 12,
+					"colno": 5,
+					"inApp": true,
+					"resolved": true
+				}
+			]
+		},
+		"fingerprint": "c996e039fecd90192782367ed599b543",
+		"parts": [
+			"TypeError",
+			"fetchCart@cart.ts",
+			"checkout@checkout.ts"
+		],
+		"causes": [],
+		"cause": {
+			"fingerprint": "540aa54b5f5d969a9e9b4684458107a2",
+			"parts": [
+				"TypeError",
+				"fetchCart@cart.ts"
+			]
+		}
+	},
+	{
+		"name": "cause-v1 jvm: the root of a Caused by chain, the class name without its package",
+		"input": {
+			"service": "orders",
+			"errorType": "java.lang.RuntimeException",
+			"message": "order 42 failed",
+			"frames": [
+				{
+					"function": "process",
+					"module": "com.example.orders.OrderService",
+					"filename": "OrderService.java",
+					"lineno": 88,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "run",
+					"module": "java.lang.Thread",
+					"filename": "Thread.java",
+					"lineno": 1583,
+					"colno": null,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "ba81eef165b8d764f043b9fbbb918831",
+		"parts": [
+			"java.lang.RuntimeException",
+			"process@orderservice.java"
+		],
+		"causes": [
+			{
+				"type": "java.lang.IllegalStateException",
+				"frames": [
+					{
+						"function": "require",
+						"module": "com.example.orders.OrderLoader",
+						"filename": "OrderLoader.java",
+						"lineno": 55,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
+		],
+		"cause": {
+			"fingerprint": "b8cf05f73071150a5506ee5af0e6c8a7",
+			"parts": [
+				"IllegalStateException",
+				"require@orderloader.java"
+			]
+		}
+	},
+	{
+		"name": "cause-v1 jvm: the root cause reported unwrapped: same cause-v1",
+		"input": {
+			"service": "orders",
+			"errorType": "java.lang.IllegalStateException",
+			"message": "order not loaded",
+			"frames": [
+				{
+					"function": "require",
+					"module": "com.example.orders.OrderLoader",
+					"filename": "OrderLoader.java",
+					"lineno": 55,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "783531fb45ed2448771b98fdc855b9b5",
+		"parts": [
+			"java.lang.IllegalStateException",
+			"require@orderloader.java"
+		],
+		"causes": [],
+		"cause": {
+			"fingerprint": "b8cf05f73071150a5506ee5af0e6c8a7",
+			"parts": [
+				"IllegalStateException",
+				"require@orderloader.java"
+			]
+		}
+	},
+	{
+		"name": "cause-v1: a root cause without in-app frames takes its nearest wrapper's innermost in-app frame",
+		"input": {
+			"service": "api",
+			"errorType": "Error",
+			"message": "payment failed",
+			"frames": [
+				{
+					"function": "charge",
+					"module": null,
+					"filename": "/app/src/payments.ts",
+					"lineno": 40,
+					"colno": 9,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "296f1b39a8eb1e4b4bb46a99b2b0daff",
+		"parts": [
+			"Error",
+			"charge@payments.ts"
+		],
+		"causes": [
+			{
+				"type": "AbortError",
+				"frames": [
+					{
+						"function": "abort",
+						"module": null,
+						"filename": "node:internal/abort_controller",
+						"lineno": 10,
+						"colno": 3,
+						"inApp": false,
+						"resolved": false
+					}
+				]
+			}
+		],
+		"cause": {
+			"fingerprint": "86b3e66f659fccc45fc6d20c2973d5fb",
+			"parts": [
+				"AbortError",
+				"charge@payments.ts"
+			]
+		}
+	},
+	{
+		"name": "cause-v1 python: a chained exception groups by its first (root) traceback, module path dropped",
+		"input": {
+			"service": "shop",
+			"errorType": "orders.errors.OrderError",
+			"message": "could not place order",
+			"frames": [
+				{
+					"function": "place",
+					"module": null,
+					"filename": "/app/orders/service.py",
+					"lineno": 51,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				},
+				{
+					"function": "checkout",
+					"module": null,
+					"filename": "/app/web/views.py",
+					"lineno": 12,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "a9ad586dfb8afb43b5506b4019f26570",
+		"parts": [
+			"orders.errors.OrderError",
+			"place@service.py",
+			"checkout@views.py"
+		],
+		"causes": [
+			{
+				"type": "TimeoutError",
+				"frames": [
+					{
+						"function": "acquire",
+						"module": null,
+						"filename": "/app/db/pool.py",
+						"lineno": 30,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			}
+		],
+		"cause": {
+			"fingerprint": "d48e8ddb2db32a2e0877f8c49d073cf5",
+			"parts": [
+				"TimeoutError",
+				"acquire@pool.py"
+			]
+		}
+	},
+	{
+		"name": "cause-v1 dotnet: inner exceptions, nearest first; a framework-only root falls back to its wrapper's frame",
+		"input": {
+			"service": "shop-api",
+			"errorType": "System.InvalidOperationException",
+			"message": "Checkout failed",
+			"frames": [
+				{
+					"function": "Submit",
+					"module": "Shop.Checkout",
+					"filename": "/src/Shop/Checkout.cs",
+					"lineno": 61,
+					"colno": null,
+					"inApp": true,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "a41d30ea985be67b2c12c89940f31c2f",
+		"parts": [
+			"System.InvalidOperationException",
+			"Submit@checkout.cs"
+		],
+		"causes": [
+			{
+				"type": "System.Net.Http.HttpRequestException",
+				"frames": [
+					{
+						"function": "Get",
+						"module": "Shop.Http",
+						"filename": "/src/Shop/Http.cs",
+						"lineno": 12,
+						"colno": null,
+						"inApp": true,
+						"resolved": false
+					}
+				]
+			},
+			{
+				"type": "System.Net.Sockets.SocketException",
+				"frames": [
+					{
+						"function": "Connect",
+						"module": "System.Net.Sockets.Socket",
+						"filename": null,
+						"lineno": null,
+						"colno": null,
+						"inApp": false,
+						"resolved": false
+					}
+				]
+			}
+		],
+		"cause": {
+			"fingerprint": "8aeb2db2a405f0d58ee1e5082c1531be",
+			"parts": [
+				"SocketException",
+				"Get@http.cs"
+			]
+		}
+	},
+	{
+		"name": "cause-v1: no in-app frame anywhere in the chain gives no candidate",
+		"input": {
+			"service": "api",
+			"errorType": "TypeError",
+			"message": "x is not a function",
+			"frames": [
+				{
+					"function": "x",
+					"module": null,
+					"filename": "/app/node_modules/lib/index.js",
+					"lineno": 3,
+					"colno": 7,
+					"inApp": false,
+					"resolved": false
+				}
+			]
+		},
+		"fingerprint": "e6090e0da73b9544bb5b8083adce02f4",
+		"parts": [
+			"TypeError",
+			"@index.js"
+		],
+		"causes": [],
+		"cause": null
 	}
 ]

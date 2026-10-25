@@ -24,7 +24,8 @@ import { ClickHouseStore } from "./clickhouse.js";
 import { normalizeLatencyHistograms } from "./latency.js";
 import type { IngesterConfig } from "./config.js";
 import { deriveFields, occurrenceIdFor } from "./fingerprint.js";
-import { occurrenceIdentity } from "./fingerprint-v3.js";
+import { causeTexts, type CauseText } from "./cause-chain.js";
+import { occurrenceIdentity, type CauseLink } from "./fingerprint-v3.js";
 import { parseStackFrames } from "./stack-frames.js";
 import { SourceMapCache, Symbolicator } from "./symbolicate.js";
 import {
@@ -557,6 +558,32 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		return symbolicated(ctx, input, parsedFrames(input.stack));
 	}
 
+	/**
+	 * The reported exception's causes, nearest first, with their frames
+	 * resolved like the reported one's (RF-06: the cause-v1 identity hashes
+	 * the root cause's innermost in-app frame, which must read the same as
+	 * when that error is reported unwrapped). Only used for the identity:
+	 * cause frames are not stored.
+	 */
+	async function causesFor(
+		ctx: IngestContext,
+		input: RuntimeOccurrenceInput,
+	): Promise<CauseLink[]> {
+		let causes: CauseText[];
+		try {
+			causes = causeTexts(input.stack, input.attributes);
+		} catch (err) {
+			console.warn("cause chain parse failed — no causes:", err instanceof Error ? err.message : err);
+			return [];
+		}
+		return Promise.all(
+			causes.map(async (cause) => ({
+				type: cause.type,
+				frames: await symbolicated(ctx, input, parsedFrames(cause.stack)),
+			})),
+		);
+	}
+
 	/** Ids are content-derived (occurrenceIdFor), NOT random: an exporter
 	 * that retries a batch — after a 503 from a partially-failed ClickHouse
 	 * write, or when only our 2xx got lost — must produce the same ids, so
@@ -565,8 +592,8 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	 *
 	 * `fingerprint` / `fingerprintScheme` stay the legacy identity
 	 * (message-v1 or code-v1) byte-for-byte; `fingerprints` carries every
-	 * candidate (manual-v1, code-v1, frames-v3, message-v1) for the platform
-	 * to resolve the issue from.
+	 * candidate (manual-v1, code-v1, frames-v3, message-v1, cause-v1) for
+	 * the platform to resolve the issue from.
 	 *
 	 * `batchIndexes` (traces): each occurrence's position among the batch's
 	 * signals before the per-trace dedupe, so a merged occurrence keeps the
@@ -585,8 +612,8 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				// through verbatim. Attributes were already sanitised by the
 				// normalisers (sanitizeRuntimeContext).
 				const input = scrubOccurrence(raw);
-				const frames = await framesFor(ctx, input);
-				const identity = occurrenceIdentity(input, frames);
+				const [frames, causes] = await Promise.all([framesFor(ctx, input), causesFor(ctx, input)]);
+				const identity = occurrenceIdentity(input, frames, causes);
 				const { fingerprint, scheme } = identity.legacy;
 				// Debug ids only locate source maps; they are not stored or forwarded.
 				const { debugIds: _debugIds, ...stored } = input;

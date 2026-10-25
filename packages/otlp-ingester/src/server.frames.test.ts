@@ -179,9 +179,10 @@ test("browser frames are symbolicated at ingest, stored and forwarded with every
 		// The outermost frame has no caller to name it and "Qa" is mangled.
 		{ function: null, module: null, filename: "src/checkout/Checkout.tsx", lineno: 77, colno: 3, inApp: true, resolved: true },
 	]);
+	// The root-cause candidate (RF-06) comes after the legacy one.
 	assert.deepEqual(
 		occurrence!.fingerprints.map((c: { scheme: string }) => c.scheme),
-		["frames-v3", "message-v1"],
+		["frames-v3", "message-v1", "cause-v1"],
 	);
 	assert.equal(occurrence!.fingerprints[1].fingerprint, legacy);
 	assert.deepEqual(occurrence!.fingerprintRecord, {
@@ -310,4 +311,58 @@ test("bundled Node frames are symbolicated at ingest by path suffix, with 5 cont
 	]);
 	// frames-v3 hashes the original file, not the bundle.
 	assert.deepEqual(occurrence!.fingerprintRecord.parts, ["TypeError", "checkout@checkout.ts"]);
+	assert.deepEqual(
+		occurrence!.fingerprints.map((c: { scheme: string }) => c.scheme),
+		["frames-v3", "message-v1", "cause-v1"],
+	);
+});
+
+test("a wrapped Node error carries the cause-v1 of its root cause, resolved like the root reported alone (RF-06)", async () => {
+	const now = String(Date.now() * 1_000_000);
+	const rootStack = "TypeError: Cannot read properties of undefined (reading 'total')\n    at checkout (/app/dist/server.js:1:11)";
+	const post = (events: Array<Record<string, unknown>>, spanId: string) =>
+		fetch(`${ingestUrl}/v1/traces`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer test-key" },
+			body: JSON.stringify({
+				resourceSpans: [{
+					resource: { attributes: [
+						{ key: "service.name", value: { stringValue: "api" } },
+						{ key: "service.version", value: { stringValue: "rel-1" } },
+					] },
+					scopeSpans: [{ spans: [{
+						traceId: spanId.repeat(32).slice(0, 32), spanId: spanId.repeat(16).slice(0, 16), name: "POST /checkout", kind: 2,
+						startTimeUnixNano: now, endTimeUnixNano: now, status: { code: 2 }, events,
+					}] }],
+				}],
+			}),
+		});
+	const attr = (key: string, value: string) => ({ key, value: { stringValue: value } });
+	let seen = sinkBatches.length;
+	assert.equal((await post([{ name: "exception", timeUnixNano: now, attributes: [
+		attr("exception.type", "TypeError"),
+		attr("exception.message", "Cannot read properties of undefined (reading 'total')"),
+		attr("exception.stacktrace", rootStack),
+	] }], "e")).status, 200);
+	const [raw] = (await nextBatch(seen)).occurrences as Array<Record<string, any>>;
+	seen = sinkBatches.length;
+	assert.equal((await post([{ name: "exception", timeUnixNano: now, attributes: [
+		attr("exception.type", "Error"),
+		attr("exception.message", "checkout failed"),
+		attr("exception.stacktrace", "Error: checkout failed\n    at handle (/app/dist/routes.js:4:2)"),
+		attr("exception.cause.1.type", "TypeError"),
+		attr("exception.cause.1.message", "Cannot read properties of undefined (reading 'total')"),
+		attr("exception.cause.1.stacktrace", rootStack),
+	] }], "f")).status, 200);
+	const [wrapped] = (await nextBatch(seen)).occurrences as Array<Record<string, any>>;
+	const causeOf = (o: Record<string, any>) => o.fingerprints.find((c: { scheme: string }) => c.scheme === "cause-v1")?.fingerprint;
+	assert.ok(causeOf(raw));
+	assert.equal(causeOf(wrapped), causeOf(raw));
+	assert.notEqual(
+		wrapped.fingerprints.find((c: { scheme: string }) => c.scheme === "frames-v3").fingerprint,
+		raw.fingerprints.find((c: { scheme: string }) => c.scheme === "frames-v3").fingerprint,
+	);
+	// The cause's frames were resolved through the map (checkout.ts, not server.js);
+	// only the reported exception's frames are stored.
+	assert.deepEqual(wrapped.frames.map((f: { filename: string }) => f.filename), ["/app/dist/routes.js"]);
 });

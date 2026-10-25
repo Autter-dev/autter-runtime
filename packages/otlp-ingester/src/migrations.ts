@@ -73,8 +73,9 @@ export const OCCURRENCE_REQUEST_ID_INDEX =
  * Migration 0016 columns — shared with the baseline DDL in clickhouse.ts.
  * `frames`: the structured (symbolicated) frames as JSON, '' when none.
  * `fingerprints`: every identity candidate (manual-v1, code-v1, frames-v3,
- * message-v1 — highest precedence first, ending with the legacy one), so
- * readers find an issue keyed by ANY scheme with
+ * message-v1 — highest precedence first, ending with the legacy one — then
+ * cause-v1 when computed, RF-06), so readers find an issue keyed by ANY
+ * scheme with
  * `(fingerprint = X OR has(fingerprints, X))`; rows written before 0016
  * read `[]` and still match on the legacy `fingerprint`.
  */

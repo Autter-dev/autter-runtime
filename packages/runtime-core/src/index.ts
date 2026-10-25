@@ -116,6 +116,27 @@ export {
 	type FingerprintInput,
 } from "./fingerprint-override.js";
 export {
+	BurstLimiter,
+	CAUGHT_BURST,
+	CAUGHT_DROPPED_ATTRIBUTE,
+	CAUGHT_REFILL_MS,
+	DEGRADED_REASON_ATTRIBUTE,
+	DEGRADED_REASON_MAX,
+	HANDLED_ATTRIBUTE,
+	HANDLING_ATTRIBUTE,
+	LOG_MESSAGE_ATTRIBUTE,
+	LOG_MESSAGE_MAX,
+	LOG_SOURCE_ATTRIBUTE,
+	caughtErrorAttributes,
+	degradedAttributes,
+	formatLogArguments,
+	handledErrorKind,
+	loggedErrorSources,
+	type BurstTail,
+	type CaptureLoggedErrorsOption,
+	type LoggedErrorSource,
+} from "./handled.js";
+export {
 	createErrorFilter,
 	effectiveSampleRate,
 	isIgnoredError,

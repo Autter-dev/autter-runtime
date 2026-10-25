@@ -120,4 +120,6 @@ export type {
 	BreadcrumbInput,
 	BreadcrumbLevel,
 	BreadcrumbType,
+	CaptureLoggedErrorsOption,
+	LoggedErrorSource,
 } from "@autter/runtime-core";

@@ -23,7 +23,9 @@ import {
 	reportExplicitFailure,
 	type OperationState,
 } from "./logger.js";
-import { sharedSlot } from "./shared.js";
+import { isCaptured, markCaptured } from "./captured.js";
+
+export { markCaptured } from "./captured.js";
 
 /**
  * Request wide events: one `kind: "request"` summary per HTTP request with
@@ -35,13 +37,6 @@ import { sharedSlot } from "./shared.js";
 
 const REQUEST_STATE = Symbol.for("autter.runtime.request");
 const BOUND = Symbol.for("autter.runtime.bound");
-/**
- * Errors already reported, by any copy of this package in the process (see
- * shared.ts): an error a route's copy reported is skipped by the copy Next's
- * `onRequestError` runs in. A WeakSet keyed by identity, so it also marks
- * errors from another realm (Next's edge sandbox) and frozen errors.
- */
-const CAPTURED = sharedSlot("requests", () => ({ captured: new WeakSet<object>() })).captured;
 
 type ExceptionCapturer = (error: unknown, attributes?: Attributes) => void;
 let capturer: ExceptionCapturer = () => {};
@@ -54,10 +49,6 @@ let annotator: SpanAnnotator = () => {};
 /** @internal server.ts registers a redacting "set these on the active span" here. */
 export function setRequestSpanAnnotator(fn: SpanAnnotator): void {
 	annotator = fn;
-}
-/** @internal Remember errors already captured so boundaries don't double-report. */
-export function markCaptured(error: unknown): void {
-	if (error && typeof error === "object") CAPTURED.add(error);
 }
 
 export interface AutterRequestsOptions {
@@ -90,6 +81,28 @@ export interface RuntimeRequestOptions {
 	ignore?: string[];
 	/** Receives the log flush promise after the response (serverless `waitUntil`). */
 	waitUntil?: (promise: Promise<unknown>) => void;
+	/**
+	 * Report thrown errors (default true): `false`, or a predicate per error.
+	 * An error it turns down is rethrown untouched and does not fail the
+	 * summary (Next.js `redirect()` / `notFound()` signals).
+	 */
+	capture?: boolean | ((error: unknown) => boolean);
+	/**
+	 * Answer a thrown error with `toClientError` JSON and the error's own
+	 * 4xx/5xx status (else 500) instead of rethrowing it, so a thrown 4xx is
+	 * recorded with its stack and still answered as a 4xx. Default false.
+	 */
+	errorResponse?: boolean | ((error: unknown) => boolean);
+}
+
+function decide(rule: boolean | ((error: unknown) => boolean) | undefined, error: unknown, fallback: boolean): boolean {
+	if (rule === undefined) return fallback;
+	if (typeof rule !== "function") return rule;
+	try {
+		return rule(error) === true;
+	} catch {
+		return false;
+	}
 }
 
 /** Express (4/5) assigns routing state onto the core request object; a
@@ -162,7 +175,7 @@ export function captureAtBoundary(
 		wanted = false;
 	}
 	if (!wanted) return;
-	if (error && typeof error === "object" && CAPTURED.has(error)) return;
+	if (isCaptured(error)) return;
 	markCaptured(error);
 	try {
 		const run = () => onRequestSpan(() => capturer(error, attributes));
@@ -190,7 +203,7 @@ export function requestStateOf(req: unknown): OperationState | undefined {
  * request span, without a second exception.
  */
 export function captureRequestError(error: unknown, attributes?: Attributes): void {
-	if (error && typeof error === "object" && CAPTURED.has(error)) {
+	if (isCaptured(error)) {
 		if (!attributes) return;
 		try {
 			onRequestSpan(() => annotator(attributes));
@@ -317,6 +330,7 @@ function finishRequest(
 		...(state.errorThrown ? { thrown: true } : {}),
 		status: input.status,
 		aborted: input.aborted,
+		...(state.degraded ? { degraded: true } : {}),
 	});
 	const span = trace.getActiveSpan();
 	if (span?.isRecording()) span.setAttribute("autter.operation.outcome", state.outcome);
@@ -640,9 +654,15 @@ export function withRuntimeRequest<A extends unknown[]>(
 				try {
 					return await handler(request, ...rest);
 				} catch (error) {
-					noteOperationError(error, true, state);
-					captureAtBoundary(error, state, true);
-					throw error;
+					if (decide(options.capture, error, true)) {
+						noteOperationError(error, true, state);
+						captureAtBoundary(error, state, true);
+					}
+					if (!decide(options.errorResponse, error, false)) throw error;
+					return new Response(JSON.stringify(toClientError(error, requestId)), {
+						status: responseStatusOf(error),
+						headers: { "content-type": "application/json; charset=utf-8" },
+					});
 				}
 			});
 			status = response.status;

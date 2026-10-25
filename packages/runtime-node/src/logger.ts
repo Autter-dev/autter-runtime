@@ -37,6 +37,7 @@ import {
 import { redactAttributes } from "./redact.js";
 import { sharedSlot } from "./shared.js";
 import { recordLogBreadcrumb, rememberThrownBreadcrumbs } from "./breadcrumbs.js";
+import { reportDegraded, reportLoggedError, setHandledTail } from "./caught-errors.js";
 import {
 	consoleSink,
 	fileSink,
@@ -141,6 +142,8 @@ export interface OperationState {
 	ai?: AiRollup;
 	error?: unknown;
 	errorThrown?: boolean;
+	/** `runtimeContext.degraded` ran: a succeeded outcome becomes "degraded". */
+	degraded?: boolean;
 	req?: unknown;
 	res?: unknown;
 	/** Breadcrumbs (breadcrumbs.ts): the request's trail, shared with child operations. */
@@ -429,7 +432,7 @@ export function createRuntimeLogger(attributes: RuntimeLogContext = {}) {
 			emit("info", message, merge(attrs, extra)),
 		warn: (message: string, extra?: RuntimeLogContext) =>
 			emit("warning", message, merge(attrs, extra)),
-		error: (error: unknown, extra?: RuntimeLogContext) =>
+		error: (error: unknown, extra?: RuntimeLogContext) => {
 			emit(
 				"error",
 				isError(error) ? error.message : String(error),
@@ -444,7 +447,10 @@ export function createRuntimeLogger(attributes: RuntimeLogContext = {}) {
 						: {}),
 				},
 				errorAttributes(error),
-			),
+			);
+			// An Error logged here is a caught error (RF-01): an occurrence too.
+			if (isError(error)) reportLoggedError(error, "runtimeLogger", undefined, toSpanAttributes(merge(attrs, extra)));
+		},
 	};
 }
 export const runtimeLogger = createRuntimeLogger();
@@ -457,6 +463,7 @@ export const runtimeLogger = createRuntimeLogger();
 export function captureExceptionAsLog(
 	error: unknown,
 	attributes: Record<string, unknown> = {},
+	level: "error" | "warning" = "error",
 ): void {
 	const isErr = isError(error);
 	const message = isErr ? error.message : String(error);
@@ -466,9 +473,9 @@ export function captureExceptionAsLog(
 				?.split("\n")
 				.filter((line, i) => i === 0 || !/captureException/.test(line))
 				.join("\n") ?? "");
-	noteOperationError(error);
+	if (level === "error") noteOperationError(error);
 	emit(
-		"error",
+		level,
 		message,
 		{
 			...(attributes as RuntimeLogContext),
@@ -600,6 +607,7 @@ export function emitSummary(
 	options: { http?: Record<string, unknown>; span?: SpanContext } = {},
 ): void {
 	if (state.sealed) return;
+	settleDegraded(state);
 	const err = state.error;
 	const level: RuntimeLogLevel = state.outcome === "failed" ? "error" : "info";
 	emit(
@@ -618,6 +626,13 @@ export function emitSummary(
 		{ state, ...(options.span ? { span: options.span } : {}) },
 	);
 	state.sealed = true;
+}
+
+/** A deliberate fallback turns a succeeded outcome into "degraded"; an
+ * explicit outcome or a failure wins. */
+function settleDegraded(state: OperationState): void {
+	if (state.degraded && state.outcome === "succeeded" && !state.explicitOutcome)
+		state.outcome = "degraded";
 }
 
 /** @internal Outcome reported via `outcome("failed")` without an exception. */
@@ -678,6 +693,7 @@ function startOperation<T>(
 				shared.config?.captureThrown?.(error);
 				throw error;
 			} finally {
+				settleDegraded(state);
 				trace.getActiveSpan()?.setAttributes({
 					...traceAttributes(state),
 					"autter.operation.outcome": state.outcome,
@@ -778,6 +794,31 @@ export const runtimeContext = {
 		noteOperationError(error);
 		runtimeLogger.error(error, attributes);
 	},
+	/**
+	 * The app caught `error` and chose to continue on a fallback (RF-02):
+	 *
+	 *   } catch (err) {
+	 *     runtimeContext.degraded(err, "pricing service down, using cached prices");
+	 *   }
+	 *
+	 * Recorded as an occurrence at `warning` severity, marked
+	 * `autter.handling = "deliberate"` with the reason (grouped by its code
+	 * when the error has one), never an incident. The current request or
+	 * operation ends "degraded" unless it failed or set its outcome.
+	 */
+	degraded(error: unknown, reason: string, attributes?: RuntimeLogContext): void {
+		try {
+			const state = currentOperation();
+			if (state) {
+				state.degraded = true;
+				noteOperationError(error, false, state);
+				appendInlineLog(state.inline, "warning", `degraded: ${String(reason)}`, undefined, redact);
+			}
+			reportDegraded(error, reason, toSpanAttributes(userContext(attributes, redact)));
+		} catch {
+			/* reporting never breaks the fallback */
+		}
+	},
 	/** Current operation id. */
 	get id(): string | undefined {
 		return local.getStore()?.id;
@@ -813,4 +854,15 @@ export const runtimeContext = {
 	},
 };
 export type RuntimeContextHandle = typeof runtimeContext;
+
+// Counts the burst limit left out that no sent record carried (caught-errors.ts).
+setHandledTail((type, dropped) =>
+	emit(
+		"warning",
+		`${dropped} caught ${type} error(s) left out by the burst limit`,
+		{ "autter.caught.dropped": dropped, "autter.caught.type": type },
+		{},
+		{ state: null },
+	),
+);
 export type { RuntimeEvent };

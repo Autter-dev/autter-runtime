@@ -351,3 +351,55 @@ test("countRequests: false leaves the request uncounted; captureEdgeException is
 		assert.equal(record.attrs["autter.request.error_reported"], undefined, record.message);
 	}
 });
+
+test("rt.error and console.error of an Error become caught occurrences; a deliberate fallback degrades the request", async () => {
+	const h = harness();
+	const worker = withAutter(
+		{ apiKey: "server-key", service: "edge-api", environment: "test", fetch: h.fakeFetch, endpoint: "https://ingest.test/" },
+		async (_request, _env, _ctx, rt) => {
+			console.error("db lookup failed", new Error("from console"));
+			rt.error(new Error("from rt.error"));
+			rt.degraded(new Error("cache miss"), "served stale");
+			return new Response("ok");
+		},
+	);
+	await worker.fetch(new Request("https://edge.test/p"), {}, h.ctx);
+	await new Promise((resolve) => setTimeout(resolve, 0)); // the console capture defers a tick
+	await worker.flush();
+	await Promise.all(h.pending);
+	const records = h.records();
+	const caughtConsole = records.find((r) => r.attrs["exception.message"] === "from console");
+	assert.ok(caughtConsole, "console.error(Error) reported");
+	assert.equal(caughtConsole.attrs["autter.handled"], true);
+	assert.equal(caughtConsole.attrs["autter.handling"], "caught");
+	assert.equal(caughtConsole.attrs["autter.log.source"], "console");
+	const caughtRt = records.find((r) => r.attrs["exception.message"] === "from rt.error");
+	assert.equal(caughtRt.attrs["autter.handling"], "caught");
+	const degraded = records.find((r) => r.attrs["exception.message"] === "cache miss");
+	assert.equal(degraded.level, "WARN");
+	assert.equal(degraded.attrs["autter.handling"], "deliberate");
+	assert.equal(degraded.attrs["autter.degraded.reason"], "served stale");
+	const summary = records.find((r) => r.attrs["autter.event.type"] === "operation");
+	assert.equal(summary.attrs["autter.operation.outcome"], "degraded");
+	// Handled errors don't flag the request as failed.
+	assert.ok(!summary.attrs["autter.request.error_reported"], "a caught error does not fail the request");
+});
+
+test("captureLoggedErrors: false turns off console capture; rt.error stays on", async () => {
+	const h = harness();
+	const worker = withAutter(
+		{ apiKey: "server-key", service: "edge-api", environment: "test", fetch: h.fakeFetch, endpoint: "https://ingest.test/", captureLoggedErrors: false },
+		async (_request, _env, _ctx, rt) => {
+			console.error(new Error("should not report"));
+			rt.error(new Error("rt still reports"));
+			return new Response("ok");
+		},
+	);
+	await worker.fetch(new Request("https://edge.test/p"), {}, h.ctx);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	await worker.flush();
+	await Promise.all(h.pending);
+	const records = h.records();
+	assert.ok(!records.some((r) => r.attrs["exception.message"] === "should not report"), "console capture off");
+	assert.ok(records.some((r) => r.attrs["exception.message"] === "rt still reports"), "rt.error is not a logger source");
+});

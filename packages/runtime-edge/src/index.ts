@@ -21,8 +21,14 @@
  * promotes to occurrences.
  */
 import {
+	BurstLimiter,
 	DEFAULT_REQUEST_ID_HEADER,
 	appendInlineLog,
+	caughtErrorAttributes,
+	degradedAttributes,
+	formatLogArguments,
+	handledErrorKind,
+	loggedErrorSources,
 	boundContext,
 	buildOtlpLogsRequest,
 	compileIgnore,
@@ -44,7 +50,9 @@ import {
 	toClientError,
 	toOtlpLogRecord,
 	userContext,
+	type CaptureLoggedErrorsOption,
 	type IgnoreErrorPattern,
+	type LoggedErrorSource,
 	type OtlpLogRecord,
 	type RedactOptions,
 	type RuntimeLogContext,
@@ -65,6 +73,8 @@ export {
 	type RuntimeErrorFactory,
 	type RuntimeErrorCatalog,
 	type ClientErrorBody,
+	type CaptureLoggedErrorsOption,
+	type LoggedErrorSource,
 	type RedactOptions,
 	type RuntimeLogContext,
 	type RuntimeLogContextValue,
@@ -122,6 +132,21 @@ export interface AutterEdgeOptions {
 	 * start` measures every request it serves).
 	 */
 	countRequests?: boolean;
+	/**
+	 * Errors the app caught and logged count (RF-01): an `Error` passed to
+	 * `console.error` or `rt.error` becomes an occurrence at `error`
+	 * severity, marked `autter.handled` / `autter.handling: "caught"`, with
+	 * the log line as context (`autter.log.source`, `autter.log.message`).
+	 * Log lines without an error object are untouched; an error also passed
+	 * to `rt.captureException` (or thrown out of the handler) is reported
+	 * once; a burst limit per error type and throw site keeps ten at once,
+	 * then one every ten seconds (the count left out is reported). It never
+	 * fails the request on its own. A `console.error` belongs to the request
+	 * when it is the only one in flight in the isolate; otherwise it is sent
+	 * on its own. `false` turns it off; `{ console: false }` keeps `rt.error`
+	 * only. Default true.
+	 */
+	captureLoggedErrors?: CaptureLoggedErrorsOption;
 	/** @internal Override fetch (tests). */
 	fetch?: typeof fetch;
 }
@@ -138,6 +163,13 @@ export interface EdgeRuntime {
 	warn(message: string, attributes?: RuntimeLogContext): void;
 	/** Logs an error (folded + emitted) and attaches its code to the summary. */
 	error(error: unknown, attributes?: RuntimeLogContext): void;
+	/**
+	 * The app caught `error` and chose to continue on a fallback (RF-02):
+	 * an occurrence at `warning` severity, marked `autter.handling =
+	 * "deliberate"` with the reason, never an incident; the request ends
+	 * "degraded" unless it failed or set its outcome.
+	 */
+	degraded(error: unknown, reason: string, attributes?: RuntimeLogContext): void;
 	/** Request id (honoured `x-request-id` or a fresh UUID); echoed in the response. */
 	readonly requestId: string;
 	/**
@@ -368,6 +400,10 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 		const runtime = buildRuntime(request, pathname, opts, header, redact);
 		if (compileIgnore(opts.ignore)(pathname))
 			return handler(request, env as Env, ctx as Ctx, runtime.rt);
+		const state = isolate();
+		if (opts.apiKey) state.last = opts;
+		if (loggedErrorSources(opts.captureLoggedErrors).console) patchConsole();
+		state.inFlight.add(runtime.handle);
 		if (!opts.apiKey && !warnedNoKey) {
 			warnedNoKey = true;
 			console.warn("[autter-runtime-edge] no apiKey: records are not exported");
@@ -391,6 +427,7 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 			}
 		}
 		const records = runtime.finish(status, request.signal?.aborted === true);
+		state.inFlight.delete(runtime.handle);
 		// Without a key nothing is queued: a later request with a key must not
 		// send these records under its own key, service or environment.
 		const destination = opts.apiKey ? destinationOf({ ...opts, apiKey: opts.apiKey }) : null;
@@ -542,6 +579,140 @@ export async function captureEdgeException(
 	}
 }
 
+/** One request in flight, as the isolate-wide hooks see it. */
+interface InFlight {
+	sources: Record<LoggedErrorSource, boolean>;
+	logged(error: unknown, source: LoggedErrorSource, message?: string, attributes?: RuntimeLogContext): void;
+	degraded(error: unknown, reason: string, attributes?: RuntimeLogContext): void;
+}
+
+/** Isolate-wide handled-error state, shared by every copy of this module. */
+interface IsolateState {
+	limiter: BurstLimiter;
+	inFlight: Set<InFlight>;
+	/** Options of the latest request: where records outside a request go. */
+	last: AutterEdgeOptions | null;
+	consolePatched: boolean;
+}
+function isolate(): IsolateState {
+	const key = Symbol.for("autter.runtime.edge.handled");
+	const registry = globalThis as unknown as Record<symbol, IsolateState | undefined>;
+	return (registry[key] ??= { limiter: new BurstLimiter(), inFlight: new Set(), last: null, consolePatched: false });
+}
+
+/** The burst limit (ten at once, then one every ten seconds per kind):
+ * -1 when left out, else the count to report with this record. */
+function limitHandled(prefix: string, error: unknown): number {
+	const kind = handledErrorKind(error);
+	return isolate().limiter.take(`${prefix}\n${kind.key}`, kind.type);
+}
+
+/** A handled error outside any request (or with several in flight): one
+ * record sent straight away to the latest request's destination. */
+async function sendHandled(
+	error: unknown,
+	level: "error" | "warning",
+	handled: Record<string, string | number | boolean>,
+	attributes?: RuntimeLogContext,
+): Promise<void> {
+	try {
+		const options = isolate().last;
+		if (!options?.apiKey) return;
+		const redact = makeRedactor(options.redactAttributes ?? true);
+		const isErr = isError(error);
+		const message = isErr ? error.message : safeString(error);
+		const reportable = createErrorFilter({ ignoreErrors: options.ignoreErrors, sampleRate: options.sampleRate });
+		if (!reportable({ type: isErr ? String(error.name ?? "") : "Error", message, severity: level })) return;
+		const event = createRuntimeEvent({
+			level,
+			message: String(boundContext({ message }, redact).message ?? "").slice(0, 4000),
+			attributes: boundContext(
+				{
+					"autter.event.id": randomId(),
+					"autter.capture.mode": "log",
+					...errorAttributes(error),
+					...handled,
+					...userContext(
+						{
+							...safeAttributes(attributes),
+							"exception.type": isErr ? error.name : "Error",
+							"exception.message": message,
+							"exception.stacktrace": (isErr && error.stack) || new Error(message).stack || "",
+						},
+						redact,
+					),
+				} as RuntimeLogContext,
+				redact,
+			),
+		});
+		await postLogs(destinationOf({ ...options, apiKey: options.apiKey }), [toOtlpLogRecord(event)]);
+	} catch {
+		/* reporting never throws into the caller */
+	}
+}
+
+/** `console.error(…, err, …)`: the request's when it is the only one in
+ * flight, else sent on its own after the tick (unless captured meanwhile). */
+function patchConsole(): void {
+	const state = isolate();
+	if (state.consolePatched || typeof console === "undefined") return;
+	state.consolePatched = true;
+	try {
+		const original = console.error;
+		if (typeof original !== "function") return;
+		console.error = function (this: unknown, ...args: unknown[]) {
+			try {
+				// The SDK's own diagnostics.
+				if (!(typeof args[0] === "string" && args[0].startsWith("[autter"))) {
+					const only = state.inFlight.size === 1 ? [...state.inFlight][0]! : null;
+					for (const arg of args) {
+						if (!isError(arg)) continue;
+						const message = formatLogArguments(args, arg);
+						if (only) {
+							if (only.sources.console) only.logged(arg, "console", message);
+						} else if (state.last && loggedErrorSources(state.last.captureLoggedErrors).console) {
+							setTimeout(() => {
+								if (!firstCapture(arg)) return;
+								const dropped = limitHandled("caught", arg);
+								if (dropped >= 0) void sendHandled(arg, "error", caughtErrorAttributes("console", message, dropped));
+							}, 0);
+						}
+					}
+				}
+			} catch {
+				/* reporting never breaks logging */
+			}
+			return original.apply(this, args);
+		};
+	} catch {
+		/* a frozen console stays as it is */
+	}
+}
+
+/**
+ * The current request's context where the edge has no AsyncLocalStorage:
+ * `runtimeContext.degraded` belongs to the request when it is the only one
+ * in flight in the isolate, else it is sent on its own. Inside a handler,
+ * `rt.degraded` is exact.
+ */
+export const runtimeContext = {
+	/** See `EdgeRuntime.degraded`. */
+	degraded(error: unknown, reason: string, attributes?: RuntimeLogContext): void {
+		try {
+			const state = isolate();
+			if (state.inFlight.size === 1) {
+				[...state.inFlight][0]!.degraded(error, reason, attributes);
+				return;
+			}
+			firstCapture(error);
+			const dropped = limitHandled("deliberate", error);
+			if (dropped >= 0) void sendHandled(error, "warning", degradedAttributes(reason, dropped), attributes);
+		} catch {
+			/* reporting never breaks the fallback */
+		}
+	},
+};
+
 /** Explicit per-request state (no AsyncLocalStorage on the edge). */
 function buildRuntime(
 	request: Request,
@@ -564,7 +735,9 @@ function buildRuntime(
 	let error: unknown;
 	let errorThrown = false;
 	let errorReported = false;
+	let degraded = false;
 	let sealed = false;
+	const sources = loggedErrorSources(opts.captureLoggedErrors);
 	const countRequest = opts.countRequests !== false;
 	const emitted: ReturnType<typeof createRuntimeEvent>[] = [];
 	const base = () => ({
@@ -645,6 +818,59 @@ function buildRuntime(
 			{ "autter.capture.mode": "log", ...errorAttributes(err), ...fingerprintEventAttributes(split.fingerprint) },
 		);
 	};
+	/** A handled error: an occurrence record that never fails the request. */
+	const recordHandled = (
+		err: unknown,
+		level: "error" | "warning",
+		handled: Record<string, string | number | boolean>,
+		attrs?: RuntimeLogContext,
+	) => {
+		if (sealed) return;
+		if (err && typeof err === "object") {
+			captured.add(err);
+			capturedErrors().add(err);
+		}
+		const isErr = isError(err);
+		const message = isErr ? err.message : String(err);
+		if (!reportable({ type: isErr ? String(err.name ?? "") : "Error", message, severity: level })) return;
+		const split = splitFingerprint(safeAttributes(attrs));
+		record(
+			level,
+			message,
+			{
+				...split.attributes,
+				"exception.type": isErr ? err.name : "Error",
+				"exception.message": message,
+				"exception.stacktrace": (isErr && err.stack) || new Error(message).stack || "",
+			},
+			{ "autter.capture.mode": "log", ...errorAttributes(err), ...fingerprintEventAttributes(split.fingerprint), ...handled },
+		);
+	};
+	// Logged errors wait for the tick (or the response) to end, so one also
+	// captured or thrown out of the handler meanwhile is reported once.
+	const pending: Array<{ error: unknown; source: LoggedErrorSource; message?: string; attrs?: RuntimeLogContext }> = [];
+	const drainLogged = () => {
+		for (const entry of pending.splice(0)) {
+			if (sealed || (entry.error && typeof entry.error === "object" && (captured.has(entry.error) || capturedErrors().has(entry.error))))
+				continue;
+			const dropped = limitHandled("caught", entry.error);
+			if (dropped >= 0)
+				recordHandled(entry.error, "error", caughtErrorAttributes(entry.source, entry.message, dropped), entry.attrs);
+		}
+	};
+	const logged = (err: unknown, source: LoggedErrorSource, message?: string, attrs?: RuntimeLogContext) => {
+		if (sealed || !sources[source] || !isError(err) || pending.some((entry) => entry.error === err)) return;
+		pending.push({ error: err, source, ...(message ? { message } : {}), ...(attrs ? { attrs } : {}) });
+		if (pending.length === 1) setTimeout(drainLogged, 0);
+	};
+	const markDegraded = (err: unknown, reason: string, attrs?: RuntimeLogContext) => {
+		if (sealed) return;
+		degraded = true;
+		noteError(err);
+		appendInlineLog(inline, "warning", `degraded: ${String(reason)}`, undefined, redact);
+		const dropped = limitHandled("deliberate", err);
+		if (dropped >= 0) recordHandled(err, "warning", degradedAttributes(reason, dropped), attrs);
+	};
 	const rt: EdgeRuntime = {
 		set(context) {
 			if (!sealed) attributes = mergeContext(attributes, context, redact);
@@ -669,6 +895,14 @@ function buildRuntime(
 				},
 				errorAttributes(err),
 			);
+			logged(err, "runtimeLogger", undefined, safeAttributes(attrs));
+		},
+		degraded(err, reason, attrs) {
+			try {
+				markDegraded(err, reason, attrs);
+			} catch {
+				/* reporting never breaks the fallback */
+			}
 		},
 		requestId,
 		captureException(err, attrs) {
@@ -677,10 +911,19 @@ function buildRuntime(
 	};
 	const finish = (status: number, aborted: boolean) => {
 		if (sealed) return emitted;
+		drainLogged();
+		// Counts the burst limit left out that no sent record carried.
+		for (const tail of isolate().limiter.drain())
+			record(
+				"warning",
+				`${tail.dropped} caught ${tail.type} error(s) left out by the burst limit`,
+				{ "autter.caught.dropped": tail.dropped, "autter.caught.type": tail.type },
+			);
 		const outcome = requestOutcome({
 			...(explicit ? { explicit } : {}),
 			...(error !== undefined ? { error } : {}),
 			...(errorThrown ? { thrown: true } : {}),
+			...(degraded ? { degraded: true } : {}),
 			status,
 			aborted,
 		});
@@ -713,5 +956,6 @@ function buildRuntime(
 	};
 	/** An error thrown out of the handler: never sampled out. */
 	const captureThrown = (err: unknown) => capture(err, undefined, true);
-	return { rt, finish, noteError, captureThrown };
+	const handle: InFlight = { sources, logged, degraded: markDegraded };
+	return { rt, finish, noteError, captureThrown, handle };
 }

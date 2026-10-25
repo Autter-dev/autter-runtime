@@ -10,8 +10,10 @@ import {
 	fingerprintEventAttributes,
 	isError,
 	splitFingerprint,
+	type CaptureLoggedErrorsOption,
 	type IgnoreErrorPattern,
 } from "@autter/runtime-core";
+import { startLoggedErrorCapture, stopLoggedErrorCapture, type HandledSeverity } from "./caught-errors.js";
 import {
 	captureExceptionAsLog,
 	configureRuntimeLogger,
@@ -88,6 +90,8 @@ export interface AutterLoggingOptions {
 	sampleRate?: number;
 	/** Same semantics as initAutterServer: errors never reported (type or message). */
 	ignoreErrors?: IgnoreErrorPattern[];
+	/** Same semantics as initAutterServer: errors logged through console.error, pino, winston, bunyan or runtimeLogger.error are occurrences. Default true. */
+	captureLoggedErrors?: CaptureLoggedErrorsOption;
 }
 
 export interface AutterLogging {
@@ -163,6 +167,36 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 		captureExceptionAsLog(error, { ...redacted, ...fingerprint });
 	}
 
+	/** Handled errors: an event on the active span without an error status,
+	 * else a promoted log record at the error's severity. */
+	function captureHandled(error: unknown, attributes: Attributes, severity: HandledSeverity): void {
+		markCaptured(error);
+		const isErrValue = isError(error);
+		if (!errorFilter({
+			type: isErrValue ? String(error.name ?? "") : "Error",
+			message: isErrValue ? String(error.message ?? "") : String(error),
+			severity,
+		})) return;
+		const split = splitFingerprint(attributes);
+		const fingerprint = fingerprintEventAttributes(split.fingerprint, redact.text);
+		const redacted = redact(split.attributes);
+		notifyException(error, { ...redacted, ...fingerprint, "autter.severity": severity });
+		const span: Span | undefined = trace.getActiveSpan();
+		if (mode === "auto" && span?.isRecording()) {
+			span.addEvent("exception", {
+				...redacted,
+				"exception.type": isErrValue ? error.name : "Error",
+				"exception.message": redact.text(isErrValue ? error.message : String(error)),
+				...(isErrValue && error.stack ? { "exception.stacktrace": redact.text(error.stack) } : {}),
+				"autter.severity": severity,
+				...errorAttributes(error),
+				...fingerprint,
+			});
+			return;
+		}
+		captureExceptionAsLog(error, { ...redacted, ...fingerprint }, severity);
+	}
+
 	const captured = new WeakSet<object>();
 	configureRuntimeLogger({
 		endpoint,
@@ -188,7 +222,8 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 			captureException(error);
 		},
 	});
-	setLoggerOnlyCapture(captureException);
+	setLoggerOnlyCapture(captureException, captureHandled);
+	startLoggedErrorCapture(options.captureLoggedErrors);
 
 	const onCrash = (error: unknown) => {
 		if (recordedAsRejection(error)) return;
@@ -211,6 +246,7 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 		captureException,
 		flush: flushRuntimeLogs,
 		shutdown: async () => {
+			if (L.active === handle) stopLoggedErrorCapture();
 			process.off("uncaughtExceptionMonitor", onCrash);
 			uninstallRejections?.();
 			uninstallRejections = null;

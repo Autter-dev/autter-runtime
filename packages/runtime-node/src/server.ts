@@ -87,8 +87,16 @@ import {
 	fingerprintEventAttributes,
 	isError,
 	splitFingerprint,
+	type CaptureLoggedErrorsOption,
 	type IgnoreErrorPattern,
 } from "@autter/runtime-core";
+import {
+	setHandledCapture,
+	startLoggedErrorCapture,
+	stopLoggedErrorCapture,
+	type HandledCapture,
+	type HandledSeverity,
+} from "./caught-errors.js";
 import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
 import {
 	installUnhandledRejectionCapture,
@@ -116,6 +124,10 @@ interface ServerSlot {
 	redactor: Redactor;
 	/** Set by initAutterLogging: exception capture without NodeSDK. */
 	loggerOnlyCapture: ((error: unknown, attributes?: Attributes) => void) | null;
+	/** Handled errors (caught, degraded) of the initAutterServer tracker. */
+	handled: HandledCapture | null;
+	/** Set by initAutterLogging: handled errors without NodeSDK. */
+	loggerOnlyHandled: HandledCapture | null;
 	/** `logging.requests: true` — zero-code request summaries (experimental). */
 	hookRequests: boolean;
 }
@@ -124,6 +136,8 @@ const S = sharedSlot<ServerSlot>("server", () => ({
 	alwaysOnProvider: null,
 	redactor: makeRedactor(true),
 	loggerOnlyCapture: null,
+	handled: null,
+	loggerOnlyHandled: null,
 	hookRequests: false,
 }));
 
@@ -215,6 +229,20 @@ export interface AutterServerOptions {
 	 * Default true; false turns both off.
 	 */
 	captureGlobalErrors?: boolean;
+	/**
+	 * Errors the app caught and logged count (RF-01): an `Error` passed to
+	 * `console.error`, pino, winston, bunyan or `runtimeLogger.error` becomes
+	 * an occurrence at `error` severity, marked `autter.handled` /
+	 * `autter.handling: "caught"`, with the log line as context
+	 * (`autter.log.source`, `autter.log.message`). Log lines without an error
+	 * object are untouched; an error also passed to `captureException` in
+	 * the same tick is reported once; a burst limit per error type and throw
+	 * site keeps ten at once, then one every ten seconds (the count left out
+	 * is reported). It never fails a request on its own. `false` turns it
+	 * off; an object turns single loggers off, e.g. `{ console: false }`.
+	 * Default true.
+	 */
+	captureLoggedErrors?: CaptureLoggedErrorsOption;
 	/**
 	 * Record unhandled promise rejections as errors (severity "error",
 	 * `autter.unhandled_rejection: true`). Never changes whether the process
@@ -1240,12 +1268,54 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		span.setStatus({ code: SpanStatusCode.ERROR, message: safeMessage });
 		if (!reuseActive) span.end();
 	}
+	/**
+	 * A handled error (caught and logged, or a deliberate fallback): an
+	 * exception event on the active span, or on its own always-on span, that
+	 * never changes a span's status, so it never fails the request it
+	 * happened in. Its severity and `autter.handled` marks ride on the event.
+	 */
+	function captureHandled(error: unknown, attributes: Attributes, severity: HandledSeverity): void {
+		const isErr = isError(error);
+		if (!errorFilter({
+			type: isErr ? String(error.name ?? "") : "Error",
+			message: isErr ? String(error.message ?? "") : String(error),
+			severity,
+		})) return;
+		if (severity === "error") errorTraceBuffer?.retainActiveTrace();
+		telemetryStats.markCaptured();
+		const message = redactor.text(isErr ? error.message : String(error));
+		const stack = isErr && error.stack
+			? error.stack
+			: new Error().stack?.split("\n").filter((line, i) => i === 0 || !/captureHandled|report(?:Degraded|LoggedError)/.test(line)).join("\n");
+		const split = splitFingerprint(attributes);
+		const fingerprint = fingerprintEventAttributes(split.fingerprint, redactor.text);
+		const redacted = redactor(split.attributes);
+		const activeSpan = trace.getActiveSpan();
+		const reuseActive = activeSpan?.isRecording() === true;
+		const span = reuseActive ? (activeSpan as Span) : errorTracer.startSpan(isErr ? error.name : "Error");
+		markCaptured(error);
+		notifyException(error, { ...redacted, ...fingerprint, "autter.severity": severity });
+		span.addEvent("exception", {
+			...redacted,
+			"exception.type": isErr ? error.name : "Error",
+			"exception.message": message,
+			...(stack ? { "exception.stacktrace": redactor.text(stack) } : {}),
+			"autter.severity": severity,
+			...errorAttributes(error),
+			...fingerprint,
+			...breadcrumbEventAttributes(redactor.text, error),
+		});
+		if (!reuseActive) span.end();
+	}
+
 	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment, distro,
 		release: options.release, options: options.logging, redact: redactor,
 		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, redactor(attributes), links),
 		reportOutcome,
 	});
 	S.hookRequests = options.logging?.requests === true;
+	S.handled = captureHandled;
+	startLoggedErrorCapture(options.captureLoggedErrors);
 
 	let onCrash: ((err: unknown) => void) | null = null;
 	let uninstallRejections: (() => void) | null = null;
@@ -1311,6 +1381,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
 		shutdown: async () => {
+			// Before the logger stops: counts the burst limit still holds are sent.
+			if (S.active === server) stopLoggedErrorCapture();
 			const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
 			if (onCrash) process.off("uncaughtExceptionMonitor", onCrash);
 			uninstallRejections?.();
@@ -1320,6 +1392,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			if (S.active === server) {
 				S.active = null;
 				S.alwaysOnProvider = null;
+				S.handled = null;
 				S.hookRequests = false;
 				S.redactor = makeRedactor(true);
 			}
@@ -1370,8 +1443,40 @@ export function captureException(
 /** @internal */
 export function setLoggerOnlyCapture(
 	fn: ((error: unknown, attributes?: Attributes) => void) | null,
+	handled: HandledCapture | null = null,
 ): void {
 	S.loggerOnlyCapture = fn;
+	S.loggerOnlyHandled = handled;
+}
+
+/**
+ * @internal Record a handled error (caught-errors.ts): through the active
+ * tracker or logger-only mode, else on the global tracer like
+ * `captureException`, without an error status.
+ */
+export function captureHandledError(error: unknown, attributes: Attributes, severity: HandledSeverity): void {
+	if (S.active) {
+		S.handled?.(error, attributes, severity);
+		return;
+	}
+	if (S.loggerOnlyHandled) {
+		S.loggerOnlyHandled(error, attributes, severity);
+		return;
+	}
+	markCaptured(error);
+	const split = splitFingerprint(attributes);
+	notifyException(error, { ...split.attributes, "autter.severity": severity });
+	const span = trace.getTracer("autter-errors").startSpan(isError(error) ? error.name : "Error");
+	span.addEvent("exception", {
+		...S.redactor(split.attributes),
+		"exception.type": isError(error) ? error.name : "Error",
+		"exception.message": S.redactor.text(isError(error) ? error.message : String(error)),
+		...(isError(error) && error.stack ? { "exception.stacktrace": S.redactor.text(error.stack) } : {}),
+		"autter.severity": severity,
+		...errorAttributes(error),
+		...fingerprintEventAttributes(split.fingerprint, S.redactor.text),
+	});
+	span.end();
 }
 /** @internal True while initAutterServer's NodeSDK pipeline is active (in any copy). */
 export function serverActive(): boolean {
@@ -1381,6 +1486,7 @@ export function serverActive(): boolean {
 export { structuredErrorAttributes };
 
 setRequestExceptionCapturer((error, attributes) => captureException(error, attributes));
+setHandledCapture(captureHandledError);
 setRequestSpanAnnotator((attributes) => {
 	const span = trace.getActiveSpan();
 	if (span?.isRecording()) span.setAttributes(S.redactor(splitFingerprint(attributes).attributes));

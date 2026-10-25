@@ -78,18 +78,21 @@ export interface RequestOutcomeInput {
 	thrown?: boolean;
 	status?: number;
 	aborted?: boolean;
+	/** The app chose to continue on a fallback (`runtimeContext.degraded`). */
+	degraded?: boolean;
 }
 
 /**
  * Explicit outcome wins. Otherwise an expected coded error → degraded, a
- * thrown error or status ≥ 500 → failed, an aborted request → cancelled,
- * anything else → succeeded.
+ * thrown error or status ≥ 500 → failed, a deliberate fallback → degraded,
+ * an aborted request → cancelled, anything else → succeeded.
  */
 export function requestOutcome(input: RequestOutcomeInput): RuntimeOutcome {
 	if (input.explicit) return input.explicit;
 	if (input.error !== undefined && isExpectedError(input.error)) return "degraded";
 	if (input.thrown || (input.status !== undefined && input.status >= 500))
 		return "failed";
+	if (input.degraded) return "degraded";
 	if (input.aborted) return "cancelled";
 	return "succeeded";
 }

@@ -49,7 +49,9 @@ export {
 	type RuntimeErrorCatalog,
 	type ClientErrorBody,
 	type ErrorAttributeOptions,
+	stackAttributesLast,
 } from "./errors.js";
+export { DEBUG_IDS_ATTRIBUTE, debugIdsForStacks, firstFramePath } from "./debug-ids.js";
 export {
 	INLINE_LOG_LIMIT,
 	createInlineLogState,

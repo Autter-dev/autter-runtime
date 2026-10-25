@@ -15,6 +15,8 @@
  * groups by message exactly as before.
  */
 
+import { DEBUG_IDS_ATTRIBUTE, debugIdsForStacks } from "./debug-ids.js";
+
 /** `namespace.key` with up to four segments, lower-case, max 80 characters. */
 export const CODE_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$/;
 export const CODE_MAX_LENGTH = 80;
@@ -271,11 +273,35 @@ export function isExpectedError(err: unknown): boolean {
 export interface ErrorAttributeOptions {
 	/** Also emit `exception.cause.N.*` for the cause chain (default true). */
 	causes?: boolean;
+	/**
+	 * With `causes`, also emit what only an occurrence record needs (default
+	 * true): each cause's stack (`exception.cause.N.stacktrace`, RF-06: a
+	 * wrapped error groups with its root cause) and the debug ids of the
+	 * bundles in the stacks (`autter.debug_ids`, RF-05: server source maps).
+	 * Request and operation summaries pass false.
+	 */
+	stacks?: boolean;
 }
 
 /**
- * Wire attributes for an error: `autter.error.code|why|fix|link|status|expected`
- * and `exception.cause.N.type|message|code` (N = 1..5). Never includes
+ * Attributes that carry whole stacks besides `exception.stacktrace`. Records
+ * put them last (stackAttributesLast), so a bounded context spends its
+ * budget on the main stack and the caller's own context first.
+ */
+const STACK_ATTRIBUTE_RE = /^exception\.cause\.\d+\.stacktrace$|^autter\.debug_ids$/;
+
+/** The same attributes, with cause stacks and debug ids moved to the end. */
+export function stackAttributesLast<T extends Record<string, unknown>>(attributes: T): T {
+	const head: Record<string, unknown> = {};
+	const tail: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(attributes)) (STACK_ATTRIBUTE_RE.test(key) ? tail : head)[key] = value;
+	return { ...head, ...tail } as T;
+}
+
+/**
+ * Wire attributes for an error: `autter.error.code|why|fix|link|status|expected`,
+ * `exception.cause.N.type|message|code|stacktrace` (N = 1..5) and
+ * `autter.debug_ids` (see ErrorAttributeOptions.stacks). Never includes
  * `internal` — see `errorInternal`.
  */
 export function errorAttributes(
@@ -297,6 +323,9 @@ export function errorAttributes(
 	const expected = field(err, "expected");
 	if (typeof expected === "boolean") out["autter.error.expected"] = expected;
 	if (options.causes !== false) {
+		const stacks = options.stacks !== false;
+		const ownStack = field(err, "stack");
+		const allStacks: string[] = typeof ownStack === "string" && ownStack ? [ownStack] : [];
 		let cause = field(err, "cause");
 		const seen = new Set<unknown>([err]);
 		for (let n = 1; n <= CAUSE_DEPTH && cause !== undefined && cause !== null; n++) {
@@ -312,7 +341,18 @@ export function errorAttributes(
 			const causeCode = field(cause, "code");
 			if (typeof causeCode === "string" && causeCode)
 				out[`exception.cause.${n}.code`] = causeCode.slice(0, CODE_MAX_LENGTH);
+			// The cause's own frames: the ingester groups a wrapped error with
+			// its root cause by the innermost app frame across the chain (RF-06).
+			const causeStack = isError ? field(cause, "stack") : undefined;
+			if (stacks && typeof causeStack === "string" && causeStack) {
+				out[`exception.cause.${n}.stacktrace`] = causeStack;
+				allStacks.push(causeStack);
+			}
 			cause = isError ? field(cause, "cause") : undefined;
+		}
+		if (stacks) {
+			const ids = debugIdsForStacks(allStacks);
+			if (ids) out[DEBUG_IDS_ATTRIBUTE] = JSON.stringify(ids);
 		}
 	}
 	return out;

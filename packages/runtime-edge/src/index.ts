@@ -47,6 +47,7 @@ import {
 	resolveRequestId,
 	responseStatusOf,
 	splitFingerprint,
+	stackAttributesLast,
 	toClientError,
 	toOtlpLogRecord,
 	userContext,
@@ -551,12 +552,13 @@ export async function captureEdgeException(
 			level: "error",
 			message: String(boundContext({ message }, redact).message ?? "").slice(0, 4000),
 			attributes: boundContext(
-				{
+				// Cause stacks and debug ids last: the bound keeps the main stack first.
+				stackAttributesLast({
 					"autter.event.id": randomId(),
 					"autter.capture.mode": "log",
 					...errorAttributes(error),
 					...user,
-				} as RuntimeLogContext,
+				}) as RuntimeLogContext,
 				redact,
 			),
 		});
@@ -627,7 +629,8 @@ async function sendHandled(
 			level,
 			message: String(boundContext({ message }, redact).message ?? "").slice(0, 4000),
 			attributes: boundContext(
-				{
+				// Cause stacks and debug ids last: the bound keeps the main stack first.
+				stackAttributesLast({
 					"autter.event.id": randomId(),
 					"autter.capture.mode": "log",
 					...errorAttributes(error),
@@ -641,7 +644,7 @@ async function sendHandled(
 						},
 						redact,
 					),
-				} as RuntimeLogContext,
+				}) as RuntimeLogContext,
 				redact,
 			),
 		});
@@ -766,13 +769,15 @@ function buildRuntime(
 				level,
 				message: String(boundContext({ message }, redact).message ?? "").slice(0, 4000),
 				attributes: boundContext(
-					{
+					// Cause stacks and debug ids last: the bound keeps the main
+					// stack and the caller's context whole first.
+					stackAttributesLast({
 						"autter.event.id": randomId(),
 						...extra,
 						...exceptions,
 						...base(),
 						...user,
-					} as RuntimeLogContext,
+					}) as RuntimeLogContext,
 					redact,
 				),
 			}),
@@ -946,7 +951,8 @@ function buildRuntime(
 				// The reported error makes it a failed request in the counts,
 				// which then don't count the error record again.
 				...(countRequest && errorReported ? { "autter.request.error_reported": true } : {}),
-				...(error !== undefined ? errorAttributes(error) : {}),
+				// A summary is no occurrence: no cause stacks or debug ids.
+				...(error !== undefined ? errorAttributes(error, { stacks: false }) : {}),
 				...(inline.logsTruncated ? { "autter.operation.logs_truncated": true } : {}),
 				...(inline.logs.length ? { "autter.operation.logs": inline.logs } : {}),
 			},

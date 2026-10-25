@@ -157,6 +157,8 @@ test("coded errors on spans: autter.error.* on span and event, internal on the s
 		const event = attrs(reserve.events.find((e) => e.name === "exception").attributes);
 		assert.equal(event["autter.error.code"], "inventory.reservation_timeout");
 		assert.equal(event["exception.cause.1.code"], "ECONNRESET");
+		// The cause's own frames (RF-06: a wrapped error groups with its root cause).
+		assert.match(event["exception.cause.1.stacktrace"], /^Error: socket hang up\n\s+at /);
 		const legacy = spans.find((s) => attrs(s.attributes)["autter.error.code"] === "legacy.thing_failed");
 		assert.equal(attrs(legacy.attributes)["autter.error.fix"], "Do the thing");
 		// summaries carry the code but never the internal payload

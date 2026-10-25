@@ -20,6 +20,7 @@ import {
 	mergeContext,
 	parseCarrier,
 	parseTraceparent,
+	stackAttributesLast,
 	toSpanAttributes,
 	userContext,
 	LEVEL_SEVERITY,
@@ -293,13 +294,15 @@ function emit(
 	const exceptions = Object.fromEntries(
 		Object.entries(user).filter(([key]) => key.startsWith("exception.")),
 	);
-	const raw: Record<string, unknown> = {
+	// Cause stacks and debug ids go last, so the bounded context keeps the
+	// main stack and the caller's context whole first.
+	const raw: Record<string, unknown> = stackAttributesLast({
 		"autter.event.id": randomUUID(),
 		...extra,
 		...exceptions,
 		...operationAttributes(state),
 		...user,
-	};
+	});
 	const enrichers = shared.config?.options?.enrich;
 	if (summary && state && enrichers?.length) {
 		const event: RuntimeEnrichEvent = { level, message, attributes: raw };
@@ -591,7 +594,8 @@ function summaryExtra(
 		"autter.operation.level": maxLevel(state.inline.level, level),
 		...(state.ai ? { "autter.operation.ai": state.ai } : {}),
 		...http,
-		...(err !== undefined ? errorAttributes(err) : {}),
+		// A summary is no occurrence: no cause stacks or debug ids.
+		...(err !== undefined ? errorAttributes(err, { stacks: false }) : {}),
 		...(state.inline.logsTruncated
 			? { "autter.operation.logs_truncated": true }
 			: {}),

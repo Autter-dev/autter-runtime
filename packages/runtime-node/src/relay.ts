@@ -32,16 +32,36 @@ export interface RelayOptions {
 	 */
 	perIpRateLimit?: number | false;
 	/**
-	 * Trust the client-supplied `X-Forwarded-For` header when keying the per-IP
-	 * rate limit. Off by default: the header is spoofable, so a caller could
-	 * rotate it to bypass the window and drive unbounded parsing/forwarding
-	 * under the server's ingest key. Enable ONLY behind a proxy/CDN you control
-	 * that overwrites the header. When off, the fetch handler keys a single
-	 * shared bucket, and the Node handler keys the real socket peer address.
-	 * Only a strict boolean `true` enables it — a truthy string such as the
-	 * common `process.env.TRUST_PROXY === "false"` slip stays on the safe path.
+	 * How the per-client rate limit finds the visitor's address. A caller can
+	 * write anything into `X-Forwarded-For`, so the relay never takes its
+	 * first (leftmost) entry unless told to.
+	 *
+	 * - `"auto"` (default): works behind any load balancer, CDN or platform
+	 *   proxy without setup. Proxies append the address they saw to the right
+	 *   of the header (or overwrite it), so the relay reads it right to left
+	 *   and takes the first public address, skipping private and loopback
+	 *   hops. The Node handler only does this when the connection itself came
+	 *   from a private address (a proxy on your network); a public peer is the
+	 *   visitor and its header is ignored. On Cloudflare Workers it uses
+	 *   `CF-Connecting-IP`.
+	 * - a number `n`: exactly `n` proxies you control sit in front; use the
+	 *   entry `n` from the right (Express `trust proxy` semantics). Use `1`
+	 *   for a Node origin behind Cloudflare with no load balancer.
+	 * - `true`: every proxy in front is yours and strips client values; use
+	 *   the leftmost entry.
+	 * - `false`: never read the header. The Node handler keys the socket peer;
+	 *   the fetch handler keys one shared bucket for the route.
+	 *
+	 * Strings from environment variables are read too (`"auto"`, `"true"`,
+	 * `"false"`, `"0"`, `"2"`); anything else falls back to `"auto"`.
 	 */
-	trustProxy?: boolean;
+	trustProxy?: boolean | "auto" | number | string;
+	/**
+	 * Return the visitor's address yourself (Deno's `info.remoteAddr`, Bun's
+	 * `server.requestIP`, a header your edge sets). Wins over `trustProxy`
+	 * when it returns a non-empty string.
+	 */
+	clientIp?: (request: Request | IncomingMessage) => string | null | undefined;
 	/** Called when the async forward fails (default: console.warn). */
 	onError?: (err: unknown) => void;
 	/**
@@ -84,6 +104,153 @@ class IpWindow {
 function firstForwardedFor(value: string | string[] | undefined | null): string {
 	const raw = Array.isArray(value) ? value[0] : value;
 	return raw ? (raw.split(",")[0] ?? "").trim() : "";
+}
+
+// ── Client address for the rate limit ──────────────────────────────────────
+
+type ProxyTrust =
+	| { mode: "auto" }
+	| { mode: "never" }
+	| { mode: "all" }
+	| { mode: "hops"; hops: number };
+
+const TRUST_AUTO: ProxyTrust = { mode: "auto" };
+let warnedTrustProxy = false;
+
+/** Read `trustProxy` (including strings from env vars) into one mode. */
+export function resolveTrustProxy(value: unknown): ProxyTrust {
+	if (value === undefined || value === null || value === "auto") return TRUST_AUTO;
+	if (value === true) return { mode: "all" };
+	if (value === false || value === 0) return { mode: "never" };
+	if (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 100) {
+		return { mode: "hops", hops: value };
+	}
+	if (typeof value === "string") {
+		const v = value.trim().toLowerCase();
+		if (v === "" || v === "auto") return TRUST_AUTO;
+		if (v === "false" || v === "0" || v === "no" || v === "off") return { mode: "never" };
+		if (v === "true" || v === "yes" || v === "on") return { mode: "all" };
+		if (/^[1-9][0-9]?$/.test(v)) return { mode: "hops", hops: Number(v) };
+	}
+	if (!warnedTrustProxy) {
+		warnedTrustProxy = true;
+		console.warn(
+			`[autter-runtime] relay: trustProxy ${JSON.stringify(value)} is not recognised; using "auto".`,
+		);
+	}
+	return TRUST_AUTO;
+}
+
+const IPV4_RE = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+/** One forwarded/peer entry as a bare, lowercased IP, or null when it is not one. */
+export function normalizeAddress(entry: string | null | undefined): string | null {
+	if (!entry) return null;
+	let a = entry.trim();
+	if (!a || a.length > 64) return null;
+	const bracketed = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(a);
+	if (bracketed) a = bracketed[1] ?? "";
+	else if (/^[\d.]+:\d{1,5}$/.test(a)) a = a.slice(0, a.lastIndexOf(":"));
+	a = a.toLowerCase();
+	if (a.startsWith("::ffff:") && IPV4_RE.test(a.slice(7))) a = a.slice(7);
+	if (IPV4_RE.test(a)) return a;
+	if (/^[0-9a-f:]+(:(\d{1,3}\.){3}\d{1,3})?$/.test(a) && a.includes(":") && a.split(":").length <= 9) {
+		return a;
+	}
+	return null;
+}
+
+/** Loopback, private, link-local, carrier-grade NAT or unique-local: a hop on your own network. */
+export function isPrivateAddress(a: string): boolean {
+	if (IPV4_RE.test(a)) {
+		const [x, y] = a.split(".").map(Number) as [number, number];
+		return (
+			x === 10 ||
+			x === 127 ||
+			x === 0 ||
+			(x === 169 && y === 254) ||
+			(x === 172 && y >= 16 && y <= 31) ||
+			(x === 192 && y === 168) ||
+			(x === 100 && y >= 64 && y <= 127)
+		);
+	}
+	return a === "::1" || a === "::" || /^f[cd]/.test(a) || /^fe[89ab]/.test(a);
+}
+
+function forwardedEntries(value: string | string[] | undefined | null): string[] {
+	const raw = Array.isArray(value) ? value.join(",") : value;
+	if (!raw) return [];
+	const out: string[] = [];
+	for (const part of raw.split(",")) {
+		const a = normalizeAddress(part);
+		if (a) out.push(a);
+	}
+	return out;
+}
+
+/** Right to left, the first address that is not a hop on your own network. */
+function rightmostPublic(entries: string[]): string | null {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const a = entries[i];
+		if (a && !isPrivateAddress(a)) return a;
+	}
+	return null;
+}
+
+function fromCustom(
+	opts: RelayOptions,
+	request: Request | IncomingMessage,
+): string | null {
+	if (!opts.clientIp) return null;
+	try {
+		const v = opts.clientIp(request);
+		return typeof v === "string" && v.trim() ? v.trim().slice(0, 64) : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Rate-limit key for the fetch handler, which has no peer address. */
+export function fetchClientKey(request: Request, opts: RelayOptions): string {
+	const custom = fromCustom(opts, request);
+	if (custom) return custom;
+	const trust = resolveTrustProxy(opts.trustProxy);
+	if (trust.mode === "never") return "shared";
+	const header = request.headers.get("x-forwarded-for");
+	if (trust.mode === "all") return firstForwardedFor(header) || "shared";
+	const entries = forwardedEntries(header);
+	if (trust.mode === "hops") {
+		return entries[Math.max(0, entries.length - trust.hops)] ?? "shared";
+	}
+	// auto. Cloudflare Workers: `request.cf` is set by the runtime, never by a
+	// header, so its CF-Connecting-IP is the address Cloudflare accepted.
+	const cf = (request as unknown as { cf?: unknown }).cf;
+	if (cf !== null && typeof cf === "object") {
+		const viaCf = normalizeAddress(request.headers.get("cf-connecting-ip"));
+		if (viaCf) return viaCf;
+	}
+	// Fetch runtimes sit behind the platform's edge, which appends (or
+	// overwrites) the address it saw: the rightmost public entry.
+	return rightmostPublic(entries) ?? entries[entries.length - 1] ?? "shared";
+}
+
+/** Rate-limit key for the Node handler. */
+export function nodeClientKey(req: IncomingMessage, opts: RelayOptions): string {
+	const custom = fromCustom(opts, req);
+	if (custom) return custom;
+	const trust = resolveTrustProxy(opts.trustProxy);
+	const peer = normalizeAddress(req.socket?.remoteAddress);
+	if (trust.mode === "never") return peer ?? "unknown";
+	const header = req.headers["x-forwarded-for"];
+	if (trust.mode === "all") return firstForwardedFor(header) || peer || "unknown";
+	const entries = forwardedEntries(header);
+	if (trust.mode === "hops") {
+		return entries[Math.max(0, entries.length - trust.hops)] ?? peer ?? "unknown";
+	}
+	// auto: a public peer is the visitor itself, whatever header it sent.
+	if (peer && !isPrivateAddress(peer)) return peer;
+	// The connection came from a proxy on your network.
+	return rightmostPublic(entries) ?? peer ?? entries[entries.length - 1] ?? "unknown";
 }
 
 const DEFAULT_ENDPOINT = "https://otlp.autter.dev";
@@ -422,15 +589,7 @@ export function createBrowserRelayFetchHandler(
 			return new Response(null, { status: 405 });
 		}
 		if (limiter) {
-			// Only honor X-Forwarded-For behind an explicitly trusted proxy —
-			// otherwise a caller could spoof a fresh IP per request to bypass
-			// the window. With no trusted peer source in a fetch runtime, fall
-			// back to one shared bucket (a conservative global limit).
-			const ip =
-				opts.trustProxy === true
-					? firstForwardedFor(request.headers.get("x-forwarded-for")) ||
-						"unknown"
-					: "shared";
+			const ip = fetchClientKey(request, opts);
 			if (!limiter.allow(ip)) {
 				return new Response(JSON.stringify({ error: "rate limit exceeded" }), {
 					status: 429,
@@ -519,14 +678,7 @@ export function createBrowserRelayHandler(
 			return;
 		}
 		if (limiter) {
-			// Prefer the real socket peer; only trust X-Forwarded-For when the
-			// caller has explicitly opted into a trusted-proxy deployment.
-			const ip =
-				(opts.trustProxy === true
-					? firstForwardedFor(req.headers["x-forwarded-for"])
-					: "") ||
-				req.socket?.remoteAddress ||
-				"unknown";
+			const ip = nodeClientKey(req, opts);
 			if (!limiter.allow(ip)) {
 				respond(res, 429, { error: "rate limit exceeded" });
 				return;

@@ -132,23 +132,34 @@ Options: `endpoint` (default `https://otlp.autter.dev`), `maxBodyBytes`
 `compatCheck`, `onError`.
 
 **Rate-limit key and `trustProxy`.** The relay route is public, so it limits
-each client. By default it never trusts the `X-Forwarded-For` header, because
-any caller can set it to a fresh value on every request and walk past the
-limit. Without it, the Node handler keys the real socket peer, and the fetch
-handler (which has no peer address) keys one shared bucket for the whole
-route. Behind a load balancer, CDN or platform proxy that overwrites
-`X-Forwarded-For`, every request arrives from the proxy, so set
-`trustProxy: true` to key the real client instead:
+each visitor. Any caller can write anything into `X-Forwarded-For`, so by
+default (`trustProxy: "auto"`) the relay never takes that header's first entry.
+Proxies append the address they saw to the right of the header, or overwrite
+it, so the relay reads it right to left and takes the first public address,
+skipping hops on your own network. That works behind load balancers, CDNs and
+hosting platforms with no setup:
 
-```ts
-createBrowserRelayFetchHandler({
-  apiKey: process.env.AUTTER_RUNTIME_KEY!,
-  trustProxy: true, // only behind a proxy you control that overwrites X-Forwarded-For
-});
-```
+| Where the relay runs | What `"auto"` keys |
+| --- | --- |
+| Node, reached directly | The connection's own address; the header is ignored |
+| Node behind a load balancer or ingress on your network | The address that proxy appended |
+| Next.js route handlers, Vercel, Netlify, Deno Deploy and other fetch runtimes | The rightmost public entry, which the platform's edge wrote |
+| Cloudflare Workers | `CF-Connecting-IP` |
 
-Only the boolean `true` turns it on: a string such as `"false"` from an
-environment variable keeps the safe default.
+Other settings:
+
+- `trustProxy: 1` (or any count) when exactly that many proxies you control
+  sit in front, such as a Node origin behind Cloudflare with no load balancer.
+- `trustProxy: true` when every proxy in front strips client values: the
+  leftmost entry.
+- `trustProxy: false` never reads the header: the socket address in Node, one
+  shared bucket in fetch runtimes.
+- `clientIp: (request) => string` to supply the address yourself, for example
+  Deno's `info.remoteAddr` or Bun's `server.requestIP`.
+
+Strings from environment variables work too (`"auto"`, `"false"`, `"2"`).
+A fetch handler exposed straight to the internet with no proxy in front can
+still be fooled by a forged header; set `trustProxy: false` or `clientIp` there.
 
 ## 2. Server tracker
 

@@ -256,51 +256,103 @@ test("the relay keeps valid debug ids, query-stripped, and drops the rest", () =
 });
 
 // ── Rate-limit key source (trustProxy) ─────────────────────────────────────
+// Each case sends two requests against a limit of 1: the second is 429 when
+// both landed in the same bucket, and 400 (past the limit, then invalid JSON)
+// when they were keyed apart.
 
-const xffRequest = (ip) =>
-	new Request("http://localhost/relay", {
-		method: "POST",
-		headers: { "x-forwarded-for": ip },
-		body: "{",
-	});
+const fetchReq = (xff, extra = {}) => {
+	const headers = { ...(xff === undefined ? {} : { "x-forwarded-for": xff }), ...(extra.headers ?? {}) };
+	const req = new Request("http://localhost/relay", { method: "POST", headers, body: "{" });
+	if (extra.cf) Object.defineProperty(req, "cf", { value: extra.cf });
+	return req;
+};
 
-test("relay: spoofed X-Forwarded-For cannot bypass the rate limit by default", async () => {
-	const handler = createBrowserRelayFetchHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-	});
-	const first = await handler(xffRequest("1.1.1.1"));
-	const second = await handler(xffRequest("2.2.2.2"));
-	assert.equal(first.status, 400); // passed the limit, then invalid JSON
-	assert.equal(second.status, 429); // shared bucket: a fresh spoofed IP is not a fresh window
+async function fetchPair(opts, a, b) {
+	const handler = createBrowserRelayFetchHandler({ apiKey: "autter_rt_test", perIpRateLimit: 1, ...opts });
+	return [(await handler(a)).status, (await handler(b)).status];
+}
+
+test("relay auto: values a caller writes left of the proxy's entry cannot bypass the limit", async () => {
+	// A proxy appended 203.0.113.9; the caller rotated what it put in front.
+	assert.deepEqual(
+		await fetchPair({}, fetchReq("1.1.1.1, 203.0.113.9"), fetchReq("2.2.2.2, 203.0.113.9")),
+		[400, 429],
+	);
 });
 
-test("relay: a truthy but non-true trustProxy stays on the safe shared bucket", async () => {
-	const handler = createBrowserRelayFetchHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-		// a common config slip: an env string "false" is truthy but must NOT
-		// enable forwarded-header trust
-		trustProxy: "false",
-	});
-	const first = await handler(xffRequest("1.1.1.1"));
-	const second = await handler(xffRequest("2.2.2.2"));
-	assert.equal(first.status, 400);
-	assert.equal(second.status, 429);
+test("relay auto: distinct visitors behind a platform proxy keep separate windows", async () => {
+	// Vercel-style overwrite: one entry per request.
+	assert.deepEqual(await fetchPair({}, fetchReq("198.51.100.1"), fetchReq("198.51.100.2")), [400, 400]);
+	// Appended chain behind an internal load balancer: private hops are skipped.
+	assert.deepEqual(
+		await fetchPair({}, fetchReq("198.51.100.1, 10.0.0.2"), fetchReq("198.51.100.2, 10.0.0.2")),
+		[400, 400],
+	);
 });
 
-test("relay: trustProxy: true keys distinct X-Forwarded-For clients apart", async () => {
-	const handler = createBrowserRelayFetchHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-		trustProxy: true,
-	});
-	const a = await handler(xffRequest("1.1.1.1"));
-	const b = await handler(xffRequest("2.2.2.2"));
-	const a2 = await handler(xffRequest("1.1.1.1"));
-	assert.notEqual(a.status, 429);
-	assert.notEqual(b.status, 429);
-	assert.equal(a2.status, 429); // the same client still hits its own window
+test("relay auto: Cloudflare Workers use CF-Connecting-IP only when the runtime set request.cf", async () => {
+	const cf = { colo: "LHR" };
+	assert.deepEqual(
+		await fetchPair(
+			{},
+			fetchReq("9.9.9.9", { cf, headers: { "cf-connecting-ip": "198.51.100.1" } }),
+			fetchReq("9.9.9.9", { cf, headers: { "cf-connecting-ip": "198.51.100.2" } }),
+		),
+		[400, 400],
+	);
+	// Without request.cf the header is just something a caller sent.
+	assert.deepEqual(
+		await fetchPair(
+			{},
+			fetchReq("9.9.9.9", { headers: { "cf-connecting-ip": "198.51.100.1" } }),
+			fetchReq("9.9.9.9", { headers: { "cf-connecting-ip": "198.51.100.2" } }),
+		),
+		[400, 429],
+	);
+});
+
+test("relay: trustProxy false keys one shared bucket in fetch runtimes, including the env string", async () => {
+	for (const trustProxy of [false, "false", "0"]) {
+		assert.deepEqual(
+			await fetchPair({ trustProxy }, fetchReq("198.51.100.1"), fetchReq("198.51.100.2")),
+			[400, 429],
+			`trustProxy ${JSON.stringify(trustProxy)}`,
+		);
+	}
+});
+
+test("relay: trustProxy hop count reads the entry that many from the right", async () => {
+	// Two proxies you control appended "client, edge"; the client is 2 from the right.
+	assert.deepEqual(
+		await fetchPair(
+			{ trustProxy: 2 },
+			fetchReq("6.6.6.6, 198.51.100.1, 203.0.113.50"),
+			fetchReq("7.7.7.7, 198.51.100.1, 203.0.113.50"),
+		),
+		[400, 429],
+	);
+	assert.deepEqual(
+		await fetchPair({ trustProxy: "2" }, fetchReq("198.51.100.1, 203.0.113.50"), fetchReq("198.51.100.2, 203.0.113.50")),
+		[400, 400],
+	);
+});
+
+test("relay: trustProxy true keeps the leftmost entry", async () => {
+	assert.deepEqual(
+		await fetchPair({ trustProxy: true }, fetchReq("198.51.100.1, 203.0.113.9"), fetchReq("198.51.100.2, 203.0.113.9")),
+		[400, 400],
+	);
+});
+
+test("relay: a clientIp resolver wins over the header", async () => {
+	assert.deepEqual(
+		await fetchPair(
+			{ clientIp: (r) => r.headers.get("x-test-ip") },
+			fetchReq("198.51.100.1", { headers: { "x-test-ip": "a" } }),
+			fetchReq("198.51.100.2", { headers: { "x-test-ip": "a" } }),
+		),
+		[400, 429],
+	);
 });
 
 function nodeCall(handler, { xff, peer }) {
@@ -322,25 +374,35 @@ function nodeCall(handler, { xff, peer }) {
 	});
 }
 
-test("relay (node): keys the socket peer, not a spoofed X-Forwarded-For, by default", async () => {
-	const handler = createBrowserRelayHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-	});
-	assert.equal(await nodeCall(handler, { xff: "1.1.1.1", peer: "10.0.0.5" }), 400);
-	// same peer, new spoofed header: still the same window
-	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "10.0.0.5" }), 429);
-	// a different real peer gets its own window
-	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "10.0.0.6" }), 400);
+const nodeHandler = (opts = {}) =>
+	createBrowserRelayHandler({ apiKey: "autter_rt_test", perIpRateLimit: 1, ...opts });
+
+test("relay (node) auto: a public peer is the visitor, whatever header it sends", async () => {
+	const handler = nodeHandler();
+	assert.equal(await nodeCall(handler, { xff: "1.1.1.1", peer: "203.0.113.5" }), 400);
+	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "203.0.113.5" }), 429);
+	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "203.0.113.6" }), 400);
 });
 
-test("relay (node): trustProxy: true keys the forwarded client behind a proxy", async () => {
-	const handler = createBrowserRelayHandler({
-		apiKey: "autter_rt_test",
-		perIpRateLimit: 1,
-		trustProxy: true,
-	});
-	assert.equal(await nodeCall(handler, { xff: "1.1.1.1", peer: "10.0.0.5" }), 400);
-	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "10.0.0.5" }), 400);
-	assert.equal(await nodeCall(handler, { xff: "1.1.1.1", peer: "10.0.0.5" }), 429);
+test("relay (node) auto: behind a proxy on your network, the proxy's entry keys the visitor", async () => {
+	const handler = nodeHandler();
+	// The load balancer (10.0.0.5) appended 198.51.100.7; the left part is the caller's.
+	assert.equal(await nodeCall(handler, { xff: "1.1.1.1, 198.51.100.7", peer: "10.0.0.5" }), 400);
+	assert.equal(await nodeCall(handler, { xff: "2.2.2.2, 198.51.100.7", peer: "10.0.0.5" }), 429);
+	assert.equal(await nodeCall(handler, { xff: "198.51.100.8", peer: "10.0.0.5" }), 400);
+	// IPv4-mapped IPv6 peers count as private too.
+	assert.equal(await nodeCall(handler, { xff: "198.51.100.9", peer: "::ffff:10.0.0.5" }), 400);
+});
+
+test("relay (node): trustProxy false keys the socket peer", async () => {
+	const handler = nodeHandler({ trustProxy: false });
+	assert.equal(await nodeCall(handler, { xff: "198.51.100.1", peer: "10.0.0.5" }), 400);
+	assert.equal(await nodeCall(handler, { xff: "198.51.100.2", peer: "10.0.0.5" }), 429);
+});
+
+test("relay (node): trustProxy 1 behind Cloudflare keys the address Cloudflare appended", async () => {
+	const handler = nodeHandler({ trustProxy: 1 });
+	// Peer is a Cloudflare edge (public); Cloudflare appended the visitor.
+	assert.equal(await nodeCall(handler, { xff: "6.6.6.6, 198.51.100.1", peer: "172.64.0.1" }), 400);
+	assert.equal(await nodeCall(handler, { xff: "7.7.7.7, 198.51.100.1", peer: "172.64.0.2" }), 429);
 });

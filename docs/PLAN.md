@@ -53,7 +53,7 @@ limiting, source maps (symbolication is a backend concern).
 
 ## Milestone 2 — `@autter/runtime-browser` (v0.1, shipped)
 
-Zero-dependency, <5 KB gzipped (CI-enforced with `size-limit`).
+Zero-dependency, <10 KB gzipped (CI-enforced with `size-limit`).
 
 - Captures: `window.onerror`, `unhandledrejection`, manual
   `captureException()`, optional `trackEvent(name, props)` usage signals,

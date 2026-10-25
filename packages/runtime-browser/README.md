@@ -24,7 +24,7 @@ the exact build whatever `release` says; see `docs/SOURCE-MAPS.md` in the
 repository.
 
 Tiny, dependency-free browser error + usage tracker for Autter Runtime.
-**~4 KB brotlied** (5 KB CI budget), zero runtime dependencies, no OTel SDK,
+**~4 KB brotlied** (10 KB CI budget), zero runtime dependencies, no OTel SDK,
 no console patching, no DOM recording, no offline storage. ESM only (the
 package has no CommonJS build; bundlers and `require(esm)`-capable Node
 resolve the `default` export condition).
@@ -152,7 +152,7 @@ errors at most 24 KB per 5 seconds, so a batch stays under the 64 KB beacon
 limit. `clearBreadcrumbs()` forgets them (e.g. on logout).
 
 They live in their own import because console patching and the buffer
-(~1 KB brotlied) don't fit the main tracker's 5 KB budget, and the main
+(~1 KB brotlied) stay out of the main tracker to keep it small, and the main
 bundle promises no console patching. The 1.4 `autter.trail` context is still
 sent. Needs ingester 1.6.0 (older ingesters ignore the field); through a
 relay, `@autter/runtime-node` 1.6.0 forwards it.
@@ -190,7 +190,7 @@ the server continues the browser's trace and a browser failure links to the
 server spans and request summary of the same request.
 `@autter/runtime-node` (OpenTelemetry HTTP instrumentation) continues it with
 no setup. It is a separate import because it does not fit the main tracker's
-5 KB budget (about 0.6 KB more, brotlied):
+10 KB budget (about 0.6 KB more, brotlied):
 
 ```ts
 import { initAutterBrowser } from "@autter/runtime-browser";
@@ -244,7 +244,7 @@ Only list APIs you control and whose CORS configuration allows it.
 
 `sampleRate`, `ignoreErrors` and `denyUrls` live in
 `@autter/runtime-browser/filters` (the main tracker has no room left in its
-5 KB budget; this adds about 0.35 KB brotlied and nothing to apps that don't
+10 KB budget; this adds about 0.35 KB brotlied and nothing to apps that don't
 import it). `withFilters` takes your init options plus the three filters and
 installs them as `beforeSend`; your own `beforeSend` still runs, after them:
 

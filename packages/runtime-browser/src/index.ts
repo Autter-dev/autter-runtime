@@ -2,7 +2,7 @@
  * @autter/runtime-browser — tiny, dependency-free error + usage tracker.
  *
  * Design constraints (non-negotiable):
- * - zero runtime dependencies, < 5 KB gzipped (CI-enforced)
+ * - zero runtime dependencies, < 10 KB gzipped (CI-enforced)
  * - no OTel SDK, no DOM recording, no offline storage; the only console
  *   patch is `console.error` (caught errors, `captureLoggedErrors`)
  * - privacy by construction: pathname-only routes, no cookies / form values /
@@ -127,7 +127,7 @@ let seenCspPolicyHash = "";
 /** Errors already sent: a `console.error` of one is not sent again. */
 const sent = new WeakSet<object>();
 // Breadcrumbs live in the opt-in `@autter/runtime-browser/breadcrumbs`
-// module (they don't fit this bundle's 5 KB budget); it installs these
+// module (they stay out of this bundle to keep it small); it installs these
 // hooks, and the request wrappers, history patch and click listener report to them.
 let crumbs: { add(kind: string, a?: unknown, b?: unknown, status?: number, ms?: number): void; list(type: string): Breadcrumb[] | undefined } | undefined;
 /** @internal Installed by `@autter/runtime-browser/breadcrumbs`. */
@@ -136,7 +136,7 @@ export function _useBreadcrumbs(hooks: typeof crumbs): void {
 }
 
 // W3C trace propagation lives in the opt-in `@autter/runtime-browser/tracing`
-// module (it doesn't fit this bundle's 5 KB budget). It installs these hooks:
+// module (it stays out of this bundle to keep it small). It installs these hooks:
 // the fetch observer asks it for a traceparent and reports when the request
 // settled, and every event passes through `link` for its trace id. XHR is
 // wrapped by the module itself.

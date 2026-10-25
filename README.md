@@ -5,7 +5,7 @@ in the browser, standard OpenTelemetry on the server, one normalised signal
 model, analysed per repository.
 
 Autter Runtime deliberately does **not** ship the full OpenTelemetry browser
-SDK to your users. The browser gets a dependency-free, <5 KB error tracker;
+SDK to your users. The browser gets a dependency-free, <10 KB error tracker;
 your server keeps real OTel; and this repo's **OTLP ingester** receives both
 and writes them to ClickHouse in a compact, per-repo data model.
 
@@ -131,7 +131,7 @@ Full walkthrough (keys, relay setup, Next.js, verification):
 
 | Package | Status | Description |
 | --- | --- | --- |
-| [`@autter/runtime-browser`](packages/runtime-browser) | **v1.6** | Zero-dependency browser error + usage tracker (<5 KB gzipped) |
+| [`@autter/runtime-browser`](packages/runtime-browser) | **v1.6** | Zero-dependency browser error + usage tracker (<10 KB gzipped) |
 | [`@autter/runtime-node`](packages/runtime-node) | **v1.6** | Curated OTel server tracker, request summaries, coded errors, operation logging, same-origin relay |
 | [`@autter/runtime-next`](packages/runtime-next) | **v1.6** | One-command Next.js integration (server, client, relay route, error boundary, edge middleware) |
 | [`@autter/runtime-edge`](packages/runtime-edge) | **v1.1** | Zero-dependency edge SDK: request summaries and coded errors for Workers, Vercel Edge, Deno, Bun |

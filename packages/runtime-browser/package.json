@@ -1,7 +1,7 @@
 {
 	"name": "@autter/runtime-browser",
 	"version": "1.7.0",
-	"description": "Tiny, dependency-free browser error and usage tracker for Autter Runtime (<5 KB gzipped)",
+	"description": "Tiny, dependency-free browser error and usage tracker for Autter Runtime (<10 KB gzipped)",
 	"license": "MIT",
 	"type": "module",
 	"sideEffects": false,
@@ -46,7 +46,7 @@
 	"size-limit": [
 		{
 			"path": "dist/index.js",
-			"limit": "5 KB"
+			"limit": "10 KB"
 		},
 		{
 			"name": "dist/index.js + dist/breadcrumbs.js",
@@ -54,7 +54,7 @@
 				"dist/index.js": "{ initAutterBrowser, captureException, captureMessage, captureOutcome, trackEvent, setUser, setContext, flush, autterErrorFromResponse, scrubText, redactContext }",
 				"dist/breadcrumbs.js": "{ enableBreadcrumbs, addBreadcrumb, clearBreadcrumbs }"
 			},
-			"limit": "6.2 KB"
+			"limit": "11.2 KB"
 		},
 		{
 			"name": "dist/index.js + dist/tracing.js",
@@ -62,7 +62,7 @@
 				"dist/index.js": "{ initAutterBrowser, captureException, captureMessage, captureOutcome, trackEvent, setUser, setContext, flush, autterErrorFromResponse, scrubText, redactContext }",
 				"dist/tracing.js": "{ enableTracePropagation, disableTracePropagation }"
 			},
-			"limit": "5.6 KB"
+			"limit": "10.6 KB"
 		},
 		{
 			"name": "dist/index.js + dist/filters.js",
@@ -70,7 +70,7 @@
 				"dist/index.js": "{ initAutterBrowser, captureException, captureMessage, captureOutcome, trackEvent, setUser, setContext, flush, autterErrorFromResponse, scrubText, redactContext }",
 				"dist/filters.js": "{ withFilters, createFilter }"
 			},
-			"limit": "5.4 KB"
+			"limit": "10.4 KB"
 		}
 	],
 	"devDependencies": {

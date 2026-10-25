@@ -376,7 +376,7 @@ test("rt.error and console.error of an Error become caught occurrences; a delibe
 	const caughtRt = records.find((r) => r.attrs["exception.message"] === "from rt.error");
 	assert.equal(caughtRt.attrs["autter.handling"], "caught");
 	const degraded = records.find((r) => r.attrs["exception.message"] === "cache miss");
-	assert.equal(degraded.level, "WARN");
+	assert.equal(degraded.level, "WARNING");
 	assert.equal(degraded.attrs["autter.handling"], "deliberate");
 	assert.equal(degraded.attrs["autter.degraded.reason"], "served stale");
 	const summary = records.find((r) => r.attrs["autter.event.type"] === "operation");
@@ -385,13 +385,13 @@ test("rt.error and console.error of an Error become caught occurrences; a delibe
 	assert.ok(!summary.attrs["autter.request.error_reported"], "a caught error does not fail the request");
 });
 
-test("captureLoggedErrors: false turns off console capture; rt.error stays on", async () => {
+test("captureLoggedErrors is per source: console off, rt.error (runtimeLogger) still a caught occurrence", async () => {
 	const h = harness();
 	const worker = withAutter(
-		{ apiKey: "server-key", service: "edge-api", environment: "test", fetch: h.fakeFetch, endpoint: "https://ingest.test/", captureLoggedErrors: false },
+		{ apiKey: "server-key", service: "edge-api", environment: "test", fetch: h.fakeFetch, endpoint: "https://ingest.test/", captureLoggedErrors: { console: false } },
 		async (_request, _env, _ctx, rt) => {
-			console.error(new Error("should not report"));
-			rt.error(new Error("rt still reports"));
+			console.error(new Error("console off"));
+			rt.error(new Error("rt caught"));
 			return new Response("ok");
 		},
 	);
@@ -400,6 +400,7 @@ test("captureLoggedErrors: false turns off console capture; rt.error stays on", 
 	await worker.flush();
 	await Promise.all(h.pending);
 	const records = h.records();
-	assert.ok(!records.some((r) => r.attrs["exception.message"] === "should not report"), "console capture off");
-	assert.ok(records.some((r) => r.attrs["exception.message"] === "rt still reports"), "rt.error is not a logger source");
+	assert.ok(!records.some((r) => r.attrs["autter.handling"] === "caught" && r.attrs["exception.message"] === "console off"), "console capture off");
+	const caught = records.find((r) => r.attrs["exception.message"] === "rt caught" && r.attrs["autter.handling"] === "caught");
+	assert.ok(caught, "rt.error (a runtimeLogger source) is still captured");
 });

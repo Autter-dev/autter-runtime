@@ -34,7 +34,7 @@ test("console.error(Error) is a caught exception carrying the log line; a plain 
 	const caught = events.find((e) => e.type === "exception" && e.message === "db down");
 	assert.ok(caught, "the Error was captured");
 	assert.equal(caught.severity, "error");
-	assert.equal(caught.context["autter.log.message"], "lookup failed for u1 db down");
+	assert.equal(caught.context["autter.log.message"], "lookup failed for u1", "the line without the error object");
 	assert.ok(!events.some((e) => /plain diagnostic/.test(e.message ?? "")), "a line with no Error is untouched");
 });
 

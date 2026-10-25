@@ -128,6 +128,18 @@ function isErrorStatus(code: number | string | undefined): boolean {
 	return code === 2 || code === "STATUS_CODE_ERROR";
 }
 
+/**
+ * An error the app handled on purpose and recorded through Autter: a caught
+ * error (`autter.handling = "caught"`, RF-01) or a deliberate fallback
+ * (`"deliberate"`, RF-02). These are occurrences and issues, but they never
+ * fail their span or request and never count in `error_count`. The bare
+ * `autter.handled` marker (the opt-in V8 sampler) keeps its old meaning and
+ * still counts.
+ */
+function softlyHandled(handling: unknown): boolean {
+	return handling === "caught" || handling === "deliberate";
+}
+
 const SPAN_KINDS: Record<string, string> = {
 	"0": "unspecified",
 	"1": "internal",
@@ -280,7 +292,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				// An exception the app handled (`autter.handled`: caught and
 				// logged, or a deliberate fallback) never fails its span.
 				const hasFailureEvent = (span.events ?? []).some((event) =>
-					(event.name === "exception" && attrMap(event.attributes).get("autter.handled") !== "true")
+					(event.name === "exception" && !softlyHandled(attrMap(event.attributes).get("autter.handling")))
 					|| (event.name === "autter.outcome"
 						&& attrMap(event.attributes).get("autter.outcome.status") === "error"));
 				const isError =
@@ -490,10 +502,10 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 	deduped.members.forEach((members, i) => {
 		const occ = occurrences[i]!;
 		if (occ.severity !== "fatal" && occ.severity !== "error") return;
-		// An error the app handled (caught and logged, a deliberate fallback)
-		// is an occurrence and an issue, but no failure: it never fails its
-		// request and never counts in `error_count`.
-		if (occ.attributes?.["autter.handled"] === true) return;
+		// A caught error or deliberate fallback is an occurrence and an issue,
+		// but no failure: it never fails its request and never counts in
+		// `error_count`.
+		if (softlyHandled(occ.attributes?.["autter.handling"])) return;
 		const request = members.map(requestOfSignal).find((r) => r !== undefined);
 		if (request) {
 			request.hasErrorOccurrence = true;

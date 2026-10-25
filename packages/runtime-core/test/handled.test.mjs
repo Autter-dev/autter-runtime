@@ -28,7 +28,8 @@ test("handledErrorKind groups by error type and throw site", () => {
 	const a = new Error("boom");
 	a.stack = "Error: boom\n    at reserve (/app/checkout.js:12:5)\n    at handler (/app/server.js:1:1)";
 	const b = new Error("boom too");
-	b.stack = "Error: boom too\n    at reserve (/app/checkout.js:12:5)\n    at other (/app/x.js:9:9)";
+	// A different throw site (first frame), same reporting path below it.
+	b.stack = "Error: boom too\n    at charge (/app/billing.js:40:9)\n    at handler (/app/server.js:1:1)";
 	const c = new TypeError("boom");
 	c.stack = "TypeError: boom\n    at reserve (/app/checkout.js:12:5)";
 	const ka = handledErrorKind(a);

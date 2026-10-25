@@ -4,9 +4,10 @@
 // stack, marked handled; a deliberate fallback as a warning. Neither fails the
 // request it happens in.
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { Writable } from "node:stream";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import {
 	initAutterServer,
 	runtimeContext,
@@ -21,15 +22,28 @@ const sink = () => new Writable({ write(_chunk, _enc, cb) { cb(); } });
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const settle = async () => { await tick(); await new Promise((r) => setTimeout(r, 25)); };
 
+// A throwaway OTLP collector so exporters flush cleanly (never a bad endpoint).
+let collector;
+let endpoint;
+before(async () => {
+	collector = createServer((_req, res) => res.end("{}"));
+	await new Promise((resolve) => collector.listen(0, "127.0.0.1", resolve));
+	endpoint = `http://127.0.0.1:${collector.address().port}`;
+});
+after(async () => {
+	await new Promise((resolve) => collector.close(resolve));
+});
+
 function start(options = {}) {
 	return initAutterServer({
 		apiKey: "test-key",
 		service: "caught-test",
-		endpoint: "http://127.0.0.1:1/unused",
+		endpoint,
 		captureGlobalErrors: false,
 		autoFlush: false,
 		memoryMetrics: false,
 		compatCheck: false,
+		metricIntervalMs: 3_600_000,
 		logging: { console: false },
 		...options,
 	});

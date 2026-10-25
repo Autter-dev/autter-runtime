@@ -191,10 +191,12 @@ export function logRollups(
 		});
 	}
 	for (const occ of promoted) {
-		// A handled warning (a deliberate fallback) or a caught error is an
-		// occurrence, never a counted failure.
+		// A caught error or deliberate fallback is an occurrence, never a
+		// counted failure. (A deliberate fallback is a warning and is already
+		// excluded above; a caught error is kept out here.)
 		if (occ.severity !== "error" && occ.severity !== "fatal") continue;
-		if (occ.attributes?.["autter.handled"] === true) continue;
+		const handling = occ.attributes?.["autter.handling"];
+		if (handling === "caught" || handling === "deliberate") continue;
 		// Its request's summary counts this failure.
 		if (countedBySummary(occ.attributes)) continue;
 		// One error of its own, in `error_count` only — what the trace path

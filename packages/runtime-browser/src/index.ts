@@ -708,9 +708,10 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 		console.error = function (this: unknown, ...args: unknown[]) {
 			for (const arg of args)
 				if (arg instanceof Error)
-					// The whole line as context; the ingester marks it `autter.handled`,
-					// `autter.handling: "caught"`, `autter.log.source: "console"`.
-					setTimeout(() => sent.has(arg) || captureException(arg, { "autter.log.message": args.join(" ") }));
+					// The rest of the line (without the error) as context; the
+					// ingester marks it `autter.handled`, `autter.handling: "caught"`,
+					// `autter.log.source: "console"`.
+					setTimeout(() => sent.has(arg) || captureException(arg, { "autter.log.message": args.filter((other) => other !== arg).join(" ") }));
 			return original.apply(this, args);
 		};
 	}

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { caughtLimitedRecords } from "./ingest-drops.js";
-import { logRollups, normalizeLogs } from "./logs.js";
-import { logPromotionCandidates } from "./log-promotion.js";
+import { normalizeLogs } from "./logs.js";
+import { logPromotionCandidates, logRollups } from "./log-promotion.js";
 import { normalizeBrowserPayload } from "./normalize-browser.js";
 import { normalizeTraces } from "./normalize-otlp.js";
 
@@ -70,6 +70,7 @@ test("a handled exception outside a request is recorded but not counted", () => 
 					{ key: "exception.type", value: { stringValue: "Error" } },
 					{ key: "exception.message", value: { stringValue: "caught in worker" } },
 					{ key: "autter.handled", value: { boolValue: true } },
+					{ key: "autter.handling", value: { stringValue: "caught" } },
 				] }],
 			}] }],
 		}],

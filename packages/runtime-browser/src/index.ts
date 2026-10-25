@@ -3,7 +3,8 @@
  *
  * Design constraints (non-negotiable):
  * - zero runtime dependencies, < 5 KB gzipped (CI-enforced)
- * - no OTel SDK, no console patching, no DOM recording, no offline storage
+ * - no OTel SDK, no DOM recording, no offline storage; the only console
+ *   patch is `console.error` (caught errors, `captureLoggedErrors`)
  * - privacy by construction: pathname-only routes, no cookies / form values /
  *   request bodies; query strings stripped everywhere; messages, stacks and
  *   (nested) custom context are scrubbed for secrets and PII before send
@@ -47,6 +48,13 @@ export interface AutterBrowserOptions {
 	captureTimings?: boolean;
 	/** Attach the last safe click or form action to failures (default true). */
 	captureActions?: boolean;
+	/**
+	 * An `Error` passed to `console.error` becomes an exception event marked
+	 * `autter.handled` / `autter.handling: "caught"`, with the rest of the
+	 * line as `autter.log.message` (default true). An error also passed to
+	 * `captureException` in the same tick (an error boundary) is sent once.
+	 */
+	captureLoggedErrors?: boolean;
 	/**
 	 * Secret/PII scrubbing of messages, stacks, and context (on by default).
 	 * Add your own patterns with `{ keys, values }` — `keys` masks whole
@@ -97,6 +105,8 @@ const MAX_QUEUE = 10;
 const FLUSH_INTERVAL_MS = 5000;
 const ERROR_FLUSH_DELAY_MS = 500;
 const MAX_EVENTS_PER_SESSION = 200;
+/** Usage signals: no client details, no last action. */
+const USAGE_TYPES: string[] = ["session_start", "track_event", "timing"];
 
 let opts: Required<Pick<AutterBrowserOptions, "endpoint" | "service">> &
 	AutterBrowserOptions;
@@ -114,6 +124,8 @@ const TRAIL_MAX = 8;
 let trail: string[] = [];
 let clientCache: { browser: string; os: string } | undefined;
 let seenCspPolicyHash = "";
+/** Errors already sent: a `console.error` of one is not sent again. */
+const sent = new WeakSet<object>();
 // Breadcrumbs live in the opt-in `@autter/runtime-browser/breadcrumbs`
 // module (they don't fit this bundle's 5 KB budget); it installs these
 // hooks, and the request wrappers, history patch and click listener report to them.
@@ -271,8 +283,7 @@ function errorContext(error: unknown): Record<string, unknown> {
 	if (typeof e.code === "string" && e.code.length <= 80 && CODE_RE.test(e.code)) {
 		out["autter.error.code"] = e.code;
 	}
-	if (typeof e.why === "string") out["autter.error.why"] = e.why.slice(0, 1000);
-	if (typeof e.fix === "string") out["autter.error.fix"] = e.fix.slice(0, 1000);
+	for (const key of ["why", "fix"]) if (typeof e[key] === "string") out["autter.error." + key] = (e[key] as string).slice(0, 1000);
 	if (typeof e.link === "string" && e.link.length <= 500 && /^https?:\/\//.test(e.link)) {
 		out["autter.error.link"] = e.link;
 	}
@@ -290,6 +301,16 @@ function addContext(event: BrowserEvent, extra: Record<string, unknown>): void {
 /** `x-request-id` of a failed response → `autter.request.id`, linking the
  * browser failure to the server's request summary. Cross-origin APIs must
  * list the header in Access-Control-Expose-Headers for the page to see it. */
+/** Type, stack and declared fields of a thrown value; false when it is no Error. */
+function fromError(event: BrowserEvent, error: unknown): boolean {
+	addContext(event, errorContext(error));
+	if (!(error instanceof Error)) return false;
+	sent.add(error);
+	event.errorType = error.name;
+	if (error.stack) event.stack = String(error.stack).slice(0, 32512);
+	return true;
+}
+
 function addRequestId(event: BrowserEvent, id: string | null | undefined): void {
 	if (id && REQUEST_ID_RE.test(id)) addContext(event, { "autter.request.id": id });
 }
@@ -366,36 +387,19 @@ function clientEnv(): { browser: string; os: string } {
 			if (brand) browser = `${brand.brand} ${brand.version}`.trim().slice(0, 40);
 		}
 		const ua = nav.userAgent || "";
-		if (!os) {
-			os = /Windows/.test(ua)
-				? "Windows"
-				: /Android/.test(ua)
-					? "Android"
-					: /iPhone|iPad|iPod/.test(ua)
-						? "iOS"
-						: /Mac OS X/.test(ua)
-							? "macOS"
-							: /CrOS/.test(ua)
-								? "ChromeOS"
-								: /Linux/.test(ua)
-									? "Linux"
-									: "";
-		}
-		if (!browser) {
-			const edge = /Edg\/(\d+)/.exec(ua);
-			const firefox = /Firefox\/(\d+)/.exec(ua);
-			const chrome = /Chrome\/(\d+)/.exec(ua);
-			const safari = /Version\/(\d+).+Safari/.exec(ua);
-			browser = edge
-				? `Edge ${edge[1]}`
-				: firefox
-					? `Firefox ${firefox[1]}`
-					: chrome
-						? `Chrome ${chrome[1]}`
-						: safari
-							? `Safari ${safari[1]}`
-							: "";
-		}
+		// First match wins, in this order.
+		if (!os)
+			os = ([["Windows", /Windows/], ["Android", /Android/], ["iOS", /iPhone|iPad|iPod/], ["macOS", /Mac OS X/],
+				["ChromeOS", /CrOS/], ["Linux", /Linux/]] as const).find(([, re]) => re.test(ua))?.[0] || "";
+		if (!browser)
+			for (const [name, re] of [["Edge", /Edg\/(\d+)/], ["Firefox", /Firefox\/(\d+)/], ["Chrome", /Chrome\/(\d+)/],
+				["Safari", /Version\/(\d+).+Safari/]] as const) {
+				const match = re.exec(ua);
+				if (match) {
+					browser = `${name} ${match[1]}`;
+					break;
+				}
+			}
 	} catch {
 		/* Navigator is unavailable. */
 	}
@@ -435,26 +439,21 @@ function pageScripts(): string {
 }
 
 function attachClient(event: BrowserEvent): void {
-	if (event.type === "session_start" || event.type === "track_event" || event.type === "timing") return;
+	if (USAGE_TYPES.includes(event.type)) return;
 	const env = clientEnv();
 	const extra: Record<string, unknown> = {};
 	if (env.browser) extra["autter.browser"] = env.browser;
 	if (env.os) extra["autter.os"] = env.os;
 	if (trail.length > 0) extra["autter.trail"] = trail.join(" > ").slice(0, 400);
-	if (event.type === "exception" || event.type === "unhandled_rejection" || event.type === "csp_violation") {
+	const thrown = /^(exception|unhandled_rejection)$/.test(event.type);
+	if (thrown || event.type === "csp_violation") {
 		const scripts = pageScripts();
 		if (scripts) extra["autter.scripts"] = scripts;
 	}
-	if (
-		seenCspPolicyHash &&
-		(event.type === "exception" || event.type === "unhandled_rejection") &&
-		event.context?.cspPolicyHash == null
-	) {
+	if (seenCspPolicyHash && thrown && event.context?.cspPolicyHash == null) {
 		extra.cspPolicyHash = seenCspPolicyHash;
 	}
-	if (Object.keys(extra).length > 0) {
-		event.context = { ...event.context, ...extra };
-	}
+	addContext(event, extra);
 }
 
 function watchRoutes(): void {
@@ -467,16 +466,13 @@ function watchRoutes(): void {
 	try {
 		const hist = window.history;
 		if (hist && typeof hist.pushState === "function") {
-			const push = hist.pushState.bind(hist);
-			const replace = hist.replaceState.bind(hist);
-			hist.pushState = ((...args: Parameters<History["pushState"]>) => {
-				push(...args);
-				record();
-			}) as History["pushState"];
-			hist.replaceState = ((...args: Parameters<History["replaceState"]>) => {
-				replace(...args);
-				record();
-			}) as History["replaceState"];
+			for (const key of ["pushState", "replaceState"] as const) {
+				const original = hist[key].bind(hist);
+				hist[key] = (...args: Parameters<History["pushState"]>) => {
+					original(...args);
+					record();
+				};
+			}
 		}
 	} catch {
 		/* History is unavailable. */
@@ -486,15 +482,14 @@ function watchRoutes(): void {
 
 function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	if (!initialized || sentCount + queue.length >= MAX_EVENTS_PER_SESSION) return;
-	if (lastAction && !["session_start", "track_event", "timing"].includes(event.type)) {
+	if (lastAction && !USAGE_TYPES.includes(event.type)) {
 		const age = Date.now() - lastAction.at;
 		if (age >= 0 && age <= ACTION_WINDOW_MS) {
-			event.context = {
-				...(event.context || {}),
+			addContext(event, {
 				"autter.action": lastAction.name,
 				"autter.actionRoute": lastAction.route,
 				"autter.actionAgeMs": age,
-			};
+			});
 		}
 	}
 	attachClient(event);
@@ -587,13 +582,8 @@ export function flush(): void {
 		: opts.endpoint;
 	const contentType = direct ? "text/plain" : "application/json";
 	try {
-		if (
-			typeof navigator !== "undefined" &&
-			navigator.sendBeacon &&
-			navigator.sendBeacon(url, new Blob([body], { type: contentType }))
-		) {
-			return;
-		}
+		// No navigator (or no sendBeacon): fetch below.
+		if (navigator.sendBeacon?.(url, new Blob([body], { type: contentType }))) return;
 	} catch {
 		// fall through to fetch
 	}
@@ -616,12 +606,9 @@ export function captureException(
 		isError ? error.message : String(error),
 	);
 	event.severity = "error";
-	if (isError) {
-		event.errorType = error.name;
-		if (error.stack) event.stack = String(error.stack).slice(0, 32512);
-	}
 	// Explicit context wins over the duck-typed declared fields.
-	addContext(event, { ...errorContext(error), ...takeFingerprint(event, context) });
+	fromError(event, error);
+	addContext(event, takeFingerprint(event, context));
 	enqueue(event, true);
 }
 
@@ -638,7 +625,7 @@ export function captureMessage(
 	const event = baseEvent("message", message);
 	event.severity = severity;
 	event.errorType = "Message";
-	if (context) event.context = { ...(event.context || {}), ...context };
+	if (context) addContext(event, context);
 	enqueue(event, severity === "error" || severity === "fatal");
 }
 
@@ -648,7 +635,7 @@ export function captureOutcome(name: string, message: string, context?: Record<s
 	event.name = String(name).slice(0, 712);
 	event.errorType = "OutcomeFailure";
 	event.severity = "error";
-	if (context) event.context = { ...(event.context || {}), ...context };
+	if (context) addContext(event, context);
 	enqueue(event, true);
 }
 
@@ -659,7 +646,7 @@ export function trackEvent(
 ): void {
 	const event = baseEvent("track_event", "");
 	event.name = String(name).slice(0, 712);
-	if (props) event.context = { ...(event.context || {}), ...props };
+	if (props) addContext(event, props);
 	enqueue(event);
 }
 
@@ -673,7 +660,22 @@ export function setContext(context: Record<string, unknown> | null): void {
 }
 
 /** Milliseconds since `from`, capped at two minutes. */
-const elapsed = (from: number) => Math.min(120000, Math.round(performance.now() - from));
+const cap = (ms: number) => Math.min(120000, Math.round(ms));
+const elapsed = (from: number) => cap(performance.now() - from);
+
+/** Pathname of a URL relative to the page, or `fallback`. */
+function pathOf(url: string, fallback = ""): string {
+	try { return new URL(url, location.href).pathname; } catch { return fallback; }
+}
+
+/** A failed fetch/XHR as a `request_failure` event. */
+function failure(message: string, errorType: string, path: string, started: number): BrowserEvent {
+	const event = baseEvent("request_failure", message);
+	event.name = path;
+	event.errorType = errorType;
+	event.durationMs = elapsed(started);
+	return event;
+}
 
 export function initAutterBrowser(options: AutterBrowserOptions): void {
 	if (initialized || typeof window === "undefined") return;
@@ -701,23 +703,32 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 		document.addEventListener("click", rememberAction, true);
 		document.addEventListener("submit", rememberAction, true);
 	}
-	if (options.captureNetworkFailures !== false && typeof fetch === "function") {
+	if (options.captureLoggedErrors !== false) {
+		const original = console.error;
+		console.error = function (this: unknown, ...args: unknown[]) {
+			for (const arg of args)
+				if (arg instanceof Error)
+					// The whole line as context; the ingester marks it `autter.handled`,
+					// `autter.handling: "caught"`, `autter.log.source: "console"`.
+					setTimeout(() => sent.has(arg) || captureException(arg, { "autter.log.message": args.join(" ") }));
+			return original.apply(this, args);
+		};
+	}
+	const network = options.captureNetworkFailures !== false;
+	if (network && typeof fetch === "function") {
 		const originalFetch = window.fetch.bind(window);
 		window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 			const started = performance.now();
 			const target = input instanceof Request ? input.url : String(input);
 			const isTelemetry = target.includes(options.endpoint);
-			const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
+			const path = pathOf(target);
 			const method = init?.method || (input as Request).method;
 			const [traced, traceId] = (!isTelemetry && tracer?.fetch(target, input, init)) || [init];
 			return originalFetch(input, traced).then((response) => {
 				tracer?.settle(traceId);
 				if (!isTelemetry) crumbs?.add("request", method, path, response.status, elapsed(started));
 				if (!isTelemetry && response.status >= 500) {
-					const event = baseEvent("request_failure", `Request returned ${response.status}`);
-					event.name = path;
-					event.errorType = "HttpRequestError";
-					event.durationMs = elapsed(started);
+					const event = failure(`Request returned ${response.status}`, "HttpRequestError", path, started);
 					try { addRequestId(event, response.headers.get("x-request-id")); } catch { /* No headers. */ }
 					enqueue(event, true);
 				}
@@ -726,39 +737,33 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				tracer?.settle(traceId);
 				if (!isTelemetry) {
 					crumbs?.add("request", method, path, 0, elapsed(started));
-					const event = baseEvent("request_failure", "Request failed");
-					event.name = path;
-					event.errorType = "NetworkError";
-					event.durationMs = elapsed(started);
-					enqueue(event, true);
+					enqueue(failure("Request failed", "NetworkError", path, started), true);
 				}
 				throw error;
 			});
 		}) as typeof fetch;
 	}
-	if (options.captureNetworkFailures !== false && typeof XMLHttpRequest !== "undefined") {
+	if (network && typeof XMLHttpRequest !== "undefined") {
 		const xhrUrls = new WeakMap<XMLHttpRequest, unknown[]>();
-		const originalOpen = XMLHttpRequest.prototype.open;
-		const originalSend = XMLHttpRequest.prototype.send;
-		XMLHttpRequest.prototype.open = (function (this: XMLHttpRequest, ...args: unknown[]) {
+		const xhr = XMLHttpRequest.prototype;
+		const originalOpen = xhr.open;
+		const originalSend = xhr.send;
+		xhr.open = (function (this: XMLHttpRequest, ...args: unknown[]) {
 			xhrUrls.set(this, args);
 			return Reflect.apply(originalOpen, this, args);
 		}) as typeof XMLHttpRequest.prototype.open;
-		XMLHttpRequest.prototype.send = function (...args: Parameters<XMLHttpRequest["send"]>) {
+		xhr.send = function (...args: Parameters<XMLHttpRequest["send"]>) {
 			const [method, url] = xhrUrls.get(this) ?? [];
 			const target = String(url ?? "");
 			if (!target.includes(options.endpoint)) {
 				const started = performance.now();
-				const path = (() => { try { return new URL(target, location.href).pathname; } catch { return ""; } })();
+				const path = pathOf(target);
 				let recorded = false;
 				const record = (message: string, errorType: string, requestId?: string | null) => {
 					if (recorded) return;
 					recorded = true;
 					crumbs?.add("request", method, path, this.status, elapsed(started));
-					const event = baseEvent("request_failure", message);
-					event.name = path;
-					event.errorType = errorType;
-					event.durationMs = elapsed(started);
+					const event = failure(message, errorType, path, started);
 					addRequestId(event, requestId);
 					enqueue(event, true);
 				};
@@ -786,10 +791,8 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				for (const entry of list.getEntries()) {
 					if (entry.duration < 200 || entry.name.includes(options.endpoint) || timingCount >= 20) continue;
 					const event = baseEvent("timing", "");
-					event.name = entry.entryType === "longtask" ? "browser.longtask" : "browser.resource:" + (() => {
-						try { return new URL(entry.name, location.href).pathname; } catch { return "unknown"; }
-					})();
-					event.durationMs = Math.min(120000, Math.round(entry.duration));
+					event.name = entry.entryType === "longtask" ? "browser.longtask" : "browser.resource:" + pathOf(entry.name, "unknown");
+					event.durationMs = cap(entry.duration);
 					timingCount++;
 					enqueue(event);
 				}
@@ -807,17 +810,13 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			const label = scriptLabel(failedScript.src);
 			if (label) e.filename = label;
 		} else {
-			e.errorType = event.error instanceof Error ? event.error.name : "Error";
-			addContext(e, errorContext(event.error));
-			if (event.error instanceof Error && event.error.stack) {
-				e.stack = String(event.error.stack).slice(0, 32512);
-			}
+			if (!fromError(e, event.error)) e.errorType = "Error";
 			e.filename = stripQuery(event.filename);
 			if (event.lineno) e.line = event.lineno;
 			if (event.colno) e.column = event.colno;
 			// Cross-origin scripts without CORS are reported as "Script error." with no file.
 			if (!e.filename && /^Script error\.?$/i.test(e.message)) {
-				e.context = { ...(e.context || {}), "autter.crossOriginScript": true };
+				addContext(e, { "autter.crossOriginScript": true });
 			}
 		}
 		enqueue(e, true);
@@ -845,9 +844,9 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			policyHash = (hash >>> 0).toString(16);
 			seenCspPolicyHash = policyHash;
 		}
-		e.context = { ...(e.context || {}), cspDirective: directive.slice(0, 100),
+		addContext(e, { cspDirective: directive.slice(0, 100),
 			...(blockedOrigin ? { cspBlockedOrigin: blockedOrigin.slice(0, 200) } : {}),
-			...(policyHash ? { cspPolicyHash: policyHash } : {}) };
+			...(policyHash ? { cspPolicyHash: policyHash } : {}) });
 		enqueue(e, true);
 	});
 
@@ -860,11 +859,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				"unhandled_rejection",
 				isError ? reason.message : String(reason),
 			);
-			addContext(e, errorContext(reason));
-			if (isError) {
-				e.errorType = reason.name;
-				if (reason.stack) e.stack = String(reason.stack).slice(0, 32512);
-			} else {
+			if (!fromError(e, reason)) {
 				// A rejection whose reason isn't an Error carries no stack and no
 				// meaningful type. In practice most are injected third-party
 				// scripts (email/link scanners, browser extensions) rejecting a

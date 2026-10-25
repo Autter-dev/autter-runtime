@@ -56,3 +56,11 @@ export {
 	AutterErrorBoundary,
 	type AutterErrorBoundaryProps,
 } from "./error-boundary.js";
+// Next.js error pages (RF-04): app/error.tsx and app/global-error.tsx.
+export {
+	AutterGlobalError,
+	reportNextError,
+	useAutterErrorReport,
+	type AutterGlobalErrorProps,
+	type NextErrorReportOptions,
+} from "./error-page.js";

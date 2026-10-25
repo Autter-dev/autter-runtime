@@ -32,6 +32,15 @@
  *
  *    The log flush is handed to Next's `after()` automatically.
  *
+ * 4. Route handlers that answer thrown errors (RF-04):
+ *
+ *      import { withAutter, RuntimeError } from "@autter/runtime-next";
+ *      export const GET = withAutter(async (request) => {
+ *        throw new RuntimeError({ status: 404, code: "orders.not_found", message: "No such order" });
+ *      });
+ *
+ *    The thrown 404 is recorded with its stack and answered as a 404.
+ *
  * Browser tracker + error boundary live in `@autter/runtime-next/client`;
  * `middleware.ts` (edge runtime) uses `@autter/runtime-next/edge`.
  */
@@ -39,6 +48,7 @@
 import {
 	createBrowserRelayFetchHandler,
 	initAutterServer,
+	runtimeContext,
 	withRuntimeRequest as nodeWithRuntimeRequest,
 	type AutterServer,
 	type AutterServerOptions,
@@ -46,6 +56,7 @@ import {
 	type RuntimeRequestOptions,
 } from "@autter/runtime-node";
 import pkg from "../package.json" with { type: "json" };
+import { isNextControlFlow } from "./control-flow.js";
 
 export {
 	createRuntimeLogger,
@@ -71,6 +82,7 @@ export {
 	installAutterAutoFlush,
 	redactAttributes,
 	// 1.5.0 — request wide events, coded errors, logger-only mode
+	// (`runtimeContext.degraded(err, reason)`: a deliberate fallback, RF-02)
 	runtimeContext,
 	runInBackground,
 	autterRequests,
@@ -138,6 +150,8 @@ export type {
 	FileSinkOptions,
 	Breadcrumb,
 	BreadcrumbInput,
+	CaptureLoggedErrorsOption,
+	LoggedErrorSource,
 } from "@autter/runtime-node";
 export type { AutterServer, AutterServerOptions, RelayOptions };
 
@@ -203,4 +217,52 @@ export function withRuntimeRequest<A extends unknown[]>(
 		...options,
 		waitUntil: options.waitUntil ?? scheduleAfter,
 	});
+}
+
+export interface AutterRouteOptions extends Omit<RuntimeRequestOptions, "capture" | "errorResponse"> {
+	/**
+	 * Which thrown errors are reported. Default: every one except Next's
+	 * control-flow signals (`redirect()`, `notFound()`, …), which always
+	 * pass through to Next untouched.
+	 */
+	capture?: boolean | ((error: unknown) => boolean);
+}
+
+/**
+ * Route handler wrapper (RF-04): a request summary like `withRuntimeRequest`,
+ * and a thrown error is recorded with its stack on the request span, then
+ * answered with `toClientError` JSON and the error's own status, so a thrown
+ * 4xx (a `RuntimeError` with `status: 404`, any error with a 4xx `status`)
+ * stays a 4xx and keeps its stack instead of becoming an anonymous 500.
+ * Next's `redirect()` / `notFound()` signals are rethrown for Next to
+ * answer, and never reported.
+ *
+ *   export const POST = withAutter(async (request) => {
+ *     const order = await findOrder(request);
+ *     if (!order) throw new RuntimeError({ status: 404, code: "orders.not_found", message: "No such order" });
+ *     return Response.json(order);
+ *   });
+ */
+export function withAutter<A extends unknown[]>(
+	handler: (request: Request, ...rest: A) => Response | Promise<Response>,
+	options: AutterRouteOptions = {},
+): (request: Request, ...rest: A) => Promise<Response> {
+	const rule = options.capture;
+	return withRuntimeRequest(
+		async (request: Request, ...rest: A) => {
+			try {
+				return await handler(request, ...rest);
+			} catch (error) {
+				// Next answers it (a redirect, a 404 page): the request did not fail.
+				if (isNextControlFlow(error)) runtimeContext.outcome("succeeded");
+				throw error;
+			}
+		},
+		{
+			...options,
+			capture: (error) =>
+				!isNextControlFlow(error) && (typeof rule === "function" ? rule(error) === true : rule !== false),
+			errorResponse: (error) => !isNextControlFlow(error),
+		},
+	);
 }

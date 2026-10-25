@@ -4,6 +4,7 @@
  * bundle; the Node half lives behind a dynamic import in instrumentation.ts.
  */
 import { captureEdgeException, type AutterEdgeOptions } from "@autter/runtime-edge";
+import { digestOf, isNextControlFlow } from "./control-flow.js";
 
 /** Next.js `onRequestError` request argument (typed structurally; no `next` dependency). */
 export interface NextRequestErrorRequest {
@@ -58,19 +59,6 @@ export interface AutterOnRequestErrorOptions {
 	edge?: AutterEdgeOptions | (() => AutterEdgeOptions | undefined);
 }
 
-/** Digests Next attaches to its control-flow "errors". */
-const CONTROL_FLOW_DIGEST =
-	/^(?:NEXT_REDIRECT|NEXT_NOT_FOUND|NEXT_HTTP_ERROR_FALLBACK|DYNAMIC_SERVER_USAGE|BAILOUT_TO_CLIENT_SIDE_RENDERING)\b/;
-
-function digestOf(error: unknown): string {
-	try {
-		const digest = (error as { digest?: unknown } | null)?.digest;
-		return typeof digest === "string" ? digest : "";
-	} catch {
-		return "";
-	}
-}
-
 export function shouldReport(
 	error: unknown,
 	rule: AutterOnRequestErrorOptions["capture"],
@@ -84,7 +72,7 @@ export function shouldReport(
 			return false;
 		}
 	}
-	return !CONTROL_FLOW_DIGEST.test(digestOf(error));
+	return !isNextControlFlow(error);
 }
 
 /**

@@ -17,6 +17,14 @@ export interface SourceMapKey {
 	release: string | null;
 	filename: string;
 	debugId?: string | null;
+	/**
+	 * Server frames (RF-05): `filename` is the path the process ran the
+	 * bundle from (`/app/dist/server.js`, `/var/task/.next/server/app/page.js`),
+	 * which the upload can't know. Without a debug id, the release's map
+	 * whose stored path is the longest suffix of it wins (`/server.js`,
+	 * `/.next/server/app/page.js`); an exact path is the longest suffix of all.
+	 */
+	suffix?: boolean;
 }
 
 async function firstMap(
@@ -24,11 +32,12 @@ async function firstMap(
 	database: string,
 	where: string,
 	params: Record<string, string>,
+	order = "uploaded_at DESC",
 ): Promise<string | null> {
 	const rows = await client.query({
 		query: `SELECT map FROM ${database}.runtime_source_maps
 			WHERE org_id = {org:String} AND repository_id = {repo:String} AND ${where}
-			ORDER BY uploaded_at DESC LIMIT 1`,
+			ORDER BY ${order} LIMIT 1`,
 		query_params: params,
 		format: "JSONEachRow",
 	});
@@ -36,7 +45,12 @@ async function firstMap(
 	return row?.map ?? null;
 }
 
-/** The stored map JSON for a minified file: by debug id first when given, else by release + filename (path only, no origin/query). Null when none. */
+/**
+ * The stored map JSON for a minified file: by debug id first when given,
+ * else by release + filename (path only, no origin/query) — for a server
+ * frame (`suffix`), the release's map stored under the longest suffix of
+ * its path. Null when none.
+ */
 export async function lookupSourceMap(
 	client: ClickHouseClient,
 	database: string,
@@ -53,6 +67,17 @@ export async function lookupSourceMap(
 	}
 	const filename = sourceMapPath(key.filename);
 	if (!key.release || !filename) return null;
+	if (key.suffix) {
+		// Stored paths always start with "/", so a suffix match ends on a
+		// path segment boundary. The release scan is a primary-key range.
+		return firstMap(
+			client,
+			database,
+			"release = {release:String} AND endsWith({filename:String}, filename)",
+			{ ...tenant, release: key.release, filename },
+			"length(filename) DESC, uploaded_at DESC",
+		);
+	}
 	return firstMap(
 		client,
 		database,

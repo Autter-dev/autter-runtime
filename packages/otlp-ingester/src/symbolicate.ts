@@ -11,16 +11,26 @@ import {
 	type GeneratedPosition,
 	type MappedSegment,
 } from "./source-map-mappings.js";
+import { scrubText } from "./redact.js";
 import { SCOPES_KEY, ScopeIndex, type ScopeName } from "./source-map-scopes.js";
 import type { SourceMapKey } from "./source-maps-lookup.js";
 import { isInAppPath, stripQueryAndHash } from "./stack-frames.js";
 import type { StackFrame } from "./types.js";
 
 /**
- * Symbolication at ingest: minified browser frames are resolved through the
- * source maps uploaded for the release (`/v1/sourcemaps`) BEFORE they are
- * fingerprinted, so `frames-v3` hashes `checkout.tsx`, not
- * `index-5f3a9c1e.js` — and an issue survives deploys and preview domains.
+ * Symbolication at ingest: minified browser frames, and bundled Node and
+ * edge frames (RF-05), are resolved through the source maps uploaded for
+ * the release (`/v1/sourcemaps`) BEFORE they are fingerprinted, so
+ * `frames-v3` hashes `checkout.tsx`, not `index-5f3a9c1e.js` — and an issue
+ * survives deploys and preview domains.
+ *
+ * - Browser frames find their map by debug id, else by release + the
+ *   script's path. Server frames (`server: true`) by debug id (server SDKs
+ *   send `autter.debug_ids`), else by the release's map stored
+ *   under the longest suffix of the path the process ran the bundle from
+ *   (source-maps-lookup.ts): the upload knows `/server.js`, the stack says
+ *   `/app/dist/server.js`. Only in-app server frames are looked up — a
+ *   `node_modules/` or `node:` frame never belongs to an uploaded bundle.
  *
  * - Function names: when the map carries function scopes
  *   (`x_autter_scopes`, uploaded by @autter/runtime-cli after 1.0.0), a
@@ -35,8 +45,11 @@ import type { StackFrame } from "./types.js";
  *   and for handlers a framework calls, which is why scopes exist.
  * - Sources the map lists in `ignoreList` / `x_google_ignoreList` are not
  *   in-app; a resolved path under node_modules/ etc. is not in-app either.
- * - Context lines only when the map carries `sourcesContent` (the upload
- *   strips it today, so there are none for now).
+ * - Context lines (RF-05): an in-app resolved frame gets its original line
+ *   and up to CONTEXT_LINES lines before and after it, each cut to 300
+ *   characters and scrubbed like the stack, when the map carries the
+ *   source's `sourcesContent` (kept at upload for in-app sources,
+ *   source-maps.ts). Dependency frames get none.
  * - Never fails ingest: any error leaves the frame as parsed.
  *
  * Parsed maps are cached per (org, repository, release, file) — or per debug
@@ -52,13 +65,20 @@ export interface SymbolicationScope {
 	orgId: string;
 	repositoryId: string;
 	release: string | null;
-	/** Script URL → debug id (EI-13), when the browser sent them. */
+	/** Script URL (or, on a server, script path) → debug id (EI-13), when the SDK sent them. */
 	debugIds?: Record<string, string> | null;
+	/**
+	 * A Node or edge stack (RF-05): only in-app frames are looked up, their
+	 * paths are normalised (serverScriptPath), and without a debug id the
+	 * release's map is found by path suffix.
+	 */
+	server?: boolean;
 }
 
 const JS_FILE_RE = /\.[cm]?js$/i;
 const MAX_CONTEXT_CHARS = 300;
-const CONTEXT_LINES = 3;
+/** Lines kept before and after an in-app frame's own line (RF-05). */
+export const CONTEXT_LINES = 5;
 
 /**
  * In-app browser frames a source map could resolve, counted after
@@ -87,6 +107,25 @@ export function scriptPath(filename: string): string | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The path form of a server frame's file, comparable with stored upload
+ * paths: `file:///app/dist/index.mjs` → `/app/dist/index.mjs`,
+ * `C:\app\dist\index.js` → `/app/dist/index.js`, `index.js` (a Worker
+ * script) → `/index.js`. Null when it is not a path.
+ */
+export function serverScriptPath(filename: string): string | null {
+	let path = filename;
+	if (/^file:\/\//i.test(path)) {
+		try {
+			path = new URL(path).pathname;
+		} catch {
+			return null;
+		}
+	}
+	path = path.replace(/\\/g, "/").replace(/^\/?[A-Za-z]:(?=\/)/, "");
+	return scriptPath(path);
 }
 
 // ── Cache ─────────────────────────────────────────────────────────────────
@@ -158,9 +197,11 @@ export class SourceMapCache {
 
 	static keyOf(key: SourceMapKey): string {
 		const scope = `${key.orgId}\u0000${key.repositoryId}\u0000`;
+		// A suffix lookup (server frame) can find another map than an exact one
+		// for the same path, so the two never share an entry.
 		return key.debugId
 			? `${scope}d\u0000${key.debugId}`
-			: `${scope}r\u0000${key.release ?? ""}\u0000${key.filename}`;
+			: `${scope}${key.suffix ? "s" : "r"}\u0000${key.release ?? ""}\u0000${key.filename}`;
 	}
 
 	get size(): number {
@@ -308,6 +349,33 @@ function looksMangled(name: string): boolean {
 	return last.length <= 2;
 }
 
+/**
+ * Lines `index - radius` … `index + radius` (0-based) of `content`, found
+ * without splitting the whole file (a busy frame in a big file would split
+ * it on every event); `at` is where line `index` sits in `lines`. Null when
+ * the file is shorter than `index + 1` lines.
+ */
+function linesAround(content: string, index: number, radius: number): { lines: string[]; at: number } | null {
+	if (index < 0) return null;
+	const first = Math.max(0, index - radius);
+	let start = 0;
+	for (let line = 0; line < first; line++) {
+		const newline = content.indexOf("\n", start);
+		if (newline < 0) return null;
+		start = newline + 1;
+	}
+	const lines: string[] = [];
+	for (let line = first; line <= index + radius; line++) {
+		const newline = content.indexOf("\n", start);
+		const end = newline < 0 ? content.length : newline;
+		lines.push(content.slice(start, end).replace(/\r$/, ""));
+		if (newline < 0) break;
+		start = newline + 1;
+	}
+	const at = index - first;
+	return at < lines.length ? { lines, at } : null;
+}
+
 function contextFor(map: TraceMap, source: string, line: number): Pick<StackFrame, "contextLine" | "preContext" | "postContext"> {
 	let content: string | null = null;
 	try {
@@ -316,14 +384,16 @@ function contextFor(map: TraceMap, source: string, line: number): Pick<StackFram
 		content = null;
 	}
 	if (!content) return {};
-	const lines = content.split(/\r?\n/);
-	const index = line - 1;
-	if (index < 0 || index >= lines.length) return {};
-	const cut = (value: string) => value.slice(0, MAX_CONTEXT_CHARS);
+	const window = linesAround(content, line - 1, CONTEXT_LINES);
+	if (!window) return {};
+	// Source code can hold secrets: scrubbed like the stack. Cut first so the
+	// scrub work stays bounded, with slack so a secret straddling the cut is
+	// still seen whole.
+	const clean = (value: string) => scrubText(value.slice(0, MAX_CONTEXT_CHARS + 512)).slice(0, MAX_CONTEXT_CHARS);
 	return {
-		contextLine: cut(lines[index]!),
-		preContext: lines.slice(Math.max(0, index - CONTEXT_LINES), index).map(cut),
-		postContext: lines.slice(index + 1, index + 1 + CONTEXT_LINES).map(cut),
+		contextLine: clean(window.lines[window.at]!),
+		preContext: window.lines.slice(0, window.at).map(clean),
+		postContext: window.lines.slice(window.at + 1).map(clean),
 	};
 }
 
@@ -371,7 +441,11 @@ export class Symbolicator {
 	private keyFor(frame: StackFrame, scope: SymbolicationScope): SourceMapKey | null {
 		if (!frame.filename || frame.lineno == null || frame.lineno < 1) return null;
 		if (!JS_FILE_RE.test(frame.filename)) return null;
-		const path = scriptPath(frame.filename);
+		// A server's dependency and runtime frames (node_modules/, node:) run
+		// from files no upload covers; looking them up by suffix could even
+		// pick an app bundle that happens to share the file name.
+		if (scope.server && !frame.inApp) return null;
+		const path = scope.server ? serverScriptPath(frame.filename) : scriptPath(frame.filename);
 		if (!path) return null;
 		const debugId = this.debugIdFor(frame.filename, scope.debugIds);
 		if (!debugId && !scope.release) return null;
@@ -381,6 +455,7 @@ export class Symbolicator {
 			release: scope.release,
 			filename: path,
 			...(debugId ? { debugId } : {}),
+			...(scope.server ? { suffix: true } : {}),
 		};
 	}
 
@@ -462,15 +537,17 @@ function resolveFrame(
 		}
 	})();
 	const line = segment.line + 1;
+	const inApp = !ignored && isInAppPath(filename);
 	const resolved: StackFrame = {
 		function: frame.function,
 		module: null,
 		filename,
 		lineno: line,
 		colno: segment.column + 1,
-		inApp: !ignored && isInAppPath(filename),
+		inApp,
 		resolved: true,
-		...contextFor(map, source, line),
+		// Context lines are the evidence for the app's own code (RF-05).
+		...(inApp ? contextFor(map, source, line) : {}),
 	};
 	const name = segment.name >= 0 ? map.names[segment.name] : undefined;
 	return {

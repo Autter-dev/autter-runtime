@@ -35,6 +35,17 @@ const MAP = JSON.stringify({
 	mappings: [[10, 0, 11, 4, 0], [30, 1, 65, -2, 1]].map((s) => s.map(vlq).join("")).join(","),
 });
 
+// A bundled Node server (RF-05): generated line 1 col 10 → src/checkout.ts:12:4,
+// with the source's content (kept at upload for in-app sources).
+const SERVER_SOURCE = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+const SERVER_MAP = JSON.stringify({
+	version: 3,
+	sources: ["src/checkout.ts"],
+	names: [],
+	mappings: [10, 0, 11, 4].map(vlq).join(""),
+	sourcesContent: [SERVER_SOURCE],
+});
+
 let chStub: Server;
 let sinkServer: Server;
 let appServer: Server;
@@ -61,11 +72,15 @@ before(async () => {
 			const url = new URL(req.url ?? "/", "http://stub");
 			const query = url.searchParams.get("query") ?? body;
 			if (/runtime_source_maps/.test(query) && /SELECT map/.test(query)) {
-				mapLookups.push(`${url.searchParams.get("param_release")} ${url.searchParams.get("param_filename")}`);
-				const found = url.searchParams.get("param_release") === "rel-1" &&
-					url.searchParams.get("param_filename") === "/assets/index-5f3a9c1e.js";
+				const release = url.searchParams.get("param_release");
+				const filename = url.searchParams.get("param_filename") ?? "";
+				mapLookups.push(`${release} ${filename}`);
+				// Server frames look the map up by path suffix (stored as "/server.js").
+				const found = /endsWith/.test(query)
+					? release === "rel-1" && filename.endsWith("/server.js") ? SERVER_MAP : null
+					: release === "rel-1" && filename === "/assets/index-5f3a9c1e.js" ? MAP : null;
 				res.writeHead(200, { "content-type": "application/x-ndjson" })
-					.end(found ? `${JSON.stringify({ map: MAP })}\n` : "");
+					.end(found ? `${JSON.stringify({ map: found })}\n` : "");
 				return;
 			}
 			if (/^INSERT INTO/i.test(query)) {
@@ -240,7 +255,59 @@ test("a server error without a stack carries [frames-v3, message-v1] and no fram
 	assert.deepEqual(occurrence!.fingerprintRecord.parts, ["Error", "boom"]);
 	const stored = inserts.filter((i) => /runtime_error_occurrences/.test(i.query)).at(-1)!.rows[0]!;
 	assert.equal(stored.frames, "");
-	// Server frames are never symbolicated: no resolution counts.
+	// Server occurrences carry no resolution counts (clickhouse.ts).
 	assert.equal(stored.in_app_frames_resolved, 0);
 	assert.equal(stored.in_app_frames_unresolved, 0);
+});
+
+test("bundled Node frames are symbolicated at ingest by path suffix, with 5 context lines (RF-05)", async () => {
+	const seen = sinkBatches.length;
+	const lookupsBefore = mapLookups.length;
+	const now = String(Date.now() * 1_000_000);
+	const stack = [
+		"TypeError: Cannot read properties of undefined (reading 'total')",
+		"    at checkout (/app/dist/server.js:1:11)",
+		"    at Layer.handle (/app/node_modules/express/lib/router/layer.js:95:5)",
+	].join("\n");
+	const res = await fetch(`${ingestUrl}/v1/traces`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: "Bearer test-key" },
+		body: JSON.stringify({
+			resourceSpans: [{
+				resource: { attributes: [
+					{ key: "service.name", value: { stringValue: "api" } },
+					{ key: "service.version", value: { stringValue: "rel-1" } },
+				] },
+				scopeSpans: [{ spans: [{
+					traceId: "c".repeat(32), spanId: "d".repeat(16), name: "POST /checkout", kind: 2,
+					startTimeUnixNano: now, endTimeUnixNano: now,
+					status: { code: 2, message: "boom" },
+					events: [{ name: "exception", timeUnixNano: now, attributes: [
+						{ key: "exception.type", value: { stringValue: "TypeError" } },
+						{ key: "exception.message", value: { stringValue: "Cannot read properties of undefined (reading 'total')" } },
+						{ key: "exception.stacktrace", value: { stringValue: stack } },
+					] }],
+				}] }],
+			}],
+		}),
+	});
+	assert.equal(res.status, 200);
+	const batch = await nextBatch(seen);
+	const [occurrence] = batch.occurrences as Array<Record<string, any>>;
+	// One lookup: the app bundle's path; express (node_modules) is never looked up.
+	assert.deepEqual(mapLookups.slice(lookupsBefore), ["rel-1 /app/dist/server.js"]);
+	assert.deepEqual(occurrence!.frames, [
+		{
+			function: "checkout", module: null, filename: "src/checkout.ts", lineno: 12, colno: 5, inApp: true, resolved: true,
+			contextLine: "line 12",
+			preContext: ["line 7", "line 8", "line 9", "line 10", "line 11"],
+			postContext: ["line 13", "line 14", "line 15", "line 16", "line 17"],
+		},
+		{
+			function: "Layer.handle", module: null, filename: "/app/node_modules/express/lib/router/layer.js",
+			lineno: 95, colno: 5, inApp: false, resolved: false,
+		},
+	]);
+	// frames-v3 hashes the original file, not the bundle.
+	assert.deepEqual(occurrence!.fingerprintRecord.parts, ["TypeError", "checkout@checkout.ts"]);
 });

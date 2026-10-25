@@ -128,8 +128,9 @@ const INGESTER_INFO_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	configureRedaction(config);
 	const store = new ClickHouseStore(config);
-	// Browser JS frames are resolved through uploaded source maps before they
-	// are fingerprinted (frames-v3), with parsed maps cached per release+file.
+	// Browser, Node and edge JS frames are resolved through uploaded source
+	// maps before they are fingerprinted (frames-v3), with parsed maps cached
+	// per release+file.
 	const symbolicator = new Symbolicator(
 		(key) => store.lookupSourceMap(key),
 		new SourceMapCache({ maxBytes: (config.sourceMapCacheMb ?? 64) * 1024 * 1024 }),
@@ -512,30 +513,48 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		return ctx;
 	}
 
-	/**
-	 * Structured frames for the frames-v3 identity and the platform's stack
-	 * view: parsed innermost-first, then — browser only, where bundles are
-	 * minified — resolved through the release's source maps. Symbolication
-	 * never fails ingest (it falls back to the parsed frames).
-	 */
-	async function framesFor(
-		ctx: IngestContext,
-		input: RuntimeOccurrenceInput,
-	): Promise<StackFrame[]> {
-		let frames: StackFrame[];
+	/** A stack's frames, innermost first; none when it does not parse. */
+	function parsedFrames(stack: string | null | undefined): StackFrame[] {
 		try {
-			frames = parseStackFrames(input.stack);
+			return parseStackFrames(stack);
 		} catch (err) {
 			console.warn("stack parse failed — no frames:", err instanceof Error ? err.message : err);
 			return [];
 		}
-		if (input.source !== "browser" || frames.length === 0) return frames;
+	}
+
+	/**
+	 * Frames resolved through the release's source maps: minified browser
+	 * bundles, and bundled Node and edge code (RF-05: tsup, esbuild, webpack
+	 * and Next.js server output) — only JS frames a map was uploaded for
+	 * change. Never fails ingest (it falls back to the parsed frames).
+	 */
+	function symbolicated(
+		ctx: IngestContext,
+		input: RuntimeOccurrenceInput,
+		frames: StackFrame[],
+	): Promise<StackFrame[]> {
+		if (frames.length === 0) return Promise.resolve(frames);
 		return symbolicator.symbolicate(frames, {
 			orgId: ctx.orgId,
 			repositoryId: ctx.repositoryId,
 			release: input.release,
 			debugIds: input.debugIds ?? null,
+			server: input.source !== "browser",
 		});
+	}
+
+	/**
+	 * Structured frames for the frames-v3 identity and the platform's stack
+	 * view: parsed innermost-first, then resolved through the release's
+	 * source maps, with context lines on in-app frames when the map carries
+	 * their source.
+	 */
+	function framesFor(
+		ctx: IngestContext,
+		input: RuntimeOccurrenceInput,
+	): Promise<StackFrame[]> {
+		return symbolicated(ctx, input, parsedFrames(input.stack));
 	}
 
 	/** Ids are content-derived (occurrenceIdFor), NOT random: an exporter

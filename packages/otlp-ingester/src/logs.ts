@@ -8,6 +8,7 @@ import {
 import { declaredLink, liftErrorFields } from "./error-fields.js";
 import { fingerprintOverrideOf } from "./fingerprint-override.js";
 import { normalizeRoute } from "./fingerprint.js";
+import { DEBUG_IDS_ATTRIBUTE, serverDebugIds, withoutDebugIdsAttribute } from "./source-maps.js";
 import type { RuntimeOccurrenceInput } from "./types.js";
 
 export interface RuntimeLogRecord {
@@ -131,11 +132,17 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 						/^autter\.(?:operation|event)\./.test(key),
 					),
 				);
-				const attributes = sanitizeRuntimeContext({
-					...metadata,
-					...event,
-					...attrs,
-				});
+				// Server SDKs (runtime-core errorAttributes): the debug ids of the bundles in the
+				// exception's stack (RF-05) locate their source maps; read raw
+				// (the sanitiser cuts long keys) and not kept.
+				const { [DEBUG_IDS_ATTRIBUTE]: rawDebugIds, ...plainAttrs } = attrs;
+				const attributes = withoutDebugIdsAttribute(
+					sanitizeRuntimeContext({
+						...metadata,
+						...event,
+						...plainAttrs,
+					}),
+				);
 				const nanos = record.timeUnixNano ?? record.observedTimeUnixNano;
 				const occurredAt =
 					nanos === undefined
@@ -239,6 +246,7 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 								occurredAt,
 								...declared,
 								...fingerprintOverrideOf(attributes["autter.fingerprint"]),
+								...serverDebugIds(rawDebugIds),
 							}
 						: undefined;
 				rows.push({

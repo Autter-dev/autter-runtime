@@ -159,3 +159,74 @@ test("serialized context and path queries are scrubbed and excess batches fail e
 		/too many log resources/,
 	);
 });
+
+test("server exceptions' autter.debug_ids locate source maps and are not kept (RF-05)", () => {
+	const id = "4f3c6a1e-9b2d-4e8f-a1b2-c3d4e5f60718";
+	const debugIds = JSON.stringify({ "/app/dist/server.js": id });
+	const stack = "TypeError: boom\n    at checkout (/app/dist/server.js:1:11)";
+	// A span's exception event (runtime-node).
+	const traces = normalizeTraces({
+		resourceSpans: [
+			{
+				resource: { attributes: [attr("service.name", "api")] },
+				scopeSpans: [
+					{
+						spans: [
+							{
+								traceId: "a".repeat(32),
+								spanId: "b".repeat(16),
+								name: "POST /checkout",
+								startTimeUnixNano: "1760000000000000000",
+								endTimeUnixNano: "1760000000001000000",
+								status: { code: 2 },
+								events: [
+									{
+										name: "exception",
+										timeUnixNano: "1760000000000500000",
+										attributes: [
+											attr("exception.type", "TypeError"),
+											attr("exception.message", "boom"),
+											attr("exception.stacktrace", stack),
+											attr("autter.debug_ids", debugIds),
+										],
+									},
+								],
+							},
+						],
+					},
+				],
+			},
+		],
+	});
+	assert.deepEqual(traces.occurrences[0]!.debugIds, { "/app/dist/server.js": id });
+	assert.equal("autter.debug_ids" in traces.occurrences[0]!.attributes!, false);
+	// A promoted log record (runtime-edge, logger-only Node).
+	const [row] = normalizeLogs({
+		resourceLogs: [
+			{
+				resource: { attributes: [attr("service.name", "edge")] },
+				scopeLogs: [
+					{
+						logRecords: [
+							{
+								timeUnixNano: "1760000000000000000",
+								severityNumber: 17,
+								body: { stringValue: "boom" },
+								attributes: [
+									attr("autter.capture.mode", "log"),
+									attr("exception.type", "TypeError"),
+									attr("exception.message", "boom"),
+									attr("exception.stacktrace", stack),
+									attr("autter.debug_ids", debugIds),
+								],
+							},
+						],
+					},
+				],
+			},
+		],
+	});
+	assert.deepEqual(row!.occurrence!.debugIds, { "/app/dist/server.js": id });
+	assert.equal("autter.debug_ids" in row!.attributes, false);
+	assert.equal("autter.debug_ids" in row!.occurrence!.attributes!, false);
+});

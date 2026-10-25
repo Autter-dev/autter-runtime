@@ -64,7 +64,12 @@ const INSERT_SETTINGS: ClickHouseSettings = {
  * default async_insert_max_data_size of 10 MiB). */
 const ASYNC_INSERT_MAX_MAP_CHARS = 8 * 1024 * 1024;
 
-/** Migration 0020 columns: browser occurrences only (server frames are not symbolicated). */
+/**
+ * Migration 0020 columns: browser occurrences only. Server frames are
+ * symbolicated too since RF-05, but an unresolved server `.js` frame is
+ * usually readable code (an unbundled Node app), so it would make the EI-14
+ * "needs source maps" ratio cry wolf.
+ */
 function occurrenceFrameResolution(o: RuntimeOccurrence): { in_app_frames_resolved: number; in_app_frames_unresolved: number } {
 	const counts = o.source === "browser" ? inAppFrameResolution(o.frames) : { resolved: 0, unresolved: 0 };
 	return {

@@ -48,7 +48,7 @@ import type { RuntimeOccurrenceInput, StackFrame } from "./types.js";
  * message, severity, time and batch position (so its deterministic id), and
  * takes from the others what it lacks: attributes (its own win), stack,
  * route, method, status, request id, declared error fields, fingerprint
- * override and breadcrumbs. `autter.merged_recordings` counts the merged
+ * override, breadcrumbs and debug ids. `autter.merged_recordings` counts the merged
  * recordings.
  *
  * Rule 2, redundant status-only occurrences. A status-only `HttpServerError`
@@ -297,6 +297,7 @@ function mergeInto(
 			merged.fingerprintOverride = other.fingerprintOverride;
 		}
 		if (!merged.breadcrumbs?.length && other.breadcrumbs?.length) merged.breadcrumbs = other.breadcrumbs;
+		if (!merged.debugIds && other.debugIds) merged.debugIds = other.debugIds;
 	}
 	attributes["autter.merged_recordings"] = others.length + 1;
 	// Same bounds as every other occurrence (128 keys, kept's own first).

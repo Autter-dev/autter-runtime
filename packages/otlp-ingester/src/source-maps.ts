@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { scrubText } from "./redact.js";
+import { isInAppPath } from "./stack-frames.js";
 
 /**
- * Largest stored map (after `sourcesContent` is removed), in characters:
- * 32 MiB, room for vendor chunks of about 20 MB of minified code. Storage
- * is a ZSTD-compressed String column, so size only costs disk; a map this
- * big is still symbolicated, without being kept in the parse cache unless
- * SOURCE_MAP_CACHE_MB allows it (symbolicate.ts). Was 5 MiB up to 1.6.0.
+ * Largest stored map, in characters: 32 MiB, room for vendor chunks of
+ * about 20 MB of minified code. Storage is a ZSTD-compressed String column,
+ * so size only costs disk; a map this big is still symbolicated, without
+ * being kept in the parse cache unless SOURCE_MAP_CACHE_MB allows it
+ * (symbolicate.ts). Was 5 MiB up to 1.6.0. The map without
+ * `sourcesContent` must fit it; the source contents kept (RF-05) fit in
+ * what is left of it, counted in UTF-8 bytes (storedSourcesContent).
  */
 export const SOURCE_MAP_MAX_CHARS = 32 * 1024 * 1024;
 
@@ -67,7 +70,7 @@ export interface ValidSourceMap {
 	release: string;
 	/** sourceMapPath() of the uploaded filename. */
 	filename: string;
-	/** The map JSON without `sourcesContent`. */
+	/** The map JSON as stored: `sourcesContent` bounded by storedSourceMapJson. */
 	map: string;
 	/** Lowercase debug id, or "" when the upload has none. */
 	debugId: string;
@@ -81,6 +84,77 @@ const RELEASE_RE = /^[a-zA-Z0-9._-]{1,200}$/;
  * computes the same value to skip maps the ingester already has. */
 export function sourceMapContentHash(map: string): string {
 	return createHash("sha256").update(map).digest("hex");
+}
+
+/** UTF-8 bytes `,"sourcesContent":[` and `]` add around the entries. */
+const SOURCES_CONTENT_WRAPPER_BYTES = Buffer.byteLength(',"sourcesContent":[]');
+/** UTF-8 bytes of a `null` entry. */
+const NULL_ENTRY_BYTES = 4;
+
+/**
+ * The `sourcesContent` a stored map keeps (RF-05), or null to leave the
+ * field out. Context lines for in-app frames come from it, so only in-app
+ * sources keep theirs: a source the map's `ignoreList` /
+ * `x_google_ignoreList` names, or whose path the in-app rule rejects
+ * (`node_modules/`, `/.pnpm/`, `/vendor/`, … — isInAppPath), gets `null`,
+ * like any entry that is not a string.
+ *
+ * The map must stay within the stored-map limit, so contents are kept
+ * whole, smallest first (ties in source order), while the whole JSON fits
+ * `limit` UTF-8 bytes given the `baseBytes` of the map without the field;
+ * the rest become `null`. Nothing is ever cut inside a file, so kept line
+ * numbers stay right. `@autter/runtime-cli` (upload.ts storedMapJson) does
+ * exactly this, so it hashes the map the ingester stores and skips it on
+ * the next run.
+ */
+export function storedSourcesContent(
+	fields: Record<string, unknown>,
+	baseBytes: number,
+	limit: number = SOURCE_MAP_MAX_CHARS,
+): Array<string | null> | null {
+	const { sources, sourcesContent } = fields;
+	if (!Array.isArray(sources) || !Array.isArray(sourcesContent) || sources.length === 0) return null;
+	const ignored = new Set<number>();
+	for (const list of [fields.ignoreList, fields.x_google_ignoreList]) {
+		if (!Array.isArray(list)) continue;
+		for (const index of list) if (Number.isInteger(index)) ignored.add(index as number);
+	}
+	const count = sources.length;
+	const candidates: Array<{ index: number; content: string; bytes: number }> = [];
+	for (let index = 0; index < count; index++) {
+		const source: unknown = sources[index];
+		const content: unknown = sourcesContent[index];
+		if (typeof source !== "string" || typeof content !== "string") continue;
+		if (ignored.has(index) || !isInAppPath(source)) continue;
+		candidates.push({ index, content, bytes: Buffer.byteLength(JSON.stringify(content)) });
+	}
+	if (candidates.length === 0) return null;
+	candidates.sort((a, b) => a.bytes - b.bytes || a.index - b.index);
+	// Every entry starts as `null`, with a comma between entries.
+	let remaining = limit - baseBytes - SOURCES_CONTENT_WRAPPER_BYTES - NULL_ENTRY_BYTES * count - (count - 1);
+	const kept: Array<string | null> = new Array<string | null>(count).fill(null);
+	let any = false;
+	for (const candidate of candidates) {
+		const extra = candidate.bytes - NULL_ENTRY_BYTES;
+		if (extra > remaining) break;
+		remaining -= extra;
+		kept[candidate.index] = candidate.content;
+		any = true;
+	}
+	return any ? kept : null;
+}
+
+/**
+ * The stored JSON of a map: every field as sent except `sourcesContent`,
+ * which goes last, bounded by storedSourcesContent (left out when nothing
+ * is kept, so a map without in-app contents is stored byte-for-byte as it
+ * was before contents were kept).
+ */
+export function storedSourceMapJson(fields: Record<string, unknown>, limit: number = SOURCE_MAP_MAX_CHARS): string {
+	const { sourcesContent: _content, ...rest } = fields;
+	const base = JSON.stringify(rest);
+	const content = storedSourcesContent(fields, Buffer.byteLength(base), limit);
+	return content ? JSON.stringify({ ...rest, sourcesContent: content }) : base;
 }
 
 /**
@@ -103,13 +177,15 @@ export function validateSourceMap(body: unknown): ValidSourceMap | null {
 	const rawDebugId = input.debugId ?? parsed.debugId ?? parsed.debug_id;
 	const debugId = rawDebugId === undefined || rawDebugId === null || rawDebugId === "" ? "" : normalizeDebugId(rawDebugId);
 	if (debugId === null) return null;
-	// Source contents are unnecessary for position lookup and may contain
-	// secrets. Everything else is stored as sent, extension fields included:
-	// symbolication reads `x_autter_scopes` (function scopes) from it, and the
-	// CLI hashes exactly this JSON to skip maps already uploaded.
-	const { sourcesContent: _omitted, ...safe } = parsed;
-	const map = JSON.stringify(safe);
-	if (map.length > SOURCE_MAP_MAX_CHARS) return null;
+	// Everything is stored as sent, extension fields included: symbolication
+	// reads `x_autter_scopes` (function scopes) from it, and the CLI hashes
+	// exactly this JSON to skip maps already uploaded. `sourcesContent` is
+	// kept for in-app sources (RF-05: context lines around in-app frames),
+	// within the stored-map limit; the lines taken from it are scrubbed when
+	// they are attached to an occurrence (symbolicate.ts).
+	const { sourcesContent: _content, ...withoutContent } = parsed;
+	if (JSON.stringify(withoutContent).length > SOURCE_MAP_MAX_CHARS) return null;
+	const map = storedSourceMapJson(parsed);
 	return { release: input.release, filename, map, debugId, contentHash: sourceMapContentHash(map) };
 }
 
@@ -181,4 +257,37 @@ export function browserDebugIds(raw: Record<string, unknown> | undefined): { deb
 		if (++count >= DEBUG_IDS_MAX) break;
 	}
 	return count ? { debugIds } : {};
+}
+
+/**
+ * The attribute server SDKs put the debug ids of the bundles in an
+ * exception's stack under (`@autter/runtime-core` errorAttributes, RF-05):
+ * a JSON object of script path, as it appears in the stack → debug id.
+ */
+export const DEBUG_IDS_ATTRIBUTE = "autter.debug_ids";
+
+/**
+ * `{ debugIds }` from a server exception's `autter.debug_ids` (a JSON
+ * string, or the object the sanitiser made of it), validated exactly like a
+ * browser event's (browserDebugIds); `{}` when absent or malformed. Only
+ * locates source maps: like the browser's, never stored or forwarded.
+ */
+export function serverDebugIds(raw: unknown): { debugIds?: Record<string, string> } {
+	let value = raw;
+	if (typeof value === "string") {
+		try {
+			value = JSON.parse(value);
+		} catch {
+			return {};
+		}
+	}
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	return browserDebugIds(value as Record<string, unknown>);
+}
+
+/** `attributes` without `autter.debug_ids`, which locates maps and is not kept. */
+export function withoutDebugIdsAttribute(attributes: Record<string, unknown>): Record<string, unknown> {
+	if (!(DEBUG_IDS_ATTRIBUTE in attributes)) return attributes;
+	const { [DEBUG_IDS_ATTRIBUTE]: _ids, ...rest } = attributes;
+	return rest;
 }

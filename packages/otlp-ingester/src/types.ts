@@ -74,9 +74,10 @@ export interface RuntimeOccurrenceInput {
 	/** Steps before the error, oldest first, ≤ 30 (validated by breadcrumbs.ts). */
 	breadcrumbs?: Breadcrumb[];
 	/**
-	 * Browser only: script URL → debug id for the scripts on the page, used
-	 * to find their source maps (EI-13). Input-only: never stored or sent to
-	 * the sink.
+	 * Script URL (browser) or script path (server, the SDK's
+	 * `autter.debug_ids`) → debug id for the bundles in the stack, used to
+	 * find their source maps (EI-13, RF-05). Input-only: never stored or
+	 * sent to the sink.
 	 */
 	debugIds?: Record<string, string>;
 }
@@ -98,10 +99,14 @@ export interface StackFrame {
 	inApp: boolean;
 	/** True when a source map resolved the frame. */
 	resolved: boolean;
-	/** Only when `sourcesContent` supplied it (≤ 300 chars). */
+	/**
+	 * The frame's own source line, on in-app resolved frames whose map
+	 * carried the source's `sourcesContent` (≤ 300 chars, scrubbed).
+	 */
 	contextLine?: string;
-	/** ≤ 3 lines each, ≤ 300 chars per line. */
+	/** Up to 5 lines before the frame's line, in file order (RF-05; 3 before), ≤ 300 chars each. */
 	preContext?: string[];
+	/** Up to 5 lines after it, in file order, ≤ 300 chars each. */
 	postContext?: string[];
 }
 
@@ -144,7 +149,7 @@ export interface RuntimeOccurrence extends RuntimeOccurrenceInput {
 	fingerprint: string;
 	/** "code-v1" when grouped by a valid error code, else "message-v1". */
 	fingerprintScheme: "message-v1" | "code-v1";
-	/** Parsed (and, for browser JS, symbolicated) frames, innermost first, ≤ 50. */
+	/** Parsed (and, for bundled JS, symbolicated) frames, innermost first, ≤ 50. */
 	frames?: StackFrame[];
 	/**
 	 * Every applicable identity, highest precedence first (manual-v1,

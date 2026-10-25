@@ -9,12 +9,17 @@ import { MIGRATIONS } from "./migrations.js";
 import { browserPayloadSchema, normalizeBrowserPayload } from "./normalize-browser.js";
 import { createIngesterApp } from "./server.js";
 import {
+	DEBUG_IDS_ATTRIBUTE,
 	SOURCE_MAP_MAX_BODY_BYTES,
 	SOURCE_MAP_MAX_CHARS,
 	browserDebugIds,
+	serverDebugIds,
 	sourceMapTableDDL,
+	storedSourceMapJson,
+	storedSourcesContent,
 	validateSourceMap,
 	validateSourceMapCheck,
+	withoutDebugIdsAttribute,
 	type SourceMapCheck,
 	type ValidSourceMap,
 } from "./source-maps.js";
@@ -44,11 +49,62 @@ test("an upload's debug id comes from the body, else the map, and must be valid"
 	assert.equal(validateSourceMap({ release: "abc", filename: "/app.js", debugId: "not-an-id", map: MAP }), null);
 });
 
-test("the stored map drops sourcesContent and carries its own sha256", () => {
-	const stored = validateSourceMap({ release: "abc", filename: "/app.js", map: { ...MAP, sourcesContent: ["const key = 'secret'"] } })!;
-	assert.equal(stored.map.includes("secret"), false);
-	assert.equal(stored.map, JSON.stringify(MAP));
+test("the stored map keeps in-app sourcesContent (RF-05), last, and carries its own sha256", () => {
+	const stored = validateSourceMap({ release: "abc", filename: "/app.js", map: { sourcesContent: ["export const total = 1;"], ...MAP } })!;
+	// sourcesContent moves to the end, whatever its place in the upload.
+	assert.equal(stored.map, JSON.stringify({ ...MAP, sourcesContent: ["export const total = 1;"] }));
 	assert.equal(stored.contentHash, createHash("sha256").update(stored.map).digest("hex"));
+	// No contents (or none in-app): stored byte-for-byte as before RF-05, so
+	// hashes of maps already uploaded stay valid.
+	assert.equal(validateSourceMap({ release: "abc", filename: "/app.js", map: MAP })!.map, JSON.stringify(MAP));
+	assert.equal(
+		validateSourceMap({ release: "abc", filename: "/app.js", map: { ...MAP, sourcesContent: [null] } })!.map,
+		JSON.stringify(MAP),
+	);
+});
+
+test("dependency and ignore-listed sources keep no content", () => {
+	const map = {
+		version: 3,
+		mappings: "AAAA",
+		sources: ["src/app.ts", "webpack://shop/./node_modules/react/index.js", "../.pnpm/zod@3/lib/index.js", "src/vendor-shim.js", "src/b.ts"],
+		sourcesContent: ["app", "react", "zod", "shim", 42],
+		x_google_ignoreList: [3],
+	};
+	const stored = JSON.parse(validateSourceMap({ release: "abc", filename: "/app.js", map })!.map);
+	assert.deepEqual(stored.sourcesContent, ["app", null, null, null, null]);
+	const onlyDeps = { ...map, sourcesContent: [null, "react", "zod", "shim", null] };
+	assert.equal("sourcesContent" in JSON.parse(validateSourceMap({ release: "abc", filename: "/app.js", map: onlyDeps })!.map), false);
+	// `ignoreList` (the standard name) counts like x_google_ignoreList.
+	assert.deepEqual(
+		storedSourcesContent({ ...map, x_google_ignoreList: undefined, ignoreList: [0] }, 0),
+		[null, null, null, "shim", null],
+	);
+});
+
+test("contents are kept whole, smallest first, while the stored map fits the limit in UTF-8 bytes", () => {
+	const fields = { version: 3, mappings: "AAAA", sources: ["a.ts", "b.ts", "c.ts"], sourcesContent: ["b".repeat(40), "a".repeat(10), "é".repeat(10)] };
+	const { sourcesContent: _content, ...rest } = fields;
+	const base = Buffer.byteLength(JSON.stringify(rest));
+	// Exactly what the three contents take: everything is kept.
+	const all = JSON.stringify({ ...rest, sourcesContent: fields.sourcesContent });
+	assert.equal(storedSourceMapJson(fields, Buffer.byteLength(all)), all);
+	// One byte short: the biggest content (40 chars) goes, the others stay.
+	const twoKept = storedSourceMapJson(fields, Buffer.byteLength(all) - 1);
+	assert.deepEqual(JSON.parse(twoKept).sourcesContent, [null, "a".repeat(10), "é".repeat(10)]);
+	assert.ok(Buffer.byteLength(twoKept) <= Buffer.byteLength(all) - 1);
+	// "é" is 10 characters but 20 bytes: with room for 15 more bytes than the
+	// all-null field, only the ASCII one fits.
+	const allNull = Buffer.byteLength(JSON.stringify({ ...rest, sourcesContent: [null, null, null] }));
+	assert.deepEqual(JSON.parse(storedSourceMapJson(fields, allNull + 15)).sourcesContent, [null, "a".repeat(10), null]);
+	// No room at all: the field is left out.
+	assert.equal(storedSourceMapJson(fields, base), JSON.stringify(rest));
+	// Every stored map is exactly as long as computed: never over the limit.
+	for (let limit = base; limit < Buffer.byteLength(all) + 5; limit++) {
+		assert.ok(Buffer.byteLength(storedSourceMapJson(fields, limit)) <= Math.max(limit, base), `limit ${limit}`);
+	}
+	// Re-bounding a stored map changes nothing (the CLI bounds, the ingester again).
+	assert.equal(storedSourceMapJson(JSON.parse(twoKept), Buffer.byteLength(all) - 1), twoKept);
 });
 
 test("the stored map keeps the function scopes the CLI sends (x_autter_scopes), as sent", () => {
@@ -56,11 +112,22 @@ test("the stored map keeps the function scopes the CLI sends (x_autter_scopes), 
 	const stored = validateSourceMap({
 		release: "abc",
 		filename: "/app.js",
-		map: { ...MAP, sourcesContent: ["const key = 'secret'"], x_autter_scopes },
+		map: { ...MAP, sourcesContent: ["const total = 1"], x_autter_scopes },
 	})!;
 	// Byte-for-byte what the CLI hashed (storedMapJson), so re-runs skip it.
-	assert.equal(stored.map, JSON.stringify({ ...MAP, x_autter_scopes }));
+	assert.equal(stored.map, JSON.stringify({ ...MAP, x_autter_scopes, sourcesContent: ["const total = 1"] }));
 	assert.deepEqual(JSON.parse(stored.map).x_autter_scopes, x_autter_scopes);
+});
+
+test("server exceptions' autter.debug_ids are validated like a browser event's, and never kept", () => {
+	const raw = JSON.stringify({ "/app/dist/server.js": ID.toUpperCase(), "file:///app/dist/worker.mjs?x=1": OTHER_ID, "/app/x.js": "bad" });
+	assert.deepEqual(serverDebugIds(raw), { debugIds: { "/app/dist/server.js": ID, "file:///app/dist/worker.mjs": OTHER_ID } });
+	// The object the sanitiser makes of the JSON string works too.
+	assert.deepEqual(serverDebugIds({ "/app/dist/server.js": ID }), { debugIds: { "/app/dist/server.js": ID } });
+	for (const bad of [undefined, "", "{not json", "[1]", 42, null]) assert.deepEqual(serverDebugIds(bad), {});
+	assert.deepEqual(withoutDebugIdsAttribute({ a: 1, [DEBUG_IDS_ATTRIBUTE]: raw }), { a: 1 });
+	const untouched = { a: 1 };
+	assert.equal(withoutDebugIdsAttribute(untouched), untouched);
 });
 
 test("check requests name files by path, debug id and hash", () => {
@@ -111,13 +178,20 @@ function fakeClient(rows: Row[]): { client: ClickHouseClient; queries: Array<{ q
 			if (/debug_id = \{debugId:String\}/.test(query)) found = found.filter((r) => r.debug_id === params.debugId);
 			if (/release = \{release:String\}/.test(query)) found = found.filter((r) => r.release === params.release);
 			if (/filename = \{filename:String\}/.test(query)) found = found.filter((r) => r.filename === params.filename);
+			if (/endsWith\(\{filename:String\}, filename\)/.test(query)) {
+				found = found.filter((r) => String(params.filename).endsWith(r.filename));
+			}
 			if (/has\(\{hashes:Array\(String\)\}, content_hash\)/.test(query)) {
 				found = found.filter((r) => (params.hashes as string[]).includes(r.content_hash));
 			}
 			if (/has\(\{debugIds:Array\(String\)\}, debug_id\)/.test(query)) {
 				found = found.filter((r) => (params.debugIds as string[]).includes(r.debug_id));
 			}
-			found.sort((a, b) => b.uploaded_at - a.uploaded_at);
+			found.sort((a, b) =>
+				/ORDER BY length\(filename\) DESC/.test(query)
+					? b.filename.length - a.filename.length || b.uploaded_at - a.uploaded_at
+					: b.uploaded_at - a.uploaded_at,
+			);
 			return { json: async () => (/LIMIT 1/.test(query) ? found.slice(0, 1) : found) };
 		},
 	} as unknown as ClickHouseClient;
@@ -159,6 +233,30 @@ test("lookupSourceMap falls back to release + path (origin and query stripped)",
 	assert.equal(await lookupSourceMap(client, "db", { ...key, debugId: "garbage" }), "new");
 	assert.equal(await lookupSourceMap(client, "db", { ...key, release: null }), null);
 	assert.equal(await lookupSourceMap(client, "db", { ...key, filename: "/assets/missing.js" }), null);
+});
+
+test("server frames (suffix) find the release's map stored under the longest suffix of their path", async () => {
+	const { client, queries } = fakeClient([
+		row({ filename: "/server.js", map: "short" }),
+		row({ filename: "/dist/server.js", map: "longer" }),
+		row({ filename: "/dist/server.js", map: "longer-old", uploaded_at: 0 }),
+		row({ filename: "/other/server.js", map: "not-a-suffix" }),
+		row({ release: "r2", filename: "/app/dist/server.js", map: "other-release" }),
+		row({ filename: "/.next/server/app/page.js", map: "next-page" }),
+	]);
+	const key = { orgId: "org-a", repositoryId: "repo-a", release: "r1", suffix: true };
+	assert.equal(await lookupSourceMap(client, "db", { ...key, filename: "/app/dist/server.js" }), "longer");
+	assert.equal(await lookupSourceMap(client, "db", { ...key, filename: "/srv/server.js" }), "short");
+	assert.equal(await lookupSourceMap(client, "db", { ...key, filename: "/var/task/.next/server/app/page.js" }), "next-page");
+	// "/server.js" only matches on a path segment boundary: stored paths start with "/".
+	assert.equal(await lookupSourceMap(client, "db", { ...key, filename: "/app/myserver.js" }), null);
+	assert.equal(await lookupSourceMap(client, "db", { ...key, release: null, filename: "/app/dist/server.js" }), null);
+	const suffixQuery = queries.find((q) => /endsWith/.test(q.query))!;
+	assert.match(suffixQuery.query, /ORDER BY length\(filename\) DESC, uploaded_at DESC LIMIT 1/);
+	assert.equal(suffixQuery.params.filename, "/app/dist/server.js");
+	// A debug id still wins, whatever the path.
+	const { client: byId } = fakeClient([row({ release: "build-1", filename: "/x.js", debug_id: ID, map: "by-id" })]);
+	assert.equal(await lookupSourceMap(byId, "db", { ...key, filename: "/app/dist/server.js", debugId: ID }), "by-id");
 });
 
 test("presentSourceMaps returns entries already stored with the same path, debug id and hash", async () => {

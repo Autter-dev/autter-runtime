@@ -4,7 +4,14 @@ import { framesV3Fingerprint } from "./fingerprint-v3.js";
 import type { SourceMapKey } from "./source-maps-lookup.js";
 import { ScopeIndex } from "./source-map-scopes.js";
 import { parseStackFrames } from "./stack-frames.js";
-import { parseSourceMap, SourceMapCache, Symbolicator, type MapFetcher } from "./symbolicate.js";
+import {
+	CONTEXT_LINES,
+	parseSourceMap,
+	serverScriptPath,
+	SourceMapCache,
+	Symbolicator,
+	type MapFetcher,
+} from "./symbolicate.js";
 
 // ── A tiny source-map writer (base64 VLQ), so the tests need no extra deps ──
 
@@ -141,15 +148,48 @@ test("ignore-listed sources are not in-app", async () => {
 	assert.equal(frame!.function, "invariantImpl");
 });
 
-test("context lines come only from sourcesContent", async () => {
-	const content = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+test("context lines come only from sourcesContent: the line and 5 on each side (RF-05)", async () => {
+	assert.equal(CONTEXT_LINES, 5);
+	const content = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\r\n");
 	const map = buildMap([10, 50, 90, 130], { sourcesContent: [content, null, null, null] });
 	const symbolicator = new Symbolicator(fetcherFor({ "/assets/index-abc12345.js": map }));
 	const [frame, caller] = await symbolicator.symbolicate(parseStackFrames(stack(BUILD_A.url, [11, 51, 91])), scope);
 	assert.equal(frame!.contextLine, "line 12");
-	assert.deepEqual(frame!.preContext, ["line 9", "line 10", "line 11"]);
-	assert.deepEqual(frame!.postContext, ["line 13", "line 14", "line 15"]);
+	assert.deepEqual(frame!.preContext, ["line 7", "line 8", "line 9", "line 10", "line 11"]);
+	assert.deepEqual(frame!.postContext, ["line 13", "line 14", "line 15", "line 16", "line 17"]);
 	assert.equal("contextLine" in caller!, false);
+});
+
+test("context lines near the edges of a file, and none past its end", async () => {
+	// total.ts:12 is the frame's line: a 13-line file has 1 line after it.
+	const short = Array.from({ length: 13 }, (_, i) => `l${i + 1}`).join("\n");
+	const symbolicator = new Symbolicator(
+		fetcherFor({ "/assets/index-abc12345.js": buildMap([10, 50, 90, 130], { sourcesContent: [short, null, null, null] }) }),
+	);
+	const [frame] = await symbolicator.symbolicate(parseStackFrames(stack(BUILD_A.url, [11, 51, 91])), scope);
+	assert.deepEqual([frame!.preContext, frame!.contextLine, frame!.postContext], [["l7", "l8", "l9", "l10", "l11"], "l12", ["l13"]]);
+	const tooShort = new Symbolicator(
+		fetcherFor({ "/assets/index-abc12345.js": buildMap([10, 50, 90, 130], { sourcesContent: ["only\nfour\nlines\nhere", null, null, null] }) }),
+	);
+	const [past] = await tooShort.symbolicate(parseStackFrames(stack(BUILD_A.url, [11, 51, 91])), scope);
+	assert.equal(past!.resolved, true);
+	assert.equal("contextLine" in past!, false);
+});
+
+test("context lines are scrubbed and cut to 300 characters, and only in-app frames get them", async () => {
+	const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+	lines[11] = 'const key = "sk_live_abcdefghijklmnop";';
+	lines[12] = "x".repeat(400);
+	const react = Array.from({ length: 10 }, (_, i) => `react ${i + 1}`).join("\n");
+	const map = buildMap([10, 50, 90, 130], { sourcesContent: [lines.join("\n"), null, react, null] });
+	const symbolicator = new Symbolicator(fetcherFor({ "/assets/index-abc12345.js": map }));
+	const [frame, , dependency] = await symbolicator.symbolicate(parseStackFrames(stack(BUILD_A.url, [11, 51, 91])), scope);
+	assert.equal(frame!.contextLine, 'const key = "[redacted]";');
+	assert.equal(frame!.postContext![0], "x".repeat(300));
+	// react-dom (node_modules) resolved but out of the app: no source shown.
+	assert.equal(dependency!.inApp, false);
+	assert.equal(dependency!.resolved, true);
+	assert.equal("contextLine" in dependency!, false);
 });
 
 test("parsed maps are cached per release and file; misses are remembered briefly", async () => {
@@ -275,6 +315,73 @@ test("non-JS and position-less frames are left alone", async () => {
 	);
 	assert.deepEqual(await symbolicator.symbolicate(frames, scope), frames);
 	assert.equal(calls.length, 0);
+});
+
+// ── Server frames (RF-05) ─────────────────────────────────────────────────
+
+test("server frames: in-app .js frames are looked up by path suffix; dependency frames never", async () => {
+	const calls: SourceMapKey[] = [];
+	const symbolicator = new Symbolicator(async (key) => {
+		calls.push(key);
+		return key.suffix && key.filename === "/app/dist/server.js" ? BUILD_A.map : null;
+	});
+	const parsed = parseStackFrames(
+		[
+			"TypeError: Cannot read properties of undefined (reading 'total')",
+			"    at a (/app/dist/server.js:1:11)",
+			"    at b (file:///app/dist/server.js:1:51)",
+			"    at c (/app/node_modules/express/lib/router.js:1:91)",
+			"    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)",
+		].join("\n"),
+	);
+	const frames = await symbolicator.symbolicate(parsed, { ...scope, server: true });
+	assert.deepEqual(frames, [
+		{ function: "computeTotal", module: null, filename: RESOLVED[0], lineno: 12, colno: 5, inApp: true, resolved: true },
+		// No resolved caller to name it, and "b" is a mangled name.
+		{ function: null, module: null, filename: RESOLVED[1], lineno: 88, colno: 7, inApp: true, resolved: true },
+		parsed[2],
+		parsed[3],
+	]);
+	// file:// and plain paths are one key; express (node_modules) is never looked up.
+	assert.equal(calls.length, 1);
+	assert.deepEqual(calls[0], { orgId: "org", repositoryId: "repo", release: "r1", filename: "/app/dist/server.js", suffix: true });
+});
+
+test("server frames: a debug id from autter.debug_ids is used, even without a release", async () => {
+	const calls: SourceMapKey[] = [];
+	const symbolicator = new Symbolicator(fetcherFor({ "/app/dist/server.js": BUILD_A.map }, calls));
+	const frames = await symbolicator.symbolicate(
+		parseStackFrames("Error: x\n    at a (file:///app/dist/server.js:1:11)"),
+		{ ...scope, release: null, server: true, debugIds: { "file:///app/dist/server.js": "c0ffee00-0000-4000-8000-000000000002" } },
+	);
+	assert.equal(calls[0]?.debugId, "c0ffee00-0000-4000-8000-000000000002");
+	assert.equal(calls[0]?.filename, "/app/dist/server.js");
+	assert.equal(frames[0]!.resolved, true);
+	// Without one, and without a release, nothing is looked up.
+	calls.length = 0;
+	await symbolicator.symbolicate(parseStackFrames("Error: x\n    at a (/app/dist/server.js:1:11)"), { ...scope, release: null, server: true });
+	assert.equal(calls.length, 0);
+});
+
+test("server script paths: file URLs, Windows paths and bare Worker scripts", () => {
+	assert.equal(serverScriptPath("/app/dist/server.js"), "/app/dist/server.js");
+	assert.equal(serverScriptPath("file:///app/dist/index.mjs"), "/app/dist/index.mjs");
+	assert.equal(serverScriptPath("file:///C:/app/dist/index.mjs"), "/app/dist/index.mjs");
+	assert.equal(serverScriptPath("C:\\app\\dist\\index.cjs"), "/app/dist/index.cjs");
+	assert.equal(serverScriptPath("index.js"), "/index.js");
+	assert.equal(serverScriptPath("/var/task/.next/server/app/(shop)/[id]/page.js"), "/var/task/.next/server/app/(shop)/[id]/page.js");
+	// Same encoding as stored upload paths (sourceMapPath).
+	assert.equal(serverScriptPath("/app/my app/x.js"), "/app/my%20app/x.js");
+});
+
+test("an exact lookup and a suffix lookup of one path never share a cache entry", () => {
+	const key = { orgId: "o", repositoryId: "r", release: "1", filename: "/app/dist/server.js" };
+	assert.notEqual(SourceMapCache.keyOf(key), SourceMapCache.keyOf({ ...key, suffix: true }));
+	// A debug id names the bundle whatever the lookup kind.
+	assert.equal(
+		SourceMapCache.keyOf({ ...key, debugId: "c0ffee00-0000-4000-8000-000000000002" }),
+		SourceMapCache.keyOf({ ...key, debugId: "c0ffee00-0000-4000-8000-000000000002", suffix: true }),
+	);
 });
 
 // ── Function scopes (x_autter_scopes) ─────────────────────────────────────

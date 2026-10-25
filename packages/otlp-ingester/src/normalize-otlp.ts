@@ -7,6 +7,7 @@ import { extractLlmCall } from "./llm.js";
 import { BREADCRUMBS_ATTRIBUTE, breadcrumbsField } from "./breadcrumbs.js";
 import { dedupeTraceSignals, hasAutterKey, hasNextContext, type TraceSignal } from "./trace-dedupe.js";
 import { requestMembership, type RequestMembership } from "./request-spans.js";
+import { DEBUG_IDS_ATTRIBUTE, serverDebugIds, withoutDebugIdsAttribute } from "./source-maps.js";
 import { histogramLatency, mergeLatency, requestLatency, type LatencySamples } from "./latency.js";
 import {
 	asSeverity,
@@ -369,8 +370,11 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							statusCode,
 							traceId: span.traceId ?? null,
 							sessionId: null,
-							attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
-								...(handled ? { "autter.handled": true, ...(eventAttrs.has("autter.sampled") ? { "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) } : {}) }),
+							attributes: withoutDebugIdsAttribute(sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
+								...(handled ? { "autter.handled": true, ...(eventAttrs.has("autter.sampled") ? { "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) } : {}) })),
+							// Server SDKs (runtime-core errorAttributes): the debug ids of the bundles in the
+							// stack (RF-05), which locate their source maps.
+							...serverDebugIds(eventAttrs.get(DEBUG_IDS_ATTRIBUTE)),
 							occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 							// Event attributes first: one span can carry several
 							// exceptions, each with its own code.

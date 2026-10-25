@@ -1,0 +1,12 @@
+{
+  "name": "autter-runtime-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "vars": {
+    // Upstream Autter ingest. Override only for self-hosted ingesters.
+    "AUTTER_INGEST_URL": "https://otlp.autter.dev/v1/browser"
+  }
+}

@@ -127,7 +127,28 @@ export const POST = createBrowserRelayFetchHandler({
 ```
 
 Options: `endpoint` (default `https://otlp.autter.dev`), `maxBodyBytes`
-(default 64 KB), `onError`.
+(default 64 KB), `perIpRateLimit` (default 120 requests a minute per client;
+`false` when a WAF already limits the route), `trustProxy`, `redact`,
+`compatCheck`, `onError`.
+
+**Rate-limit key and `trustProxy`.** The relay route is public, so it limits
+each client. By default it never trusts the `X-Forwarded-For` header, because
+any caller can set it to a fresh value on every request and walk past the
+limit. Without it, the Node handler keys the real socket peer, and the fetch
+handler (which has no peer address) keys one shared bucket for the whole
+route. Behind a load balancer, CDN or platform proxy that overwrites
+`X-Forwarded-For`, every request arrives from the proxy, so set
+`trustProxy: true` to key the real client instead:
+
+```ts
+createBrowserRelayFetchHandler({
+  apiKey: process.env.AUTTER_RUNTIME_KEY!,
+  trustProxy: true, // only behind a proxy you control that overwrites X-Forwarded-For
+});
+```
+
+Only the boolean `true` turns it on: a string such as `"false"` from an
+environment variable keeps the safe default.
 
 ## 2. Server tracker
 

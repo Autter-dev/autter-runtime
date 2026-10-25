@@ -428,6 +428,10 @@ clickhouse-client --password dev`.
       doesn't cost you debugging context.
 - [ ] The relay route keeps its built-in per-IP rate limit (or your WAF
       covers it: `perIpRateLimit: false`).
+- [ ] Behind a load balancer, CDN or platform proxy that overwrites
+      `X-Forwarded-For`, the relay sets `trustProxy: true`, so the limit
+      keys each client instead of the proxy (or, in fetch runtimes, one
+      shared bucket for the whole route).
 - [ ] Direct browser ingest: your CSP includes
       `connect-src https://your-ingester…`, and you accept that ad-blockers
       may drop some events (the relay avoids this).

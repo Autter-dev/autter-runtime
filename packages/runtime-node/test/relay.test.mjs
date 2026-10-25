@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
 	sanitizeBrowserPayload,
 	createBrowserRelayFetchHandler,
+	createBrowserRelayHandler,
 } from "../dist/index.js";
 
 function sanitizeContext(context) {
@@ -252,4 +253,94 @@ test("the relay keeps valid debug ids, query-stripped, and drops the rest", () =
 	});
 	assert.deepEqual(payload.events[0].debugIds, { "https://app.test/assets/app.js": id.toLowerCase() });
 	assert.equal("debugIds" in payload.events[1], false);
+});
+
+// ── Rate-limit key source (trustProxy) ─────────────────────────────────────
+
+const xffRequest = (ip) =>
+	new Request("http://localhost/relay", {
+		method: "POST",
+		headers: { "x-forwarded-for": ip },
+		body: "{",
+	});
+
+test("relay: spoofed X-Forwarded-For cannot bypass the rate limit by default", async () => {
+	const handler = createBrowserRelayFetchHandler({
+		apiKey: "autter_rt_test",
+		perIpRateLimit: 1,
+	});
+	const first = await handler(xffRequest("1.1.1.1"));
+	const second = await handler(xffRequest("2.2.2.2"));
+	assert.equal(first.status, 400); // passed the limit, then invalid JSON
+	assert.equal(second.status, 429); // shared bucket: a fresh spoofed IP is not a fresh window
+});
+
+test("relay: a truthy but non-true trustProxy stays on the safe shared bucket", async () => {
+	const handler = createBrowserRelayFetchHandler({
+		apiKey: "autter_rt_test",
+		perIpRateLimit: 1,
+		// a common config slip: an env string "false" is truthy but must NOT
+		// enable forwarded-header trust
+		trustProxy: "false",
+	});
+	const first = await handler(xffRequest("1.1.1.1"));
+	const second = await handler(xffRequest("2.2.2.2"));
+	assert.equal(first.status, 400);
+	assert.equal(second.status, 429);
+});
+
+test("relay: trustProxy: true keys distinct X-Forwarded-For clients apart", async () => {
+	const handler = createBrowserRelayFetchHandler({
+		apiKey: "autter_rt_test",
+		perIpRateLimit: 1,
+		trustProxy: true,
+	});
+	const a = await handler(xffRequest("1.1.1.1"));
+	const b = await handler(xffRequest("2.2.2.2"));
+	const a2 = await handler(xffRequest("1.1.1.1"));
+	assert.notEqual(a.status, 429);
+	assert.notEqual(b.status, 429);
+	assert.equal(a2.status, 429); // the same client still hits its own window
+});
+
+function nodeCall(handler, { xff, peer }) {
+	return new Promise((resolve) => {
+		const req = {
+			method: "POST",
+			headers: xff ? { "x-forwarded-for": xff } : {},
+			socket: { remoteAddress: peer },
+			body: "{",
+		};
+		const res = {
+			statusCode: 0,
+			setHeader() {},
+			end() {
+				resolve(this.statusCode);
+			},
+		};
+		handler(req, res);
+	});
+}
+
+test("relay (node): keys the socket peer, not a spoofed X-Forwarded-For, by default", async () => {
+	const handler = createBrowserRelayHandler({
+		apiKey: "autter_rt_test",
+		perIpRateLimit: 1,
+	});
+	assert.equal(await nodeCall(handler, { xff: "1.1.1.1", peer: "10.0.0.5" }), 400);
+	// same peer, new spoofed header: still the same window
+	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "10.0.0.5" }), 429);
+	// a different real peer gets its own window
+	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "10.0.0.6" }), 400);
+});
+
+test("relay (node): trustProxy: true keys the forwarded client behind a proxy", async () => {
+	const handler = createBrowserRelayHandler({
+		apiKey: "autter_rt_test",
+		perIpRateLimit: 1,
+		trustProxy: true,
+	});
+	assert.equal(await nodeCall(handler, { xff: "1.1.1.1", peer: "10.0.0.5" }), 400);
+	assert.equal(await nodeCall(handler, { xff: "2.2.2.2", peer: "10.0.0.5" }), 400);
+	assert.equal(await nodeCall(handler, { xff: "1.1.1.1", peer: "10.0.0.5" }), 429);
 });

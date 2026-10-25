@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- The browser relay no longer trusts `X-Forwarded-For` for its per-IP rate limit unless you opt in (`runtime-node`). Any caller could set that header to a new value on each request and get a fresh window every time, driving unbounded parsing and forwarding under your ingest key. New option `trustProxy` (only the boolean `true` enables it). **Behaviour change:** without it, the Node handler keys the real socket peer and the fetch handler keys one shared bucket for the route, so a relay behind a load balancer, CDN or platform proxy shares one 120-a-minute window until it sets `trustProxy: true`. Ported from the relay hardening by @rajeshaipython-stack that followed #20 and never reached `main`; its context redaction and detached cancel already reached `main` through #26 and #20, with their tests.
+
 ## [1.10.0] - 2026-10-24
 
 Packages: `otlp-ingester` 1.10.0, `runtime-edge` 1.3.0; `adapters/python` (copied, not published); `runtime-browser` 1.7.0, `runtime-node` 1.8.0, `runtime-next` 1.8.0 (its `/edge` entry picks up `runtime-edge` 1.3.0 through `^1.2.0`) and `runtime-cli` 1.2.0 are unchanged. Compat feature `edge_request_counts`. Request counts for services the error rate was wrong for: edge functions had errors and no requests, and Python services counted only the requests head sampling kept while every error was retained, so their error rates read about 1/sampleRate too high. Any deploy order works: an ingester before this ignores the new edge attributes (edge requests stay uncounted, as before), an older `runtime-edge` sends no mark (its summaries stay uncounted), and the Python opt-in needs only an ingester from 1.8.0.

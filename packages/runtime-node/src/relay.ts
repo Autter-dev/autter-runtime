@@ -31,6 +31,17 @@ export interface RelayOptions {
 	 * `false` to disable (e.g. when a WAF already rate-limits).
 	 */
 	perIpRateLimit?: number | false;
+	/**
+	 * Trust the client-supplied `X-Forwarded-For` header when keying the per-IP
+	 * rate limit. Off by default: the header is spoofable, so a caller could
+	 * rotate it to bypass the window and drive unbounded parsing/forwarding
+	 * under the server's ingest key. Enable ONLY behind a proxy/CDN you control
+	 * that overwrites the header. When off, the fetch handler keys a single
+	 * shared bucket, and the Node handler keys the real socket peer address.
+	 * Only a strict boolean `true` enables it — a truthy string such as the
+	 * common `process.env.TRUST_PROXY === "false"` slip stays on the safe path.
+	 */
+	trustProxy?: boolean;
 	/** Called when the async forward fails (default: console.warn). */
 	onError?: (err: unknown) => void;
 	/**
@@ -411,8 +422,15 @@ export function createBrowserRelayFetchHandler(
 			return new Response(null, { status: 405 });
 		}
 		if (limiter) {
+			// Only honor X-Forwarded-For behind an explicitly trusted proxy —
+			// otherwise a caller could spoof a fresh IP per request to bypass
+			// the window. With no trusted peer source in a fetch runtime, fall
+			// back to one shared bucket (a conservative global limit).
 			const ip =
-				firstForwardedFor(request.headers.get("x-forwarded-for")) || "unknown";
+				opts.trustProxy === true
+					? firstForwardedFor(request.headers.get("x-forwarded-for")) ||
+						"unknown"
+					: "shared";
 			if (!limiter.allow(ip)) {
 				return new Response(JSON.stringify({ error: "rate limit exceeded" }), {
 					status: 429,
@@ -501,8 +519,12 @@ export function createBrowserRelayHandler(
 			return;
 		}
 		if (limiter) {
+			// Prefer the real socket peer; only trust X-Forwarded-For when the
+			// caller has explicitly opted into a trusted-proxy deployment.
 			const ip =
-				firstForwardedFor(req.headers["x-forwarded-for"]) ||
+				(opts.trustProxy === true
+					? firstForwardedFor(req.headers["x-forwarded-for"])
+					: "") ||
 				req.socket?.remoteAddress ||
 				"unknown";
 			if (!limiter.allow(ip)) {

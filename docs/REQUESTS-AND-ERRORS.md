@@ -84,9 +84,35 @@ runtimeContext.set({ cart: { items: 3 }, plan: "pro" });   // deep-merged, redac
 runtimeContext.info("Applied coupon", { coupon: "SPRING" });
 runtimeContext.warn("Price service slow", { ms: 900 });
 runtimeContext.error(err);                                  // logs + attaches code/why/fix
+runtimeContext.degraded(err, "Pricing service down, used cached prices"); // a deliberate fallback
 runtimeContext.outcome("degraded", "Used cached prices");
 runtimeContext.requestId;   // also .id (operation id)
 ```
+
+### Caught errors and deliberate fallbacks
+
+An `Error` the app catches and logs is recorded as an occurrence on its own,
+without any `captureException` call. An `Error` passed to `console.error`,
+pino, winston, bunyan or `runtimeLogger.error` becomes an occurrence at
+`error` severity, with the log line as context (`autter.log.message`) and the
+error's stack, marked `autter.handled` / `autter.handling: "caught"`. Log
+lines with no error object are left alone, and an error also passed to
+`captureException` in the same tick is reported once. A caught error never
+fails the request it happened in, and the ingester keeps handled occurrences
+out of `error_count` — they are issues to see, not failures in the rate. A
+burst limit per error kind (type + throw site) keeps ten at once, then one
+every ten seconds; the ones left out are counted (`runtime_ingest_drops`,
+reason `caught_limited`). Turn it off with `captureLoggedErrors: false`, or a
+single source off with `{ console: false }`, on `initAutterServer` /
+`initAutterLogging`.
+
+`runtimeContext.degraded(err, reason)` is the one line for "I meant to ignore
+this": the app caught `err` and chose to continue on a fallback. It is
+recorded at `warning` severity, marked `autter.handling: "deliberate"` with
+the reason (grouped by its code when the error is coded), and never pages
+anyone. The current request or operation ends `degraded` unless it already
+failed or set its own outcome — so the issue page tells a crash, a caught
+error and a deliberate fallback apart.
 
 ### Inline messages
 
@@ -341,8 +367,12 @@ export default withAutter(
 
 Zero dependencies, fetch-only, no AsyncLocalStorage — `rt` is the request
 context (`set`, `outcome`, `info`, `warn`, `error`, `requestId`,
-`captureException`). Same request summary, request-id and coded-error semantics
-as Node; exceptions are promoted log records. Delivery uses `ctx.waitUntil`
+`captureException`, `degraded`). Same request summary, request-id and
+coded-error semantics as Node; exceptions are promoted log records. Caught
+errors count here too: an `Error` passed to `console.error` or `rt.error`
+becomes a handled occurrence (`captureLoggedErrors: false` to opt out), and
+`rt.degraded(err, reason)` (or the module-level `runtimeContext.degraded`)
+marks a deliberate fallback that ends the request `degraded` without paging. Delivery uses `ctx.waitUntil`
 (Workers) or `event.waitUntil` (Next middleware) and needs a **server** key —
 never ship it to a browser. Next.js `middleware.ts` imports it as
 `@autter/runtime-next/edge`. See [packages/runtime-edge](../packages/runtime-edge/README.md).

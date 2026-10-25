@@ -230,6 +230,44 @@ export const POST = withRuntimeRequest(async (request) => {
 }, { name: "checkout" });
 ```
 
+`withAutter(handler)` is `withRuntimeRequest` that also **answers** a thrown
+error: it records it with its stack and replies with the error's own status,
+so a thrown 4xx stays a 4xx (not an anonymous 500), while Next's `redirect()`
+and `notFound()` pass through untouched and are never reported.
+
+```ts
+// app/api/orders/[id]/route.ts
+import { withAutter, RuntimeError } from "@autter/runtime-next";
+
+export const GET = withAutter(async (request, { params }) => {
+  const order = await findOrder(params.id);
+  if (!order) throw new RuntimeError({ status: 404, code: "orders.not_found", message: "No such order" });
+  return Response.json(order);   // a thrown 404 is recorded and answered as 404
+});
+```
+
+Next.js error pages report through Autter too (RF-04). In a client
+`app/error.tsx`, call `useAutterErrorReport(error)`; for
+`app/global-error.tsx`, export the ready `AutterGlobalError`, or call
+`reportNextError(error, { boundary: "global-error" })`. Each reports once per
+error, with the boundary and Next's `digest`, through the browser tracker
+(`@autter/runtime-next/client`):
+
+```tsx
+"use client";
+import { useAutterErrorReport } from "@autter/runtime-next/client";
+export default function Error({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  useAutterErrorReport(error);
+  return <button onClick={reset}>Try again</button>;
+}
+```
+
+Caught errors count on the server (`console.error`, pino/winston/bunyan,
+`runtimeLogger.error`) and in the browser (`console.error`) by default, and
+`runtimeContext.degraded(err, reason)` marks a deliberate fallback — see the
+[runtime-node](../runtime-node) and [runtime-browser](../runtime-browser)
+READMEs.
+
 Everything new in `@autter/runtime-node` 1.5.0 (`runtimeContext`,
 `RuntimeError`, `defineRuntimeErrors`, `runInBackground`, `initAutterLogging`,
 enrichers, sinks, …) is re-exported from `@autter/runtime-next` and

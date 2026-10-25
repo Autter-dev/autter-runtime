@@ -308,6 +308,42 @@ settings (drop or sample by error type, message, service, environment,
 route, release or source; ingester 1.9.0). The ingester also collapses a
 looping error into one sample a minute with an exact count.
 
+### Caught errors and deliberate fallbacks
+
+Errors you catch and log count on their own — no `captureException` needed.
+An `Error` passed to `console.error`, pino, winston, bunyan or
+`runtimeLogger.error` becomes an occurrence at `error` severity, with the log
+line as context and the error's stack, marked
+`autter.handling: "caught"`. A log line with no error object is untouched, and
+an error you also pass to `captureException` in the same tick is reported
+once. A caught error never fails the request it happened in, and handled
+occurrences stay out of your error rate — they are issues to see, not
+failures. A burst limit per error kind keeps ten at once, then one every ten
+seconds; the ones left out are counted.
+
+```ts
+initAutterServer({ ... });                 // on by default
+initAutterServer({ ..., captureLoggedErrors: false });        // off
+initAutterServer({ ..., captureLoggedErrors: { console: false } }); // keep loggers, not console
+```
+
+When you mean to ignore an error — a fallback you chose — say so in one line:
+
+```ts
+try {
+  prices = await pricingService.get();
+} catch (err) {
+  runtimeContext.degraded(err, "pricing service down, using cached prices");
+  prices = cached;
+}
+```
+
+`runtimeContext.degraded(err, reason)` records the error at `warning`
+severity, marked `autter.handling: "deliberate"` with the reason (grouped by
+its code when the error is coded), and never pages anyone. The current
+request or operation ends `degraded` unless it already failed or set its own
+outcome — so a crash, a caught error and a deliberate fallback are told apart.
+
 ### Unhandled promise rejections
 
 Recorded as errors (severity `error`, `autter.unhandled_rejection: true`, not

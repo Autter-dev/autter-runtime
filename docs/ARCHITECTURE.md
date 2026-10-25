@@ -57,6 +57,7 @@ name its own.
 | `runtime_spans` | MergeTree | `(org_id, repository_id, trace_id, started_at)` | 7 d |
 | `runtime_logs` | ReplacingMergeTree | `(org_id, repository_id, occurred_at, event_id)` | `LOG_TTL_DAYS` (14 d) |
 | `runtime_request_1m` | AggregatingMergeTree (fed by `runtime_request_1m_mv`) | `(org_id, repository_id, service, environment, route, method, bucket_at)` | 90 d |
+| `runtime_route_latency_1m` | AggregatingMergeTree (fed by `runtime_route_latency_1m_mv` from the Null `runtime_route_latency_input`) | `(org_id, repository_id, service, environment, release, route, bucket_at)` | 90 d (`METRICS_TTL_DAYS`) |
 | `runtime_metrics_1m` | SummingMergeTree | `(org_id, repository_id, service, environment, release, route, bucket_at)` | 90 d |
 | `runtime_latency_histograms` | ReplacingMergeTree | `(org_id, repository_id, service, environment, bucket_at, point_id)` | 90 d (`METRICS_TTL_DAYS`) |
 | `runtime_memory_samples` | ReplacingMergeTree | `(org_id, repository_id, service, environment, instance_id, metric, observed_at)` | 14 d |
@@ -145,8 +146,15 @@ promotes anyway. Records without a trace id are always promoted.
 
 `runtime_metrics_1m` is pre-aggregated per minute; readers must
 `SUM(...) GROUP BY` because SummingMergeTree collapses rows at merge time,
-eventually. Percentiles come from sampled spans at query time — the rollup
-table stores only counts and duration sums.
+eventually. `runtime_metrics_1m` itself stores only counts and duration sums;
+per-route percentiles come from `runtime_route_latency_1m` (IP-02), keyed the
+same way and fed, from the same feeds, with the latency samples behind each
+point's `duration_sum_ms` (a request's own duration, or a delta histogram's
+buckets spread evenly). It holds a mergeable `quantilesTDigestWeighted` state,
+so `quantilesTDigestWeightedMerge(0.5, 0.95, 0.99)(duration_quantiles)` over
+any window and grouping gives p50/p95/p99 in ms. Sampled spans
+(`runtime_spans`) remain the source for trace-level breakdowns. Like the
+request rollup, an exporter retry after a lost 2xx counts twice.
 
 These tables also feed the dashboard's **slow-process monitor** (in the
 Autter backend, not this repo): it flags processes that are slow AND
@@ -269,6 +277,7 @@ rejection finds nothing refused in the last hour).
 | `sink_rejected` | unforwarded | 0 | the sink consumer answered a permanent 4xx |
 | `sink_gave_up` | unforwarded | 0 | `SINK_MAX_ATTEMPTS` deliveries failed |
 | `collapsed` | collapsed | 200/202 | a looping error past `LOOP_COLLAPSE_AFTER` occurrences in its minute (counted on the sample when the minute's sample is stored) |
+| `caught_limited` | collapsed | 200 | caught errors / deliberate fallbacks an SDK's burst limit left out, from the `autter.caught.dropped` its sent records carry |
 | `suppressed` | suppressed | 200/202 | a suppression rule's `drop`, or a `sample` rule's sampled-out share |
 
 `route` is the ingest route (`/v1/traces`, `/v1/logs`, `/v1/metrics`,

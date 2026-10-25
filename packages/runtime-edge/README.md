@@ -83,6 +83,7 @@ Without `waitUntil`, delivery is fire-and-forget (the process stays up).
 | `rt.error(err, attrs?)` | Like `warn` at error level; attaches the error's code/why/fix to the summary |
 | `rt.captureException(err, attrs?)` | Report an exception — becomes an occurrence (`autter.capture.mode = "log"`). `attrs.fingerprint` (a string or up to 10 strings) groups every error carrying it into one issue (ingester 1.6.0+) |
 | `rt.requestId` | Honoured `x-request-id` (`^[\w.-]{8,128}$`) or a fresh UUID; echoed in the response header |
+| `rt.degraded(err, reason)` | A deliberate fallback (RF-02): a `warning`-severity occurrence marked `autter.handling: "deliberate"`, never paging; the request ends `degraded` |
 
 Errors thrown from the handler are captured, recorded on the summary and
 rethrown — or answered as `{ error: { message, code?, why?, fix?, link?,
@@ -108,6 +109,7 @@ then an `expected` coded error → `degraded`, a thrown error or status ≥ 500 
 | `sampleRate` | `1` | Share of `rt.captureException` errors reported (1.2.0). An error thrown out of the handler, and `captureEdgeException`, are never sampled out. The request summary still records the failure |
 | `countRequests` | `true` | Count each request from its summary: request and failed-request counts, release health (ingester 1.10.0+; older ones ignore it). Every record carries `autter.request.counted_by = "summary"`. Set `false` when another sender already counts the same requests under this service name (middleware reporting as the Node server's service) |
 | `ignoreErrors` | `[]` | Errors never reported as issues (1.2.0): a string matches when the type or message contains it, a RegExp is tested against the type, the message and `"<type>: <message>"`. Also applies to `captureEdgeException` |
+| `captureLoggedErrors` | `true` | Caught errors count (RF-01): an `Error` passed to `console.error` or `rt.error` becomes a handled occurrence with the log line as context, never failing the request. `false`, or `{ console: false }` to keep `rt.error` only |
 
 Also exported: `RuntimeError`, `defineRuntimeErrors`, `isRuntimeErrorLike`,
 `toClientError`, `CODE_PATTERN` — the same coded-error API as

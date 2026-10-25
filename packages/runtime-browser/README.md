@@ -12,7 +12,11 @@ hidden origin. Use a stable, non-sensitive
 `data-autter-action="send-email"` attribute for a useful action name; otherwise
 only the element type is recorded. Set `captureActions: false` to disable this
 context. Set `captureNetworkFailures: false` or `captureTimings: false` to
-disable either observer. Production browser fixes
+disable either observer. An `Error` passed to `console.error` is captured as a
+caught exception with the rest of the line as context (on by default; an error
+already sent via `captureException`, e.g. from an error boundary, is not sent
+twice) — set `captureLoggedErrors: false` to leave `console.error` untouched.
+Production browser fixes
 use source maps uploaded by CI. From 1.6.0, with `@autter/runtime-cli`, exceptions
 also carry `debugIds` for the scripts in their stack, read from the
 `globalThis._autterDebugIds` registry its injected snippet fills, so maps match

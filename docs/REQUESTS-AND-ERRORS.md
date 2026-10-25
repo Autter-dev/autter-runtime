@@ -159,7 +159,9 @@ same code). Route and message remain facets of the issue.
 
 Fields: `message` (client-safe), `status`, `expected`, `why` (≤ 1000 chars),
 `fix` (≤ 1000), `link` (≤ 500). Per throw: `cause` (chains become
-`exception.cause.N.type|message|code`, N ≤ 5), `internal` (debug payload,
+`exception.cause.N.type|message|code`, N ≤ 5, plus each cause's stack as
+`exception.cause.N.stacktrace` on occurrence records, so a wrapped error
+groups with its root cause), `internal` (debug payload,
 redacted and attached to the **span only** as `autter.error.internal`; never in
 logs, summaries or client responses; not enumerable, so `JSON.stringify` and
 loggers skip it), and `message` to override the catalog text.
@@ -399,6 +401,8 @@ measures every request it serves).
 | `autter.error.code` / `.why` / `.fix` / `.link` / `.status` / `.expected` | span, exception event, summaries, error records |
 | `autter.error.internal` | span only (redacted JSON) |
 | `exception.cause.N.type` / `.message` / `.code` | exception event, summaries, error records |
+| `exception.cause.N.stacktrace` | exception event, error records (not summaries): the cause's own stack, for the `cause-v1` identity |
+| `autter.debug_ids` | exception event, error records (not summaries): JSON object of script path → debug id for the injected bundles in the exception's and its causes' stacks, so the ingester finds their source maps |
 | `autter.capture.mode = "log"` | promoted error records (logger-only, edge) |
 | `autter.request.counted_by = "summary"` | every record of an edge request counted from its summary |
 | `autter.request.error_reported` | counted edge summaries whose request reported an error |

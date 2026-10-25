@@ -1,27 +1,34 @@
 # Readable stack traces: source maps and debug ids
 
-Production JavaScript is minified, so a browser stack trace points at
-`/assets/index-4f3c.js:1:58213`. Upload your build's source maps and Autter
+Production JavaScript is minified or bundled, so a browser stack trace points
+at `/assets/index-4f3c.js:1:58213` and a bundled backend's at
+`/app/dist/server.js:1:90417`. Upload your build's source maps and Autter
 resolves each frame to the original file, line and function before it groups
-the error and prepares a fix.
+the error and prepares a fix, and shows the lines of your code around each
+frame on the issue.
 
-`@autter/runtime-cli` does this for you:
+`@autter/runtime-cli` does this for you, for browser bundles and for server
+bundles alike (tsup, esbuild, webpack and Next.js server output, Vite SSR; see
+[Server bundles](#server-bundles)):
 
 1. **Inject.** Every `.js`, `.mjs` and `.cjs` bundle that has a source map gets
    a *debug id*: a UUID derived from the sha256 of the bundle's bytes, so the
    same build output always gets the same id. The CLI appends a
    `//# debugId=<id>` comment, adds a one-line snippet that registers the id
-   with the browser SDK, and writes `"debugId"` into the `.map`.
+   with the SDK running the bundle, and writes `"debugId"` into the `.map`.
 2. **Upload.** Every map goes to the ingester's `POST /v1/sourcemaps`,
    gzipped, with an upload or server key, its debug id, the release, the path the
-   bundle is served from and the bundle's function scopes (see **Function
-   names** under [How the pieces fit](#how-the-pieces-fit)). Maps the
-   ingester already has are skipped.
-3. **Match.** `@autter/runtime-browser` 1.6.0+ sends, with each exception, the
-   debug ids of the scripts in its stack. The ingester finds the map by debug
-   id first, and by release + path when there is none. A debug id names the
-   exact bytes that ran, so maps match even when the `release` your SDK reports
-   differs from the one you uploaded under (or is missing).
+   bundle is served from, the bundle's function scopes (see **Function
+   names** under [How the pieces fit](#how-the-pieces-fit)) and the original
+   source of your own files (`sourcesContent`; see **Source contents**).
+   Maps the ingester already has are skipped.
+3. **Match.** `@autter/runtime-browser` 1.6.0+, and the Node and edge SDKs
+   (`autter.debug_ids`), send with each exception the debug ids of the bundles
+   in its stack. The ingester finds the map by debug id first, and by release +
+   path when there is none (for a server bundle, the release's map stored
+   under the longest tail of the path the process ran it from). A debug id
+   names the exact bytes that ran, so maps match even when the `release` your
+   SDK reports differs from the one you uploaded under (or is missing).
 
 Debug ids need ingester 1.6.0+ (compat feature `source_map_debug_ids`,
 migration `0017-source-maps-debug-id`). Older ingesters still accept `.js`
@@ -119,7 +126,9 @@ be deployed:
 Files copied unchanged from `public/` (or `static/`, `src/`), Next.js build
 manifests and polyfills, and service workers are skipped; `--ignore <glob>` skips more.
 `--allow-maps` reports leftover maps without failing, for a step that runs
-before they are removed. It exits `1` on any failure, with the reason per
+before they are removed. `--server` checks server output (`dist/` of a tsup or
+esbuild build, `.next/server`): browsers never load it, so leftover maps are a
+note there, and Next.js server manifests are skipped. It exits `1` on any failure, with the reason per
 file, and `--json` prints `{ ok, bundles, maps, upload, failures }`.
 
 ## Pick an integration
@@ -162,6 +171,12 @@ yourself (`build.sourcemap`, `output.sourcemap`, a webpack `devtool`,
 (upload later with the CLI) or `deleteAfterUpload: false`, the generated maps
 are kept and the plugin warns that they must not be deployed.
 
+Every plugin also handles server bundles (Vite SSR and server environments,
+webpack Node targets, Next.js `.next/server`; see
+[Server bundles](#server-bundles)) and sends your own files' source with each
+map. `serverBundles: false` leaves server output alone; `sourcesContent:
+false` uploads maps without source.
+
 The release defaults to the commit being built: `GITHUB_SHA`,
 `VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `GIT_SHA`, then
 `git rev-parse HEAD`. Releases may contain letters, digits, `.`, `_` and `-`.
@@ -181,9 +196,11 @@ export default defineConfig({
 The plugin sets `build.sourcemap: "hidden"` when you haven't configured maps
 (maps are written, but bundles don't reference them), injects debug ids into
 every chunk after the bundle is written, uploads under Vite's `base`, and then
-deletes the maps it created so they are not deployed. SSR builds get no maps
-from it; Vite 6 server environments are not uploaded, and maps it turned on
-for them are deleted. With plain Rollup, use the same import (or
+deletes the maps it created so they are not deployed. SSR builds and Vite 6
+server environments are server bundles: they get the same, stored under their
+output directory's path in the project (`/dist/server/`) instead of `base`
+(see [Server bundles](#server-bundles)); `serverBundles: false` leaves them
+alone. With plain Rollup, use the same import (or
 `@autter/runtime-cli/rollup`); it sets `output.sourcemap: "hidden"` when unset.
 
 ### webpack
@@ -202,7 +219,9 @@ Production builds without a `devtool` get `hidden-source-map`. After emit, the
 plugin injects every emitted JS asset and uploads it under
 `output.publicPath` (`/` when it is `"auto"`), then deletes every map asset
 the build emitted when the devtool was its own. Development builds are left
-alone.
+alone. A build for a Node target (`target: "node"`, `"node18"`,
+`"async-node"`, `"electron-main"`) is a server bundle, stored under its
+`output.path` relative to the project instead of `output.publicPath`.
 
 ### Next.js
 
@@ -221,11 +240,57 @@ runs in `compiler.runAfterProductionCompile`, so it covers webpack and
 Turbopack builds alike (Turbopack needs `productionBrowserSourceMaps`, which the
 wrapper turns on, then deletes every map under `.next/static` with the
 `sourceMappingURL` comments that name them).
-Older versions use the webpack plugin. Server bundles are never touched. If
-you already set `productionBrowserSourceMaps: true`, your maps stay public and
-on disk. The wrapper lives in `@autter/runtime-cli` rather than
-`@autter/runtime-next` so build-time code never becomes a runtime dependency of
-your app.
+Older versions use the webpack plugin. If you already set
+`productionBrowserSourceMaps: true`, your maps stay public and on disk.
+
+The server output (`.next/server`, Node.js and edge runtimes) gets the same:
+hidden maps for webpack server compilations (and, on 15.4.1+,
+`experimental.serverSourceMaps` for Turbopack), debug ids in every server
+chunk that has a map, and an upload under `/.next/server/…` (the server
+directory's path in the project), which the ingester matches against
+`/var/task/.next/server/app/page.js`, `/app/.next/server/…` in a container, or
+a standalone build. The maps the wrapper turned on are deleted after the
+upload step; a server `devtool` your own `webpack()` function sets, or an
+`experimental.serverSourceMaps` you set, is yours: uploaded, never deleted.
+`serverBundles: false` leaves the server output and those settings alone.
+The wrapper lives in `@autter/runtime-cli` rather than `@autter/runtime-next`
+so build-time code never becomes a runtime dependency of your app.
+
+### Server bundles
+
+Node and edge code you bundle (tsup, esbuild, webpack, Rollup, Vite SSR,
+Next.js server output, a Cloudflare Worker) gets readable stack traces the
+same way as browser code: inject, upload, and the ingester resolves Node and
+edge frames at ingest, before it groups the error.
+
+```bash
+# tsup / esbuild: build with maps (tsup: sourcemap: true; esbuild: --sourcemap)
+npx autter-runtime sourcemaps inject dist
+AUTTER_RUNTIME_KEY=autter_rtu_… npx autter-runtime sourcemaps upload dist --url-prefix /dist/
+npx autter-runtime sourcemaps verify dist --server
+```
+
+- **Matching.** The Node and edge SDKs send the debug ids of the bundles in
+  each exception's stack (`autter.debug_ids`), so a map is found whatever path
+  the host runs the bundle from. Without one (an older SDK, a plain
+  OpenTelemetry SDK), the event's release (`service.version`) must equal the
+  upload release, and the ingester takes the release's map whose stored path
+  is the longest tail of the frame's path: `/dist/server.js` matches
+  `/app/dist/server.js`, `/srv/app/dist/server.js` and
+  `C:\app\dist\server.js`. So `--url-prefix` for server output is any tail of
+  the deployed path (the plugins use the output directory's path in the
+  project, such as `/dist/server/`); `/` works when the bundle's path in the
+  directory is unique. Keep server and browser maps of one release under
+  different paths (`/dist/` vs `/assets/`): one release stores one map per path.
+- **Which frames.** Only in-app `.js`/`.mjs`/`.cjs` frames are looked up:
+  `node_modules/` (unbundled dependencies) and `node:` frames never belong to
+  an upload. Frames already readable (an unbundled app, or Node's own
+  `--enable-source-maps`) are left as they are when no map was uploaded.
+- **Leftover maps.** Server output is not served to browsers, so
+  `verify --server` reports `.map` files there as a note instead of a failure.
+- **Grouping.** A server issue's frames-v3 identity hashes the frames as
+  resolved, so the first upload of maps for an existing bundled service
+  starts new issues for its errors (once), exactly as it did for browser code.
 
 ### CLI
 
@@ -243,7 +308,9 @@ npx autter-runtime sourcemaps verify dist
 | `--endpoint <url>` | Ingester base URL (default `$AUTTER_ENDPOINT`, `$AUTTER_RUNTIME_ENDPOINT`, `$OTEL_EXPORTER_OTLP_ENDPOINT`, then `https://otlp.autter.dev`) |
 | `--concurrency <n>` | Parallel uploads (default 8) |
 | `--delete-after-upload` | Delete each `.map` (and its `sourceMappingURL` comment) once uploaded |
+| `--no-sources-content` | Upload maps without your files' original source (issues then show no lines around a frame) |
 | `--best-effort` | Never fail (for build scripts): no key or a failed upload is reported and exits `0`; with `--delete-after-upload`, every `.map` under the directory is then deleted anyway |
+| `--server` (verify) | The directory is server output: leftover `.map` files are a note, not a failure |
 | `--dry-run` | Show what would change or be uploaded; write and send nothing |
 | `--json` | Machine-readable output |
 
@@ -292,19 +359,35 @@ only gains the snippet.
 ;!function(){try{var g=…globalThis…,s=(new g.Error).stack;s&&((g._autterDebugIds=g._autterDebugIds||{})[s]="<id>")}catch(e){}}();
 ```
 
-The stack's first frame names the URL the browser loaded the bundle from;
-`@autter/runtime-browser` maps that URL to the id and attaches
-`debugIds: { "<script URL>": "<id>" }` (query and hash removed) to exceptions,
-only for scripts that appear in the exception's stack. The snippet goes on the
+The stack's first frame names the URL the browser loaded the bundle from, or
+the file Node or the edge runtime ran; `@autter/runtime-browser` maps that URL
+to the id and attaches `debugIds: { "<script URL>": "<id>" }` (query and hash
+removed) to exceptions, and the Node and edge SDKs attach
+`autter.debug_ids` (`{ "<script path as in the stack>": "<id>" }`, a JSON
+string, on the exception event or promoted log record), only for bundles that
+appear in the exception's stack or its causes' stacks. The snippet goes on the
 first line, so a bundle that throws while loading is still identified; the
 map's `mappings` are shifted down one line to match. Bundles that start with a
 directive (`"use strict"`, `"use client"`) get it appended instead, which moves
 nothing. Running inject again changes nothing.
 
+**Source contents.** Each map carries the original source of your own files
+(`sourcesContent`, when the bundler wrote it; esbuild, tsup, Vite and webpack
+do by default), so an issue shows the line of each in-app frame with up to 5
+lines on each side. Only in-app sources are sent and kept: a source the map's
+`ignoreList` names, or whose path is under `node_modules/`, `/.pnpm/`,
+`/vendor/` and the like, gets `null`. Contents are kept whole (never cut, so
+line numbers stay right), smallest first, while the map fits the 32 MiB limit
+in UTF-8 bytes; a file that does not fit gets `null`. The CLI and the ingester
+apply exactly the same rule, so the content hash the CLI computes is the one
+stored. The lines attached to an occurrence are cut to 300 characters and
+scrubbed like stacks (keys, tokens, emails). `--no-sources-content` (or
+`sourcesContent: false` in a plugin) uploads maps without it, as before.
+
 **Storage.** `runtime_source_maps` (ReplacingMergeTree, 30-day TTL) keeps one
 map per org, repository, release and path, now with `debug_id` and
-`content_hash`, in a ZSTD-compressed `String` column. `sourcesContent` is
-stripped by the CLI and again by the ingester. A stored map may be up to
+`content_hash`, in a ZSTD-compressed `String` column, with the in-app
+`sourcesContent` described above. A stored map may be up to
 32 MiB (5 MiB up to ingester 1.6.0), enough for a vendor chunk of about 20 MB
 of minified code. The CLI sends the request gzipped (`Content-Encoding:
 gzip`; maps shrink roughly 3×) and the ingester inflates it, counting its body limit
@@ -371,9 +454,13 @@ one pass over the encoded `mappings` for the whole stack, so it never flushes
 the other maps, at the cost of fetching it again for the next event.
 
 **Lookup.** Symbolication calls
-`lookupSourceMap(client, database, { orgId, repositoryId, release, filename, debugId })`
+`lookupSourceMap(client, database, { orgId, repositoryId, release, filename, debugId, suffix })`
 (`packages/otlp-ingester/src/source-maps-lookup.ts`): by debug id first, then
-by release + path (origin, query and hash removed).
+by release + path (origin, query and hash removed). Server frames
+(`suffix`) take the release's map stored under the longest tail of the
+frame's path (`file://` URLs and Windows paths are made plain paths first):
+one primary-key range scan of the release's paths, `ORDER BY
+length(filename) DESC`.
 
 ## Troubleshooting
 
@@ -392,6 +479,16 @@ by release + path (origin, query and hash removed).
   is 1.6.0+, and that the ingester is 1.6.0+ (`GET /v1/compat` lists
   `source_map_debug_ids`). Without debug ids, the SDK `release` must equal the
   upload release and `--url-prefix` must match the served path.
+- **Server frames stay bundled** (`/app/dist/server.js:1:90417`). Check that
+  the deployed bundle is the injected one, and that either the SDK sends
+  debug ids (the Node and edge SDKs do for injected bundles; a plain
+  OpenTelemetry SDK does not) or the event's `service.version` equals the
+  upload release and the stored path (`--url-prefix` + the path in the
+  directory) is a tail of the path the process runs the bundle from.
+- **No lines around a frame on the issue.** The map was uploaded without
+  `sourcesContent` (the bundler did not write it, `--no-sources-content`, an
+  older CLI or ingester, or the file did not fit the 32 MB limit), or the
+  frame is not in-app.
 - **`map is … MB … the ingester accepts up to 32 MB`.** Split the bundle
   (code-splitting) so each map stays under 32 MB without `sourcesContent`.
 - **`HTTP 413 … ingester 1.6.0 and older accept up to 5 MB`.** The ingester

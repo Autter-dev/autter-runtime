@@ -17,8 +17,9 @@ server app ──OTLP/HTTP──────────────────
 ```
 
 The ingester is **stateless**: auth key → `{orgId, repositoryId}` resolution,
-normalisation, stack parsing and browser symbolication (against source maps
-uploaded to its own ClickHouse, cached in memory), fingerprinting, ClickHouse
+normalisation, stack parsing and symbolication of browser, Node and edge
+frames (against source maps uploaded to its own ClickHouse, cached in
+memory), fingerprinting, ClickHouse
 writes, optional forward. Anything stateful (issue lifecycle, which identity
 an issue is keyed by, incidents, correlation) belongs to the consumer of the
 sink webhook (Autter cloud, or your own backend).
@@ -190,8 +191,8 @@ stacks or routes in SQL:
 | `error_why` / `error_fix` / `error_link` | `autter.error.why` / `.fix` / `.link` (scrubbed; ≤1000 / ≤1000 / ≤500 chars, http(s) links only) | declared cause/remedy for triage and RCA |
 | `expected` (UInt8) | `autter.error.expected` | expected business failures — recorded, never paged |
 | `request_id` | `autter.request.id` (exception spans inherit it from their server span; browser failures read `x-request-id`) | join to the request summary; bloom index `idx_occ_request_id` |
-| `frames` | structured frames as JSON, innermost first, ≤ 50 (`''` when the stack had none); browser JS frames resolved through source maps (migration 0016) | stack view, RCA without re-symbolicating |
-| `fingerprints` (Array) | every identity candidate, highest precedence first: `manual-v1`, `code-v1`, `frames-v3`, `message-v1` (migration 0016) | find an issue's rows whatever scheme keys it: `(fingerprint = X OR has(fingerprints, X))` |
+| `frames` | structured frames as JSON, innermost first, ≤ 50 (`''` when the stack had none); bundled JS frames (browser, Node, edge) resolved through source maps, in-app ones with up to 5 context lines on each side when the map carried their source (migration 0016) | stack view, RCA without re-symbolicating |
+| `fingerprints` (Array) | every identity candidate, in precedence order: `manual-v1`, `code-v1`, `frames-v3`, `message-v1`, then `cause-v1` when computed (migration 0016) | find an issue's rows whatever scheme keys it: `(fingerprint = X OR has(fingerprints, X))` |
 | `in_app_frames_resolved` / `in_app_frames_unresolved` (UInt16) | browser only, after symbolication: in-app frames a source map resolved, and in-app `.js`/`.mjs`/`.cjs` frames it left as parsed (no map, no release or debug id, no mapping there); `0`/`0` for server occurrences and rows before migration 0020 | the share of unresolved frames per release or issue (over 30%: upload source maps) |
 
 Severity is deliberately **not** part of the fingerprint: the same defect
@@ -465,6 +466,7 @@ precedence first:
 | `code-v1` | a valid `autter.error.code` (then the list stops here — it is the legacy identity) | below |
 | `frames-v3` | every uncoded error | below |
 | `message-v1` | every uncoded error (legacy) | below |
+| `cause-v1` | every uncoded error with an in-app frame somewhere in its cause chain (RF-06; after the legacy candidate) | below |
 
 The consumer picks the issue: an explicit scheme (`manual-v1`, a platform
 grouping rule, `code-v1`) wins outright; among the auto schemes the first one
@@ -472,8 +474,8 @@ that already has an issue wins, else a new issue is keyed by the highest one.
 Existing `message-v1` issues therefore never regroup, and new bugs group by
 `frames-v3`.
 
-**`frames-v3`** — structural, over the parsed (and, in the browser,
-symbolicated) frames, innermost first:
+**`frames-v3`** — structural, over the parsed (and, for bundled JavaScript in
+the browser, Node or an edge runtime, symbolicated) frames, innermost first:
 
 1. Take the in-app frames in order (none → only the first frame), at most 5.
 2. Token per frame: `fn + "@" + file`. `fn` drops a leading `async `/`new `,
@@ -508,18 +510,69 @@ group's own `|`-margined block, never its sub-exceptions.
 
 **Symbolication at ingest.** Browser frames in `.js`/`.mjs`/`.cjs` files are
 resolved through the map uploaded for the event's release and the script's
-path (or its debug id) before fingerprinting. When the map carries function
+path (or its debug id) before fingerprinting. Node and edge frames are too
+(RF-05), in-app ones only: by the debug id the SDK sent for the bundle
+(`autter.debug_ids` on the exception event or promoted log record; input-only,
+never stored), else by the release's map stored under the longest tail of the
+frame's path (`/dist/server.js` for `/app/dist/server.js`; `file://` URLs and
+Windows paths are made plain paths first). When the map carries function
 scopes (`x_autter_scopes`, written by `autter-runtime sourcemaps upload`), a
 frame is named after the innermost function containing it, with that
 function's original name (`null` when anonymous or in top-level code).
 Without scopes, names come from the map's `names` (the name mapped at the
 caller's position); a resolved frame without one keeps its parsed name unless
-that is an obviously mangled one. See `docs/SOURCE-MAPS.md`.
+that is an obviously mangled one. An in-app resolved frame gets its source
+line and up to 5 lines on each side (`contextLine`, `preContext`,
+`postContext`; each cut to 300 characters and scrubbed) when the map carries
+that source's `sourcesContent`, which uploads keep for in-app sources only,
+within the 32 MiB stored-map limit. See `docs/SOURCE-MAPS.md`.
 Parsed maps (compactly decoded mappings and scope tables) are cached per
 (org, repository, release, file) in an LRU bounded by `SOURCE_MAP_CACHE_MB`;
 a map that would take more than half of it is used without being kept;
 misses are remembered for 5 minutes. A failed lookup or a bad map leaves the frames as
 parsed — it never fails ingest.
+
+**`cause-v1`** (RF-06) — a wrapped error groups with its root cause:
+
+```
+sha256("cause-v1" + "\0" + service + "\0" + rootType + "\0" + fn + "@" + file).hex()[:32]
+```
+
+1. The cause chain, the reported exception first and the root cause last:
+   JVM top-level `Caused by:` blocks (a `Suppressed:` block and the causes
+   inside it are not part of it); .NET `Outer ---> Inner ---> Root` with the
+   frame segments between `--- End of inner exception stack trace ---`
+   markers (the first segment is the innermost exception's); Python's
+   top-level traceback blocks (the first is the root); otherwise, as for
+   JavaScript `cause`, the `exception.cause.N.type` and
+   `exception.cause.N.stacktrace` attributes the server SDKs send
+   (`runtime-core` `errorAttributes`), N = 1, 2, … until one is missing.
+   Cause frames are parsed and symbolicated like the reported exception's;
+   they are used for the hash only, not stored.
+2. The frame: the innermost in-app frame of the root cause, else of its
+   nearest wrapper that has one, and so on outward. Its token is frames-v3's
+   (`fn@file`). No in-app frame anywhere in the chain: no candidate.
+3. `rootType`: the root cause's error type, last segment only
+   (`java.lang.IllegalStateException` → `IllegalStateException`,
+   `requests.exceptions.ConnectionError` → `ConnectionError`, `A::B` → `B`),
+   so a type written qualified in a stack and short in `exception.type`
+   matches.
+
+An error without a cause is its own root, so the raw `TypeError: fetch failed`
+and `new Error("checkout failed", { cause })` wrapping it hash alike, and so
+do a JVM, .NET or Python chain and its root reported alone. The candidate
+comes **after** every existing scheme (`[manual-v1?, frames-v3, message-v1,
+cause-v1?]`), and frames-v3 is unchanged: an occurrence of an issue that
+already exists keeps finding it by frames-v3 or message-v1 first, so nothing
+regroups. cause-v1 is reached only when neither has an issue, which for a
+wrapped error whose root cause already has one is exactly when it should join
+it. Issues are still created under frames-v3, so the consumer must also key a
+new issue by its cause-v1 fingerprint (or record it as an alias) for that
+lookup to find anything; until it does, cause-v1 is carried in shadow (a
+consumer that does not know a scheme drops it) and changes no grouping. Shared
+vectors: the entries of `fingerprint-v3-vectors.json` that have `causes`
+(`cause` is the expected result, `null` for none) and the `causes` of the
+chained stacks in `stack-parse-vectors.json`.
 
 The two legacy schemes; `fingerprint_scheme` records which one produced a row.
 
@@ -862,6 +915,11 @@ candidate, highest precedence first, always ending with the legacy one) and
 `fingerprintRecord` (`{ scheme: "frames-v3", parts }`: what went into the
 frames-v3 fingerprint). `fingerprint` and `fingerprintScheme` keep their
 legacy meaning, so an older consumer groups exactly as before.
+
+Unreleased: in-app resolved frames carry up to 5 context lines on each side
+(`preContext` / `postContext`, file order; 3 before), on server frames too
+(RF-05); and `fingerprints` may end with a `cause-v1` candidate after the
+legacy one (RF-06), which a consumer that does not know the scheme drops.
 
 1.9.0 adds `count`: the occurrences the record stands for, sent only when
 above 1, on a loop-collapse sample (`1 + collapsed_count`; see

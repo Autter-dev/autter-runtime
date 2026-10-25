@@ -121,7 +121,7 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `SINK_MAX_ATTEMPTS` | `12` | Delivery attempts per batch (1–60 s backoff) |
 | `SINK_MAX_BUFFERED_BATCHES` | `1000` | Retry buffer cap; oldest drops are logged |
 | `SINK_MAX_BUFFERED_MB` | `64` | Sink retry buffer cap (memory) |
-| `SOURCE_MAP_CACHE_MB` | `64` | Memory budget (decoded size, function scope tables included) for parsed source maps used to symbolicate browser frames at ingest; least recently used maps are evicted, and a map that needs more than half of it is used without being kept |
+| `SOURCE_MAP_CACHE_MB` | `64` | Memory budget (decoded size, function scope tables and source contents included) for parsed source maps used to symbolicate browser, Node and edge frames at ingest; least recently used maps are evicted, and a map that needs more than half of it is used without being kept |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `LOOP_COLLAPSE_AFTER` | `10` | Identical occurrences stored per minute before the rest of the minute is collapsed into one sample with an exact count; `0` turns loop collapse off |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |

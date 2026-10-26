@@ -292,6 +292,51 @@ MANIFEST: dict[str, Any] = json.loads(
             "sdks": {
                 "@autter/runtime-edge": "1.3.0"
             }
+        },
+        {
+            "id": "caught_errors",
+            "title": "Caught errors and deliberate fallbacks recorded as handled occurrences",
+            "ingester": "1.11.0",
+            "migrations": [],
+            "sdks": {
+                "@autter/runtime-node": "1.9.0",
+                "@autter/runtime-edge": "1.4.0",
+                "@autter/runtime-next": "1.9.0",
+                "@autter/runtime-browser": "1.8.0"
+            }
+        },
+        {
+            "id": "route_percentiles",
+            "title": "Per-route p95 and p99 latency in the 1-minute rollups",
+            "ingester": "1.11.0",
+            "migrations": [
+                "0022-route-latency-1m"
+            ],
+            "sdks": {}
+        },
+        {
+            "id": "server_source_maps",
+            "title": "Server bundles symbolicated, with source context lines",
+            "ingester": "1.11.0",
+            "migrations": [],
+            "route": "/v1/sourcemaps",
+            "sdks": {
+                "@autter/runtime-cli": "1.3.0",
+                "@autter/runtime-node": "1.9.0",
+                "@autter/runtime-edge": "1.4.0",
+                "@autter/runtime-next": "1.9.0"
+            }
+        },
+        {
+            "id": "cause_fingerprint",
+            "title": "Wrapped errors grouped with their root cause (cause-v1)",
+            "ingester": "1.11.0",
+            "migrations": [],
+            "sdks": {
+                "@autter/runtime-node": "1.9.0",
+                "@autter/runtime-edge": "1.4.0",
+                "@autter/runtime-next": "1.9.0"
+            }
         }
     ]
 }

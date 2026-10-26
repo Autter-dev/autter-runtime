@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-next",
-	"version": "1.8.0",
+	"version": "1.9.0",
 	"description": "One-command Autter Runtime for Next.js: server OTel, request wide events, coded errors, browser tracker, relay route, edge middleware and React error boundary",
 	"license": "MIT",
 	"type": "module",
@@ -55,9 +55,9 @@
 		"test": "npm run build -w @autter/runtime-core && npm run build -w @autter/runtime-node && npm run build -w @autter/runtime-edge && npm run build -w @autter/runtime-browser && npm run build && node --test test/*.test.mjs"
 	},
 	"dependencies": {
-		"@autter/runtime-browser": "^1.7.0",
-		"@autter/runtime-edge": "^1.2.0",
-		"@autter/runtime-node": "^1.8.0"
+		"@autter/runtime-browser": "^1.8.0",
+		"@autter/runtime-edge": "^1.4.0",
+		"@autter/runtime-node": "^1.9.0"
 	},
 	"peerDependencies": {
 		"react": ">=18"

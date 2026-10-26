@@ -916,7 +916,7 @@ candidate, highest precedence first, always ending with the legacy one) and
 frames-v3 fingerprint). `fingerprint` and `fingerprintScheme` keep their
 legacy meaning, so an older consumer groups exactly as before.
 
-Unreleased: in-app resolved frames carry up to 5 context lines on each side
+1.11.0: in-app resolved frames carry up to 5 context lines on each side
 (`preContext` / `postContext`, file order; 3 before), on server frames too
 (RF-05); and `fingerprints` may end with a `cause-v1` candidate after the
 legacy one (RF-06), which a consumer that does not know the scheme drops.

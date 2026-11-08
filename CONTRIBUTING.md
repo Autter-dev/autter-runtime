@@ -27,6 +27,7 @@ packages/
 ├── runtime-node/      # Node server tracker (curated OTel) + browser relay handlers
 ├── runtime-next/      # Next.js wrapper: instrumentation + relay route + error boundary
 └── otlp-ingester/     # the ingest service: OTLP + /v1/browser → ClickHouse
+dashboard/             # local-development UI over the ingester's ClickHouse (Rust crate)
 deploy/
 ├── aws/               # ECS Fargate deploy scripts + runbook
 └── single-server/     # docker-compose (ingester + ClickHouse + Caddy) for EC2/Lightsail
@@ -77,6 +78,31 @@ curl -X POST http://localhost:4318/v1/browser \
 docker compose exec clickhouse clickhouse-client --password dev \
   --query "SELECT service, severity, message FROM autter_runtime.runtime_error_occurrences"
 ```
+
+Or see it in the local dashboard: `docker compose up -d dashboard`, then open
+http://localhost:4319 and pick the `local` repository.
+
+### Dashboard (Rust)
+
+`dashboard/` is a standalone Rust crate, separate from the npm workspaces.
+It's a read-only UI for local development, and no hosted or self-hosted
+deployment includes it. Prereq: Rust 1.93 or newer (`rustup toolchain
+install 1.93.0`).
+
+```bash
+cd dashboard
+cargo build                                    # debug build
+cargo test                                     # unit tests
+cargo fmt --check && cargo clippy --all-targets -- -D warnings   # what CI runs
+CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_PASSWORD=dev cargo run --release
+```
+
+Pages are server-rendered with maud (`src/pages/*.rs`). The only script and
+stylesheet are `assets/app.js` and `assets/app.css`, compiled into the
+binary. Every query must filter on `org_id` and `repository_id` and bind
+values as `{name:Type}` parameters, never as interpolated strings. The schema
+belongs to the ingester, so add a migration there first if a page needs a new
+column.
 
 ## Ground rules for changes
 

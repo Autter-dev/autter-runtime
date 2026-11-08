@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.15.0] - 2026-11-08
+
+Packages: no npm package changes, so nothing is re-published. New: the local development dashboard (`dashboard/` 0.1.0), published as the `ghcr.io/autter-dev/runtime-dashboard` image.
+
+### Features
+
+- Add a local development dashboard (`dashboard/`), a single Rust binary that reads the ingester's ClickHouse tables. It has pages for overview metrics, errors grouped by fingerprint with stack traces, logs and operation events, traces with a span waterfall, and LLM spend. `docker compose up` starts it on http://localhost:4319, and it's published as `ghcr.io/autter-dev/runtime-dashboard`. It's read-only (`readonly=2`, time and row limits), and no hosted or self-hosted deployment includes it.
+
 ## [1.14.0] - 2026-11-08
 
 Packages: `runtime-node` 1.11.0, `otlp-ingester` 1.13.1. `runtime-next` stays 1.9.0 and picks up the new `runtime-node` through its existing range. Any upgrade order works.

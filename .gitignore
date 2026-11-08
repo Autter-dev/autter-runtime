@@ -19,3 +19,6 @@ __pycache__/
 
 # Next.js build output (e2e/sourcemaps/next-app)
 .next/
+
+# Rust build output (dashboard/)
+dashboard/target/

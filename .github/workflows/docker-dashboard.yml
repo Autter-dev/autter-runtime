@@ -1,0 +1,52 @@
+name: Docker image — dashboard (GHCR)
+
+# Publishes ghcr.io/autter-dev/runtime-dashboard, the LOCAL DEVELOPMENT UI
+# (see dashboard/README.md). It is not part of any hosted or self-hosted
+# deployment:
+#   - this workflow's name differs from "Docker image (GHCR)", so
+#     deploy-single-server.yml (which chains on that exact name) never runs
+#     after it;
+#   - it only triggers on dashboard/ changes, never on ingester paths or tags.
+#
+#   :latest    on every push to main touching dashboard/
+#   :sha-xxxx  per commit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dashboard/**"
+      - ".github/workflows/docker-dashboard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/autter-dev/runtime-dashboard
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+      - uses: useblacksmith/build-push-action@v2
+        with:
+          context: dashboard
+          file: dashboard/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

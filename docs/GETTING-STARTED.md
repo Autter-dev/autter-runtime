@@ -71,6 +71,7 @@ writes ClickHouse. For a local try-out:
 git clone https://github.com/Autter-dev/autter-runtime
 cd autter-runtime
 docker compose up   # ClickHouse + ingester on http://localhost:4318
+                    # + local dashboard on http://localhost:4319
 ```
 
 No key step: the compose file starts the ingester in local dev mode, which
@@ -475,8 +476,18 @@ app also prints one line the first time the ingester refuses its key or a
 route ([what the SDKs tell you](DELIVERY.md#what-the-sdks-tell-you)).
 
 Then see your app's own event. Trigger an error in your app (a route that throws, or
-`captureException(new Error("hello from my app"))`), wait a few seconds for
-the batch to flush, and read it back from the local ClickHouse:
+`captureException(new Error("hello from my app"))`) and wait a few seconds for
+the batch to flush.
+
+The quickest way to see it is the **local dashboard** at
+http://localhost:4319, which `docker compose up` from step 2 starts. Pick the
+`local` repository, the one the built-in key writes to. The error appears
+under **Errors**, requests on **Overview**, logs and operations on
+**Events**, spans on **Traces**, and model calls on **LLM**. The dashboard is
+for local development only; see [`dashboard/`](../dashboard) to run it on its
+own.
+
+Or read it back from the local ClickHouse:
 
 ```bash
 docker compose exec clickhouse clickhouse-client --password dev --query "

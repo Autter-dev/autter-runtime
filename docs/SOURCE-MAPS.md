@@ -131,6 +131,34 @@ esbuild build, `.next/server`): browsers never load it, so leftover maps are a
 note there, and Next.js server manifests are skipped. It exits `1` on any failure, with the reason per
 file, and `--json` prints `{ ok, bundles, maps, upload, failures }`.
 
+### Where to run `verify`, per build
+
+Run it on the directory you deploy, after the build and before the deploy
+step, with `AUTTER_RUNTIME_KEY` (the upload key) in the environment so it
+also checks the ingester:
+
+| Build | Command |
+| --- | --- |
+| Vite, SvelteKit, Astro, Vue CLI, Rollup | `npx autter-runtime sourcemaps verify dist` |
+| webpack | `npx autter-runtime sourcemaps verify <output.path>` (usually `dist`) |
+| Create React App | `npx autter-runtime sourcemaps verify build` |
+| Next.js (browser) | `npx autter-runtime sourcemaps verify .next/static` |
+| Next.js (server) | `npx autter-runtime sourcemaps verify .next/server --server` |
+| tsup / esbuild server bundle | `npx autter-runtime sourcemaps verify dist --server` |
+
+A CI job, end to end (GitHub Actions; any CI is the same three steps):
+
+```yaml
+- run: npm ci
+- run: npm run build                 # the plugin injects debug ids and uploads
+  env:
+    AUTTER_RUNTIME_KEY: ${{ secrets.AUTTER_RUNTIME_KEY }}   # autter_rtu_… upload key
+- run: npx autter-runtime sourcemaps verify dist
+  env:
+    AUTTER_RUNTIME_KEY: ${{ secrets.AUTTER_RUNTIME_KEY }}
+- run: ./deploy.sh dist
+```
+
 ## Pick an integration
 
 | Build | Use |
@@ -242,6 +270,16 @@ wrapper turns on, then deletes every map under `.next/static` with the
 `sourceMappingURL` comments that name them).
 Older versions use the webpack plugin. If you already set
 `productionBrowserSourceMaps: true`, your maps stay public and on disk.
+
+Next.js 16 builds with Turbopack by default and refuses a config that has a
+`webpack` function but no `turbopack` key. The wrapper adds `turbopack: {}`
+when your config has none (yours is kept as it is), so `next build` and
+`next build --webpack` both work. Turbopack names a chunk's map after its
+own hash (`1mmgpf6btmygn.js` → `0v20ezoxdgryb.js.map`) and writes some
+server maps as index maps (`sections`); the wrapper pairs each chunk with
+its map through its `sourceMappingURL` comment before removing the comment,
+and the CLI flattens index maps before uploading them (runtime-cli 1.4.0;
+earlier versions failed the build on Next 16, or uploaded no client map).
 
 The server output (`.next/server`, Node.js and edge runtimes) gets the same:
 hidden maps for webpack server compilations (and, on 15.4.1+,
@@ -436,7 +474,40 @@ function plus 1 204 extra names.
 
 The ingester names a frame after the innermost scope that contains it
 (`null` in an anonymous function or top-level code; for a `null` name it keeps
-the call-site name). Maps uploaded without scopes (older CLIs) keep the
+the call-site name).
+
+**Inlined functions.** Minifiers inline functions. terser (webpack, and
+Vite with `minify: "terser"`) turns a single-use function into a nameless
+expression at its call site (`String(function(e){…}(o))`); `upload` reads
+the name back from `sourcesContent` at the function's mapped start
+(`function name`, `export function name`, `export default function name`,
+`const name = (…) =>`). SWC (Next.js) inlines whole functions into their
+caller, so the bundle function a frame ran in is the caller. For that,
+`upload` also sends each in-app source's own functions,
+`x_autter_original_scopes` (runtime-cli 1.4.0; JavaScript, TypeScript and
+JSX sources, parsed from the `sourcesContent` it already sends):
+
+```json
+"x_autter_original_scopes": {
+  "version": 1,
+  "names": ["roundCents"],
+  "sources": ["OECA;;;0BAqEC", null]
+}
+```
+
+`sources` is aligned with the map's `sources`; each entry is encoded like
+`x_autter_scopes.scopes`, with positions in that source file (`null` for a
+source without content, or one that is not JavaScript or TypeScript, such as
+a `.vue` file). The ingester names a resolved frame after the innermost
+ORIGINAL function at its original position, and uses the bundle scopes when
+that source has none. A frame inlined into its caller therefore reads as
+itself (`applyDiscount` at `pricing.ts:4`, not `onCheckoutClick` at
+`pricing.ts:4`), and the innermost frame is the same in every build,
+inlined or not. A source map cannot say which calls were inlined, so the
+inlined callers' frames are missing from such a stack: frames-v3, which
+hashes up to five frames, differs from a build that kept them, and the
+occurrence joins the issue through `cause-v1` (the error type plus the
+innermost in-app frame), which the platform matches by default. Maps uploaded without scopes (older CLIs) keep the
 earlier rule: the name the map holds at the caller's position. That rule names
 `const run = actions.captured; run()` as `run` and a handler a framework calls
 as `fn`/`func`/`listener`, which also merged different handlers of one file
@@ -466,6 +537,39 @@ by release + path (origin, query and hash removed). Server frames
 frame's path (`file://` URLs and Windows paths are made plain paths first):
 one primary-key range scan of the release's paths, `ORDER BY
 length(filename) DESC`.
+
+## When a map is missing
+
+An in-app browser frame that stays minified (a `.js`, `.mjs` or `.cjs` file
+of your origin) is stored with the reason and the upload that would resolve
+it (ingester 1.13.0):
+
+```json
+{
+  "function": "fe",
+  "filename": "https://app.example.com/assets/index-voboUhGs.js",
+  "lineno": 1, "colno": 12283,
+  "inApp": true, "resolved": false,
+  "symbolication": {
+    "status": "missing_map",
+    "bundle": "/assets/index-voboUhGs.js",
+    "release": "4f3c2a1",
+    "debugId": "33a2f1e4-18af-4138-ab4b-3e8aa81c8fab"
+  }
+}
+```
+
+| `status` | Meaning | Fix |
+| --- | --- | --- |
+| `missing_map` | No map was uploaded for this bundle (by its debug id, or by release + path). | Upload it from the build that produced the bundle: the plugin with `AUTTER_RUNTIME_KEY` set, or `autter-runtime sourcemaps upload dist`. `verify` before deploying catches this. |
+| `no_release` | The bundle has no debug id (not injected, or an SDK before 1.6.0) and the event has no release, so there is nothing to look a map up by. | Inject debug ids (the plugin, or `sourcemaps inject`), or pass `release` to the SDK. |
+| `no_mapping` | A map was found, but it has no mapping at this position: the deployed file is not the one the map was made for. | Inject and upload the exact files you deploy, after any later minification or copy step. |
+
+Each occurrence also counts its in-app frames that a map resolved and that
+stayed minified (`in_app_frames_resolved` / `in_app_frames_unresolved`); the
+platform flags a repository whose browser frames are more than 30%
+unresolved. Server frames are never marked: an unbundled Node app's frames
+are readable without a map.
 
 ## Troubleshooting
 
@@ -504,6 +608,14 @@ length(filename) DESC`.
   The map was uploaded without function scopes: by a CLI that predates them,
   or with a warning (the bundle did not parse, or the map is close to 32 MB).
   Upload it again with the current `@autter/runtime-cli`.
+- **A frame is named after the function that called it** (`onCheckoutClick`
+  at `pricing.ts:4`), or anonymous in a terser build. The minifier inlined
+  the function, and the map was uploaded by a CLI before 1.4.0, which sends
+  no original function scopes. Upload with the current
+  `@autter/runtime-cli`.
+- **`next build` fails with "using Turbopack, with a `webpack` config and no
+  `turbopack` config"**, or a Next.js 16 build uploads no client map. Use
+  `@autter/runtime-cli` 1.4.0 or later.
 - **Subresource integrity.** Injection changes bundle bytes after the build,
   so script hashes computed during the build (Next.js `experimental.sri`,
   webpack SRI plugins) no longer match. Recompute them after injecting, or

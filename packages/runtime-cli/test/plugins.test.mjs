@@ -441,6 +441,43 @@ test("Next 15.4.1+: hidden client maps, and the after-compile hook injects, uplo
 	assert.ok(existsSync(join(distDir, "server/app/other.js.map")), "but not deleted");
 });
 
+test("Next 16 (Turbopack by default): the build is not refused, chunks whose maps have other names and index maps upload", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const project = nextProject("16.4.5");
+	inDir(t, project);
+	const options = { ...silent, key: SERVER_KEY, endpoint: ingester.url, release: "rel-16" };
+	// Next 16 fails a Turbopack build whose config has a `webpack` function
+	// and no `turbopack` key; the wrapper adds an empty one, never over yours.
+	const config = withAutterSourceMaps({}, options);
+	assert.deepEqual(config.turbopack, {});
+	assert.deepEqual(withAutterSourceMaps({ turbopack: { root: "/x" } }, options).turbopack, { root: "/x" });
+	assert.equal(withAutterSourceMaps({}, options).turbopack !== undefined, true);
+
+	const distDir = join(project, ".next");
+	// A one-section index map, as Turbopack writes for some server files.
+	const indexMap = { version: 3, sources: [], sections: [{ offset: { line: 1, column: 0 }, map: SIMPLE_MAP }] };
+	writeFiles(distDir, {
+		// Turbopack names a chunk's map after its own hash.
+		"static/chunks/1mmgpf6btmygn.js": "console.log(1);\n//# sourceMappingURL=0v20ezoxdgryb.js.map\n",
+		"static/chunks/0v20ezoxdgryb.js.map": SIMPLE_MAP,
+		"server/app/page.js": "x\ny\nz\n//# sourceMappingURL=page.js.map\n",
+		"server/app/page.js.map": indexMap,
+	});
+	await config.compiler.runAfterProductionCompile({ distDir, projectDir: project });
+	assert.deepEqual(ingester.rows.map((r) => r.filename), ["/_next/static/chunks/1mmgpf6btmygn.js", "/.next/server/app/page.js"]);
+	const chunk = read(distDir, "static/chunks/1mmgpf6btmygn.js");
+	assert.equal(readDebugIdComment(chunk), ingester.rows[0].debugId);
+	assert.doesNotMatch(chunk, /sourceMappingURL/, "the comment goes once the map was uploaded");
+	assert.equal(existsSync(join(distDir, "static/chunks/0v20ezoxdgryb.js.map")), false);
+	// The index map was stored as the regular map it stands for, one line down.
+	const stored = JSON.parse(ingester.rows[1].map);
+	assert.equal(stored.sections, undefined);
+	assert.deepEqual(stored.sources, SIMPLE_MAP.sources);
+	assert.equal(stored.mappings, ";AAAA;AACE");
+	assert.doesNotMatch(read(distDir, "server/app/page.js"), /sourceMappingURL/);
+});
+
 test("older Next: the webpack plugin runs in client production builds; a config function is wrapped too", async (t) => {
 	inDir(t, nextProject("14.2.3"));
 	const config = withAutterSourceMaps({ assetPrefix: "https://cdn.example.com" }, { ...silent, key: SERVER_KEY });

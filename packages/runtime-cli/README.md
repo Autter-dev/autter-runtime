@@ -117,6 +117,11 @@ import { withAutterSourceMaps } from "@autter/runtime-cli/next";
 export default withAutterSourceMaps({ reactStrictMode: true });
 ```
 
+Works with webpack and Turbopack builds, including Next.js 16, where Turbopack
+is the default (the wrapper adds `turbopack: {}` when your config has none, so
+Next does not refuse the `webpack` function it also adds). Verify the browser
+output with `npx autter-runtime sourcemaps verify .next/static`.
+
 All three turn on hidden source maps when you haven't configured maps, inject
 debug ids after the build, upload when a key is present, and then delete the
 maps they created whether or not the upload succeeded (a rejected upload, an

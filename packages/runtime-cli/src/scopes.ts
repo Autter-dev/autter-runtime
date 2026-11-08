@@ -47,13 +47,13 @@ export interface SourceMapScopes {
 
 /** A scope before encoding: generated range, and the index of its name in
  * the map's `names` + extra names (-1 when anonymous). */
-type ScopeEntry = [startLine: number, startColumn: number, endLine: number, endColumn: number, nameIndex: number];
+export type ScopeEntry = [startLine: number, startColumn: number, endLine: number, endColumn: number, nameIndex: number];
 
 export type ScopesResult = { scopes: SourceMapScopes } | { error: string };
 
 // ── Parsing ───────────────────────────────────────────────────────────────
 
-interface AstNode {
+export interface AstNode {
 	type: string;
 	start: number;
 	end: number;
@@ -68,25 +68,30 @@ interface Path {
 
 /** A token that names a function: the identifier at `offset`, or a string
  * key (`literal`), which minifiers never rename. */
-interface NameToken {
+export interface NameToken {
 	offset: number;
 	name: string;
 	literal: boolean;
 }
 
-interface FunctionScope {
+export interface FunctionScope {
 	start: number;
 	end: number;
 	/** The function's own name (`function computeTotal`). */
 	own: NameToken | null;
-	/** Where a nameless `function` expression starts: minifiers drop unused
-	 * function-expression names, which the original source still has. */
+	/** Where a nameless function expression or arrow starts: minifiers drop
+	 * unused function-expression names, and terser inlines single-use
+	 * functions as nameless expressions at their call site
+	 * (`String(function(e){…}(o))`), while the original source still has the
+	 * name. */
 	recoverAt: number | null;
+	/** An arrow: its bundle binding (`context`) is tried before recovery. */
+	arrow?: boolean;
 	/** Then the binding it is assigned to, else its object or class key. */
 	context: NameToken[];
 }
 
-const BASE_OPTIONS = {
+export const BASE_OPTIONS = {
 	ecmaVersion: "latest",
 	allowHashBang: true,
 	allowReturnOutsideFunction: true,
@@ -197,7 +202,8 @@ function describe(path: Path): FunctionScope {
 		start: fn.start,
 		end: fn.end,
 		own,
-		recoverAt: !own && fn.type !== "ArrowFunctionExpression" && !isMethod ? fn.start : null,
+		recoverAt: !own && !isMethod ? fn.start : null,
+		...(fn.type === "ArrowFunctionExpression" ? { arrow: true } : {}),
 		context,
 	};
 }
@@ -223,7 +229,7 @@ function classInitializer(path: Path): FunctionScope | null {
 /** Every function in the bundle: declarations, expressions, arrows, class
  * and object methods, getters and setters, and class initializers
  * (iterative: minified bundles nest deeply). */
-function collectFunctions(program: AstNode): FunctionScope[] {
+export function collectFunctions(program: AstNode): FunctionScope[] {
 	const found: FunctionScope[] = [];
 	const stack: Path[] = [{ node: program, parent: null }];
 	for (let path = stack.pop(); path; path = stack.pop()) {
@@ -249,7 +255,7 @@ function collectFunctions(program: AstNode): FunctionScope[] {
 
 /** Offsets where each line starts (ECMAScript line terminators, as V8 counts
  * them for stack positions). */
-function lineStarts(code: string): number[] {
+export function lineStarts(code: string): number[] {
 	const starts = [0];
 	for (let i = 0; i < code.length; i++) {
 		const c = code.charCodeAt(i);
@@ -262,7 +268,7 @@ function lineStarts(code: string): number[] {
 	return starts;
 }
 
-function positionOf(starts: number[], offset: number): [line: number, column: number] {
+export function positionOf(starts: number[], offset: number): [line: number, column: number] {
 	let lo = 0;
 	let hi = starts.length - 1;
 	while (lo < hi) {
@@ -360,7 +366,15 @@ function looksMangled(name: string): boolean {
 }
 
 const IDENTIFIER_AT_RE = /[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*/uy;
-const OWN_NAME_AT_RE = /(?:async\s+)?function\b\s*\*?\s*([$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*)/uy;
+const NAME = String.raw`[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*`;
+/** `function name`, `export function name`, `export default async function* name`. */
+const OWN_NAME_AT_RE = new RegExp(String.raw`(?:export\s+(?:default\s+)?)?(?:async\s+)?function\b\s*\*?\s*(${NAME})`, "uy");
+/** `const name =`, `export let name: Type =` starting at the mapped position. */
+const DECLARATION_AT_RE = new RegExp(String.raw`(?:export\s+)?(?:const|let|var)\s+(${NAME})\s*(?::[^=;]*)?=`, "uy");
+/** The same declaration ending right before the mapped position: the
+ * function or arrow starts after the `=` (an arrow's start may map to its
+ * first parameter, just after the `(`). */
+const DECLARATION_BEFORE_RE = new RegExp(String.raw`(?:^|[^$\u200c\u200d\p{ID_Continue}])(?:const|let|var)\s+(${NAME})\s*(?::[^=;]*)?=\s*(?:async\s*)?\(?\s*$`, "u");
 
 /** Words that sit where a name could be but never name a function. */
 const NOT_A_NAME = new Set(
@@ -419,11 +433,19 @@ class NameResolver {
 		return segment ? this.identifierAt(segment, IDENTIFIER_AT_RE) : null;
 	}
 
-	/** The name a minifier removed from `function name() {}`, read from the
-	 * original source at the function's mapped start. */
+	/** The name a minifier removed, read from the original source at the
+	 * function's mapped start: `function name() {}` (with or without
+	 * `export`/`export default`), or the `const name = …` the function or
+	 * arrow was declared with (terser inlines single-use ones as nameless
+	 * expressions at the call site). */
 	recover(offset: number): string | null {
 		const segment = this.segmentAt(offset);
-		return segment ? this.identifierAt(segment, OWN_NAME_AT_RE, 1) : null;
+		if (!segment) return null;
+		const found = this.identifierAt(segment, OWN_NAME_AT_RE, 1) ?? this.identifierAt(segment, DECLARATION_AT_RE, 1);
+		if (found) return found;
+		const text = this.originalLine(segment);
+		const before = text === null ? null : DECLARATION_BEFORE_RE.exec(text.slice(0, segment.column))?.[1];
+		return before && !NOT_A_NAME.has(before) ? before : null;
 	}
 }
 
@@ -444,7 +466,7 @@ function vlq(value: number): string {
 }
 
 /** Scopes sorted by start, as the `scopes` string (see SourceMapScopes). */
-function encodeScopes(entries: readonly ScopeEntry[]): string {
+export function encodeScopes(entries: readonly ScopeEntry[]): string {
 	const parts: string[] = [];
 	let line = 0;
 	let previousStart = 0;
@@ -539,11 +561,12 @@ function scopesOf(code: string, map: Record<string, unknown>): ScopesResult {
 	};
 	const entries: ScopeEntry[] = functions.map((fn) => {
 		let name = fn.own ? resolver.resolve(fn.own) : null;
-		if (name === null && fn.recoverAt !== null) name = resolver.recover(fn.recoverAt);
+		if (name === null && fn.recoverAt !== null && !fn.arrow) name = resolver.recover(fn.recoverAt);
 		for (const token of fn.context) {
 			if (name !== null) break;
 			name = resolver.resolve(token);
 		}
+		if (name === null && fn.recoverAt !== null && fn.arrow) name = resolver.recover(fn.recoverAt);
 		// A named function whose name could not be mapped back gets the
 		// `null` name; one with no name at all is anonymous (-1).
 		const index = name !== null ? indexOf(name) : fn.own || fn.context.length > 0 ? indexOf(null) : -1;

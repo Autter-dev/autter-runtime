@@ -212,3 +212,33 @@ test("--server: server output keeps its maps without failing, and Next server ma
 	assert.match(run.stdout, /note {4}server\.js\.map: source map in the server output/);
 	assert.match(run.stdout, /1 source map\(s\) left \(server output\)/);
 });
+
+test("Next.js 16 output: .next/package.json is not the project, hashed polyfill chunks and required-server-files.js are not bundles", async () => {
+	const root = tempDir({
+		"package.json": "{}",
+		// Next writes this into the build directory: it must not make
+		// .next/static look like a copy of itself.
+		".next/package.json": '{"type": "commonjs"}',
+		".next/build-manifest.json": { polyfillFiles: ["static/chunks/0cz1d0mv5g_q7.js"], rootMainFiles: [] },
+		".next/required-server-files.js": "self.__REQUIRED_SERVER_FILES={}\n",
+		".next/static/chunks/0cz1d0mv5g_q7.js": "!function(){var t=1}();\n",
+		".next/static/chunks/1mmgpf6btmygn.js": "console.log('app');\n//# sourceMappingURL=0v20ezoxdgryb.js.map\n",
+		".next/static/chunks/0v20ezoxdgryb.js.map": SIMPLE_MAP,
+	});
+	const next = join(root, ".next");
+	const ingester = await startIngester();
+	try {
+		await injectDir(join(next, "static"));
+		await uploadDir(join(next, "static"), { ...quiet, release: "abc123", endpoint: ingester.url, key: SERVER_KEY, deleteAfterUpload: true, urlPrefix: "/_next/static/" });
+		for (const dir of [join(next, "static"), next]) {
+			const result = await verifyDir(dir, { env: {} });
+			assert.deepEqual(result.failures, [], dir);
+			const status = Object.fromEntries(result.bundles.map((b) => [b.path.replace(/^static\//, ""), b.status]));
+			assert.equal(status["chunks/1mmgpf6btmygn.js"], "ok", "the app chunk is checked, not taken for a copy of itself");
+			assert.equal(status["chunks/0cz1d0mv5g_q7.js"], "skipped", "the polyfill chunk build-manifest.json names");
+			if (dir === next) assert.equal(status["required-server-files.js"], "skipped");
+		}
+	} finally {
+		await ingester.close();
+	}
+});

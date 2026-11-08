@@ -16,3 +16,6 @@ examples/express-app/public/sdk/
 # Python (adapters/python, examples/python)
 __pycache__/
 .venv/
+
+# Next.js build output (e2e/sourcemaps/next-app)
+.next/

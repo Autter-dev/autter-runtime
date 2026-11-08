@@ -61,6 +61,8 @@ import {
 	type Redactor,
 } from "./redact.js";
 import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporter.js";
+import { authHeaders, resolveIngestKey, warnKeyKind, warnMissingKey } from "./ingest-auth.js";
+import { IngestMetricExporter, IngestSpanExporter } from "./ingest-exporters.js";
 import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
 import {
@@ -91,6 +93,7 @@ import {
 import {
 	expressRouteOf,
 	markCaptured,
+	requestScopeAttributes,
 	setRequestExceptionCapturer,
 	setRequestSpanAnnotator,
 	startHookRequest,
@@ -118,6 +121,7 @@ import {
 	recordedAsRejection,
 } from "./unhandled-rejections.js";
 import { breadcrumbEventAttributes } from "./breadcrumbs.js";
+import { installExpressErrorCapture, watchExpressResponse } from "./express-errors.js";
 import { sharedSlot } from "./shared.js";
 import { RouteLabelSampler } from "./route-label.js";
 
@@ -145,6 +149,8 @@ interface ServerSlot {
 	loggerOnlyHandled: HandledCapture | null;
 	/** `logging.requests: true` — zero-code request summaries (experimental). */
 	hookRequests: boolean;
+	/** `captureExpressErrors` of the running tracker. */
+	expressErrors?: boolean;
 }
 const S = sharedSlot<ServerSlot>("server", () => ({
 	active: null,
@@ -191,8 +197,11 @@ const S = sharedSlot<ServerSlot>("server", () => ({
 export interface AutterServerOptions {
 	/** Structured logs and completed operation summaries. */
 	logging?: RuntimeLoggingOptions;
-	/** Private ingest key (autter_rt_…). */
-	apiKey: string;
+	/**
+	 * Private ingest key (autter_rt_…). Default: AUTTER_RUNTIME_KEY. Without
+	 * one nothing is sent and one warning says so at startup.
+	 */
+	apiKey?: string;
 	/** Ingester base URL. Default: https://otlp.autter.dev */
 	endpoint?: string;
 	service: string;
@@ -269,6 +278,18 @@ export interface AutterServerOptions {
 	 * crashes the process. Default true.
 	 */
 	captureUnhandledRejections?: boolean;
+	/**
+	 * Express (4 and 5): report the error behind a 5xx response with no
+	 * setup. Every error a handler throws, rejects with (Express 5) or passes
+	 * to `next(err)`, in any router, is noted on its request; when the
+	 * response ends with a 5xx, the error is recorded on the request span
+	 * with its type, message and stack, once (an error `autterErrorHandler`
+	 * or `captureException` already reported is skipped). Errors answered
+	 * with a 4xx are not reported here. Express's own behaviour is
+	 * unchanged. Default true; false leaves Express errors to
+	 * `autterErrorHandler()`.
+	 */
+	captureExpressErrors?: boolean;
 	/**
 	 * Flush all exporters when the process exits (`beforeExit`, SIGINT,
 	 * SIGTERM) so a forgotten `shutdown()` doesn't silently drop buffered
@@ -980,6 +1001,7 @@ function captureRequestRoute(
 		setRoute();
 		if (rpcMetadata.route && !failed) span.setAttribute(METRIC_ROUTE_ATTR, true);
 	});
+	if (S.expressErrors) watchExpressResponse(span, response, () => S.expressErrors === true);
 	if (S.hookRequests) startHookRequest(response);
 }
 
@@ -1007,7 +1029,10 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		/\/$/,
 		"",
 	);
-	const headers = { authorization: `Bearer ${options.apiKey}` };
+	// Never "Bearer undefined": unset/empty/"undefined" is no key at all.
+	const apiKey = resolveIngestKey(options.apiKey);
+	const headers = authHeaders(apiKey);
+	const ingestTarget = { endpoint, hasKey: apiKey !== null };
 	const redactor = makeRedactor(options.redactAttributes ?? true);
 	// Every trace exporter scrubs spans on the way out, whoever created them
 	// (see redact-exporter.ts): secrets and PII, and URL query values.
@@ -1018,7 +1043,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		new GuardedSpanExporter(
 			new CountingExporter(
 				new RedactingSpanExporter(
-					new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+					new IngestSpanExporter(new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }), ingestTarget),
 					() => redactor,
 					queryPolicy,
 				),
@@ -1031,6 +1056,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// env at import time — never clobber an env-enabled session here).
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
 	debugLog(`initialising service=${options.service} endpoint=${endpoint}`);
+	if (apiKey === null) warnMissingKey("server", options.service);
+	else warnKeyKind(apiKey);
 	S.redactor = redactor;
 	configureExportErrors({ endpoint, onExportError: options.onExportError });
 	const distro = options.distro ?? SDK_IDENTITY;
@@ -1099,7 +1126,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const metricReader = new PeriodicExportingMetricReader({
 		exporter: new GuardedMetricExporter(
 			new RedactingMetricExporter(
-				new OTLPMetricExporter({
+				new IngestMetricExporter(new OTLPMetricExporter({
 					url: `${endpoint}/v1/metrics`,
 					headers,
 					// Deltas, not lifetime totals: the ingester SUMs data points
@@ -1107,7 +1134,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					// temporality would re-count every past request on each
 					// 60 s export.
 					temporalityPreference: AggregationTemporalityPreference.DELTA,
-				}),
+				}), ingestTarget),
 				() => redactor,
 			),
 			"metrics",
@@ -1207,11 +1234,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		// exception event (type, message, stack), so no SpanError is derived.
 		// Global handlers (uncaught/unhandled) run with no active span, so we
 		// still open a dedicated always-on error span for them.
+		//
+		// A crash never reuses the request span, even one still recording
+		// (an async handler threw before answering): the process is about to
+		// die and that span never ends, so nothing on it is exported. Its own
+		// span, ended here and flushed by the crash monitor, is.
+		const crash = attributes?.["autter.unhandled"] === true;
 		const activeSpan = trace.getActiveSpan();
-		const reuseActive = activeSpan?.isRecording() === true;
+		const reuseActive = !crash && activeSpan?.isRecording() === true;
 		const span = reuseActive
 			? (activeSpan as Span)
 			: errorTracer.startSpan(isErr ? error.name : "Error");
+		// A span of its own carries the request it was raised in (route,
+		// method, request id) itself: after the response the request span is
+		// already exported, so the ingester cannot copy them from it.
+		const scope = reuseActive ? undefined : requestScopeAttributes();
 		// Coded errors (RuntimeError, catalogs, or ANY error with
 		// code/why/fix/link/status/expected): autter.error.* on the span AND
 		// on the exception event (one span can carry several exceptions);
@@ -1224,6 +1261,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		};
 		const requestId = currentOperation()?.requestId;
 		span.setAttributes({
+			...scope,
 			"autter.severity": "error",
 			...redacted,
 			...structured,
@@ -1364,12 +1402,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		if (!reuseActive) span.end();
 	}
 
-	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment, distro,
+	configureRuntimeLogger({ endpoint, apiKey: apiKey ?? "", service: options.service, environment, distro,
 		release: options.release, options: options.logging, redact: redactor,
 		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, redactor(attributes), links),
 		reportOutcome,
 	});
 	S.hookRequests = options.logging?.requests === true;
+	S.expressErrors = options.captureExpressErrors !== false;
+	if (S.expressErrors) installExpressErrorCapture();
 	S.handled = captureHandled;
 	startLoggedErrorCapture(options.captureLoggedErrors);
 
@@ -1463,6 +1503,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					S.alwaysOnProvider = null;
 					S.handled = null;
 					S.hookRequests = false;
+					S.expressErrors = false;
 					S.redactor = makeRedactor(true);
 				}
 				autoFlushHandle?.dispose();

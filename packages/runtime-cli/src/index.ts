@@ -52,6 +52,8 @@ export {
 	type UploadSummary,
 } from "./upload.js";
 export { formatVerify, globToRegExp, verifyDir, type VerifyBundle, type VerifyOptions, type VerifyResult } from "./verify.js";
+export { flattenIndexMap, isIndexMap } from "./index-map.js";
+export { computeOriginalScopes, ORIGINAL_SCOPES_KEY, type OriginalScopes } from "./original-scopes.js";
 export { computeScopes, SCOPES_KEY, SCOPES_VERSION, type ScopesResult, type SourceMapScopes } from "./scopes.js";
 export { gitHead, RELEASE_ENV_VARS, RELEASE_RE, resolveRelease, type ResolvedRelease } from "./release.js";
 export {

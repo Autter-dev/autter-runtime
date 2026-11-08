@@ -37,11 +37,17 @@ npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, B
 | Package | Version | Use it for |
 | --- | --- | --- |
 | `@autter/runtime-browser` | 1.8.1 | Browser errors + usage, coded-error duck typing, request-id capture |
-| `@autter/runtime-node` | 1.10.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
+| `@autter/runtime-node` | 1.11.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
 | `@autter/runtime-next` | 1.9.0 | Next.js: server + client + `/edge` for `middleware.ts` |
-| `@autter/runtime-edge` | 1.4.1 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
-| `@autter/otlp-ingester` | 1.12.2 | Self-hosted ingest — upgrade it **before** the SDKs |
-| `@autter/runtime-cli` | 1.3.1 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
+| `@autter/runtime-edge` | 1.4.2 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
+| `@autter/otlp-ingester` | 1.13.1 | Self-hosted ingest — upgrade it **before** the SDKs |
+| `@autter/runtime-cli` | 1.3.2 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
+
+Minimum versions per feature, SDK and ingester are in one table:
+[Version compatibility](docs/COMPATIBILITY.md#compatibility-table). Once
+`AUTTER_ENDPOINT` and `AUTTER_RUNTIME_KEY` are set, check the whole path
+before writing any code: `npx @autter/runtime-node verify`
+([Is my data arriving?](docs/DELIVERY.md)).
 
 Prefer to have an AI agent set it up for you? Install the companion agent
 skills — they inventory your repo and wire up Autter Runtime for whatever
@@ -186,7 +192,8 @@ all, and ad-blockers can't tell it apart from your own API traffic.
 - [Operation logging and diagnostic context](docs/OPERATION-LOGGING.md)
 - [Requests, coded errors and background work](docs/REQUESTS-AND-ERRORS.md)
 - [Continuous detection, profiles, and outcomes](docs/CONTINUOUS-DETECTION.md)
-- [Version compatibility](docs/COMPATIBILITY.md): the built-in SDK/ingester/schema check and `npx @autter/runtime-node doctor`
+- [Version compatibility](docs/COMPATIBILITY.md): the one compatibility table, the built-in SDK/ingester/schema check and `npx @autter/runtime-node doctor`
+- [Is my data arriving?](docs/DELIVERY.md): `verify`, what is sampled, arrival times, and what each refusal means
 - [Roadmap](docs/PLAN.md) · [Releasing](docs/RELEASING.md)
 
 ## Contributing
@@ -236,8 +243,13 @@ Point your app at it and check the connection:
 ```bash
 export AUTTER_ENDPOINT=http://localhost:4318
 export AUTTER_RUNTIME_KEY=autter_rt_local_dev_only
-npx @autter/runtime-node doctor --endpoint "$AUTTER_ENDPOINT"   # ends with "key  accepted"
+npx @autter/runtime-node doctor    # versions, storage and the key; sends nothing
+npx @autter/runtime-node verify    # sends a test event, reads it back, names the first failing step
 ```
+
+`verify`'s test event never opens an issue. When events don't show up, run
+it first; [Is my data arriving?](docs/DELIVERY.md) covers sampling, arrival
+times and every failure it names.
 
 Or with any OpenTelemetry exporter:
 

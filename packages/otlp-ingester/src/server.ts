@@ -54,6 +54,10 @@ import {
 	type OtlpTraceRequest,
 } from "./normalize-otlp.js";
 import { decodeMetricsRequest, decodeTraceRequest, decodeLogsRequest, encodeExportResponse } from "./otlp-proto.js";
+import { DeliveryLog, deliveryKeyHash, ingestSummaryHeader, verifyIdOf } from "./delivery.js";
+
+/** Response header naming what an accepted ingest request stored. */
+export const INGEST_SUMMARY_HEADER = "x-autter-ingest";
 import { MAX_LOG_RECORDS_PER_REQUEST, normalizeLogs, type OtlpLogsRequest } from "./logs.js";
 import { decodeProfile } from "./profiles.js";
 import {
@@ -298,6 +302,8 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		const plan = collapse.plan(ctx, route, kept);
 		return {
 			kept: plan.kept,
+			suppressed,
+			collapsed: Math.max(0, kept.length - plan.kept.length),
 			commit(): void {
 				plan.commit();
 				if (suppressed > 0) drops.record({ tenant: ctx, route, reason: "suppressed", requests: 0, records: suppressed });
@@ -306,6 +312,11 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				plan.rollback();
 			},
 		};
+	}
+
+	/** Volume control off: a `verify` request keeps every occurrence. */
+	function admitAll(occurrences: RuntimeOccurrence[]) {
+		return { kept: occurrences, suppressed: 0, collapsed: 0, commit(): void {}, rollback(): void {} };
 	}
 
 	const allMigrationIds = MIGRATIONS.map((migration) => migration.id);
@@ -358,6 +369,8 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		body: unknown,
 		records?: number,
 	): void {
+		res.locals.dropReason = reason;
+		res.locals.dropError = (body as { error?: unknown } | null)?.error;
 		res.status(status).json(body);
 		const route = dropRoute(req.path);
 		drops.record({
@@ -442,6 +455,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 
 	const app = express();
 	app.disable("x-powered-by");
+	const delivery = new DeliveryLog();
 	// The client address per-IP limits count against: X-Forwarded-For from
 	// this many trusted proxy hops (TRUST_PROXY, default 1).
 	app.set("trust proxy", config.trustProxy ?? 1);
@@ -456,6 +470,35 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		if (url !== req.url) {
 			req.url = url;
 			req.originalUrl = redactKeyFromUrl(req.originalUrl);
+		}
+		next();
+	});
+	// The last accepted / refused request per key (delivery.ts), read back
+	// by its holder through GET /v1/verify. Hashed here, recorded when the
+	// response is finished, whatever answered it.
+	app.use((req, res, next) => {
+		if (req.method === "POST") {
+			const key = keys.extractKey(req);
+			if (key) {
+				const keyHash = deliveryKeyHash(key);
+				res.on("finish", () => {
+					const route = req.path;
+					if (res.statusCode < 300) {
+						delivery.accepted(keyHash, {
+							route,
+							status: res.statusCode,
+							...(res.locals.ingestSummary ? { accepted: res.locals.ingestSummary as Record<string, number> } : {}),
+						});
+					} else if (res.statusCode >= 400) {
+						delivery.rejected(keyHash, {
+							route,
+							status: res.statusCode,
+							reason: typeof res.locals.dropReason === "string" ? res.locals.dropReason : `http_${res.statusCode}`,
+							...(typeof res.locals.dropError === "string" ? { error: res.locals.dropError } : {}),
+						});
+					}
+				});
+			}
 		}
 		next();
 	});
@@ -552,7 +595,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			"content-type, authorization, x-autter-key",
 		);
 		// retry-after: a browser reads it on a 503 (key not checkable right now) or 429.
-		res.setHeader("access-control-expose-headers", `${INGESTER_VERSION_HEADER}, retry-after`);
+		res.setHeader("access-control-expose-headers", `${INGESTER_VERSION_HEADER}, ${INGEST_SUMMARY_HEADER}, retry-after`);
 		res.setHeader("access-control-max-age", "86400");
 		if (req.method === "OPTIONS") {
 			res.status(204).end();
@@ -1004,7 +1047,14 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	 * otherwise. When some records were not stored, `partial_success` names
 	 * how many and why (OTLP spec), so collectors and SDKs log it.
 	 */
-	function otlpSuccess(req: Request, res: Response, signal: OtlpSignal, partial: PartialSuccess | null): void {
+	function otlpSuccess(
+		req: Request,
+		res: Response,
+		signal: OtlpSignal,
+		partial: PartialSuccess | null,
+		summary: Record<string, number> = {},
+	): void {
+		acceptedSummary(res, { ...summary, rejected: partial?.rejected ?? 0 });
 		if (req.is("application/x-protobuf")) {
 			res.status(200).type("application/x-protobuf").end(Buffer.from(encodeExportResponse(partial)));
 			return;
@@ -1015,6 +1065,18 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		res.status(200).json({
 			partialSuccess: partial ? { [rejectedField]: String(partial.rejected), errorMessage: partial.errorMessage } : {},
 		});
+	}
+
+	/**
+	 * `x-autter-ingest` on every accepted ingest response: what was
+	 * stored, and what was not stored as its own row (suppressed, collapsed)
+	 * or was cut (truncated_values). OTLP's partial_success only carries
+	 * rejections, so an all-accepted answer is an empty `partialSuccess: {}`;
+	 * this header says what that request actually became.
+	 */
+	function acceptedSummary(res: Response, counts: Record<string, number>): void {
+		res.locals.ingestSummary = counts;
+		res.setHeader(INGEST_SUMMARY_HEADER, ingestSummaryHeader(counts));
 	}
 
 	app.post("/v1/profiles", asyncRoute(async (req, res) => {
@@ -1127,9 +1189,16 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid OTLP traces payload" }, totalSpans);
 			return;
 		}
-		const { occurrences, occurrenceBatchIndexes, spans, metricPoints, llmCalls } = normalized;
+		// A `verify` test request (delivery.ts): its spans and occurrences
+		// are stored, so the CLI can read them back, but it feeds no rollup,
+		// suppression or loop window, records no SDK and never reaches the
+		// sink, so a check never opens an issue or moves a dashboard.
+		const verifyId = verifyIdOf(request, "resourceSpans");
+		const { occurrences, occurrenceBatchIndexes, spans } = normalized;
+		const metricPoints = verifyId ? [] : normalized.metricPoints;
+		const llmCalls = verifyId ? [] : normalized.llmCalls;
 		const fingerprinted = await fingerprintAll(ctx, occurrences, occurrenceBatchIndexes);
-		const admitted = admit(ctx, req, fingerprinted);
+		const admitted = verifyId ? admitAll(fingerprinted) : admit(ctx, req, fingerprinted);
 		// ClickHouse has no cross-table transaction, so these four inserts can
 		// partially commit. Recovery boundary: any failure → 503 → the exporter
 		// retries the whole batch, and writeAll makes that retry idempotent:
@@ -1153,13 +1222,23 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			return;
 		}
 		admitted.commit();
-		sink?.enqueue(ctx, admitted.kept, metricPoints, llmCalls, digest);
-		recordSdks(ctx, request, req);
+		if (!verifyId) {
+			sink?.enqueue(ctx, admitted.kept, metricPoints, llmCalls, digest);
+			recordSdks(ctx, request, req);
+		}
 		// normalizeTraces stops at SPANS_PER_REQUEST; the rest were not read.
 		const overLimit = Math.max(0, totalSpans - normalized.spanCount);
 		otlpSuccess(req, res, "traces", partialSuccess([
 			{ rejected: overLimit, message: PARTIAL_MESSAGES.spans(overLimit, SPANS_PER_REQUEST) },
-		]));
+		]), {
+			spans: spans.length,
+			occurrences: admitted.kept.length,
+			metric_points: metricPoints.length,
+			llm_calls: llmCalls.length,
+			suppressed: admitted.suppressed,
+			collapsed: admitted.collapsed,
+			truncated_values: truncated,
+		});
 		countAccepted(ctx, req, [
 			{ reason: "spans_over_limit", records: overLimit },
 			{ reason: "attributes_truncated", records: truncated },
@@ -1191,9 +1270,11 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		// edge SDKs mark span-less error records `autter.capture.mode = "log"`,
 		// and those are promoted to occurrences here — see log-promotion.ts.
 		const promoted = await promoteLogs(ctx, logs);
+		// A `verify` test request: stored, nothing else (see /v1/traces).
+		const verifyId = verifyIdOf(logsRequest, "resourceLogs");
 		// Rollups count every promoted error, collapsed or suppressed ones too.
-		const metricPoints = logRollups(logs, promoted);
-		const admitted = admit(ctx, req, promoted);
+		const metricPoints = verifyId ? [] : logRollups(logs, promoted);
+		const admitted = verifyId ? admitAll(promoted) : admit(ctx, req, promoted);
 		const digest = requestDigest(ctx, req.path, req.body);
 		try {
 			await writeAll(digest, [
@@ -1208,11 +1289,20 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			return;
 		}
 		admitted.commit();
-		sink?.enqueue(ctx, admitted.kept, metricPoints, [], digest);
-		recordSdks(ctx, logsRequest, req);
+		if (!verifyId) {
+			sink?.enqueue(ctx, admitted.kept, metricPoints, [], digest);
+			recordSdks(ctx, logsRequest, req);
+		}
 		otlpSuccess(req, res, "logs", partialSuccess([
 			{ rejected: stats.overLimit, message: PARTIAL_MESSAGES.logRecords(stats.overLimit, MAX_LOG_RECORDS_PER_REQUEST) },
-		]));
+		]), {
+			log_records: logs.length,
+			occurrences: admitted.kept.length,
+			metric_points: metricPoints.length,
+			suppressed: admitted.suppressed,
+			collapsed: admitted.collapsed,
+			truncated_values: truncated,
+		});
 		countAccepted(ctx, req, [
 			{ reason: "log_records_over_limit", records: stats.overLimit },
 			{ reason: "attributes_truncated", records: truncated },
@@ -1271,6 +1361,11 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		// Metrics the ingester has no use for (anything but HTTP server
 		// duration histograms and the memory/GC instruments) are ignored,
 		// not rejected: they are neither answered nor counted.
+		const metricsSummary = {
+			metric_points: metricPoints.length,
+			latency_histograms: latency.length,
+			memory_samples: memorySamples.length,
+		};
 		otlpSuccess(req, res, "metrics", partialSuccess([
 			{ rejected: cumulative, message: PARTIAL_MESSAGES.cumulative(cumulative) },
 			{ rejected: memoryStats.invalid, message: PARTIAL_MESSAGES.memoryInvalid(memoryStats.invalid) },
@@ -1278,7 +1373,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				rejected: memoryStats.overLimit,
 				message: PARTIAL_MESSAGES.memoryOverLimit(memoryStats.overLimit, MAX_MEMORY_SAMPLES_PER_REQUEST),
 			},
-		]));
+		]), metricsSummary);
 		countAccepted(ctx, req, [
 			{ reason: "cumulative_histogram", records: cumulative },
 			{ reason: "memory_point_invalid", records: memoryStats.invalid },
@@ -1354,6 +1449,15 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		}
 		void reportIngesterInfo();
 		const rejected = invalidEvents + overLimitEvents;
+		acceptedSummary(res, {
+			events: payload.events.length,
+			occurrences: admitted.kept.length,
+			metric_points: metricPoints.length,
+			suppressed: admitted.suppressed,
+			collapsed: admitted.collapsed,
+			truncated_values: truncated,
+			rejected,
+		});
 		res.status(202).json({ accepted: fingerprinted.length, ...(rejected > 0 ? { rejected, issues } : {}) });
 		countAccepted(ctx, req, [
 			{ reason: "invalid_event", records: invalidEvents },
@@ -1361,6 +1465,44 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			{ reason: "attributes_truncated", records: truncated },
 		]);
 	}));
+
+	/**
+	 * Delivery check for the key's holder, used by `autter-runtime
+	 * verify`: this key's last accepted and last refused request as this
+	 * process saw them, storage readiness, and — with a trace id — what was
+	 * stored for it in the last day (spans, occurrences, logs, with their
+	 * services and releases). Server keys only; never another key's data.
+	 */
+	const verifyRoute = asyncRoute(async (req, res) => {
+		res.setHeader("cache-control", "no-store");
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
+		const traceId = typeof req.params.traceId === "string" ? req.params.traceId.toLowerCase() : null;
+		if (traceId !== null && !/^[a-f0-9]{32}$/.test(traceId)) {
+			res.status(400).json({ error: "trace id must be 32 hex characters" });
+			return;
+		}
+		const key = keys.extractKey(req);
+		const readinessState = await readiness.get();
+		const body: Record<string, unknown> = {
+			ingester: { version },
+			storage: readinessState.state,
+			delivery: key ? delivery.get(deliveryKeyHash(key)) : null,
+		};
+		if (traceId) {
+			try {
+				body.traceId = traceId;
+				body.stored = await store.verifyLookup(ctx, traceId);
+			} catch (err) {
+				console.error("verify lookup failed:", err);
+				res.status(503).json({ ...body, error: "storage unavailable, retry later" });
+				return;
+			}
+		}
+		res.status(200).json(body);
+	});
+	app.get("/v1/verify", verifyRoute);
+	app.get("/v1/verify/:traceId", verifyRoute);
 
 	// A POST to a path nobody serves (a collector endpoint with /v1/traces
 	// twice, an exporter on the wrong base path): counted, then Express's

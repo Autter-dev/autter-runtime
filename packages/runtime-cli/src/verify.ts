@@ -11,7 +11,7 @@
  */
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { hasDebugIdSnippet, readDebugIdComment } from "./debug-id.js";
 import { BUNDLE_RE, readSourceMappingUrl } from "./files.js";
 import { resolveRelease } from "./release.js";
@@ -80,6 +80,7 @@ const NOT_BUNDLES: Array<[RegExp, string]> = [
 	// server-reference-manifest.js, page_client-reference-manifest.js, …
 	[/(^|\/)[\w.-]*[-_]manifest\.js$/, "Next.js server manifest"],
 	[/(^|\/)chunks\/polyfills-[\w-]+\.js$/, "Next.js polyfills, copied prebuilt without a source map"],
+	[/(^|\/)required-server-files\.js$/, "Next.js server manifest"],
 	[/(^|\/)(sw|service-worker|serviceWorker|firebase-messaging-sw|mockServiceWorker)\.js$/, "service worker (the browser SDK doesn't run there)"],
 	[/(^|\/)workbox-[\w-]+\.js$/, "service worker runtime (the browser SDK doesn't run there)"],
 ];
@@ -115,12 +116,41 @@ async function walk(dir: string, out: string[]): Promise<void> {
 	}
 }
 
-/** Directories static files are copied from verbatim: public/, static/ (SvelteKit), src/ (Angular assets). */
+/**
+ * Directories static files are copied from verbatim: public/, static/
+ * (SvelteKit), src/ (Angular assets), in the project that holds `dir`.
+ * Build output can hold its own package.json (Next.js writes
+ * `.next/package.json`), so a dot-directory is never the project, and a
+ * directory that is `dir` or contains it is never a static root: otherwise
+ * `.next/static` would count as a copy of itself.
+ */
 function staticRoots(dir: string): string[] {
 	for (let current = dirname(dir); dirname(current) !== current; current = dirname(current)) {
-		if (existsSync(join(current, "package.json"))) return ["public", "static", "src"].map((name) => join(current, name));
+		if (basename(current).startsWith(".") || !existsSync(join(current, "package.json"))) continue;
+		return ["public", "static", "src"]
+			.map((name) => join(current, name))
+			.filter((root) => dir !== root && !dir.startsWith(`${root}${sep}`));
 	}
 	return [];
+}
+
+/**
+ * Next.js polyfill chunks, which Next copies prebuilt without a source map
+ * (Next 16 / Turbopack names them by hash, `static/chunks/0cz1d0mv5g_q7.js`),
+ * from the `polyfillFiles` of `build-manifest.json` in the `.next` directory
+ * at or above `dir`. Absolute paths.
+ */
+async function nextPolyfills(dir: string): Promise<Set<string>> {
+	for (const distDir of [dir, dirname(dir)]) {
+		try {
+			const manifest = JSON.parse(await readFile(join(distDir, "build-manifest.json"), "utf8")) as { polyfillFiles?: unknown };
+			if (!Array.isArray(manifest.polyfillFiles)) continue;
+			return new Set(manifest.polyfillFiles.filter((file): file is string => typeof file === "string").map((file) => resolve(distDir, file)));
+		} catch {
+			// not a Next.js build directory
+		}
+	}
+	return new Set();
 }
 
 export async function verifyDir(dir: string, options: VerifyOptions = {}): Promise<VerifyResult> {
@@ -132,6 +162,7 @@ export async function verifyDir(dir: string, options: VerifyOptions = {}): Promi
 	const relPath = (path: string) => relative(root, path).split(sep).join("/");
 	const ignore = (options.ignore ?? []).map(globToRegExp);
 	const roots = staticRoots(root);
+	const polyfills = await nextPolyfills(root);
 	const result: VerifyResult = {
 		dir: root,
 		ok: true,
@@ -167,6 +198,10 @@ export async function verifyDir(dir: string, options: VerifyOptions = {}): Promi
 		const known = NOT_BUNDLES.find(([re]) => re.test(path));
 		if (known) {
 			skip(known[1]);
+			continue;
+		}
+		if (polyfills.has(file)) {
+			skip("Next.js polyfills (build-manifest.json), copied prebuilt without a source map");
 			continue;
 		}
 		let copied: string | null = null;

@@ -208,7 +208,8 @@ Keeping your own error responses? `autterErrorHandler()` (Express),
 `autterFastifyErrors` (Fastify) and `autterKoa()` (Koa) only report — the
 error, with its stack, on the request span — and leave the response to your
 handler; `captureRequestError(err)` does the same from any other error hook.
-See [Stack integrations](INTEGRATIONS.md#nodejs-express-fastify-koa-nestjs).
+On Express, `initAutterServer` records the error behind every 5xx response
+even without them; see [Stack integrations](INTEGRATIONS.md#nodejs-express-fastify-koa-nestjs).
 
 Use `toClientError` directly in Fastify `setErrorHandler`, Next.js route
 handlers or anywhere else you build responses. runtime-browser's

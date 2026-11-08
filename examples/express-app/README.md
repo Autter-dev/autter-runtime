@@ -5,6 +5,14 @@ on the server (traces, request summaries, coded errors, LLM calls) and
 `@autter/runtime-browser` on the page, posting through the app's own
 same-origin relay.
 
+## Prerequisites
+
+- Node.js 20 or later and npm 10 (the repo is an npm workspace).
+- Docker with Compose v2, for the local ClickHouse and ingester.
+- Ports 3000 (the app), 4318 (the ingester) and 8123 (ClickHouse) free.
+- Nothing else: no key to create, no `.env`. Against a deployed ingester you
+  need its URL and a **server** key (`autter_rt_…`); see below.
+
 ## Run it locally
 
 From the root of this repo, in two terminals:
@@ -36,6 +44,11 @@ docker compose exec clickhouse clickhouse-client --password dev --query \
 
 `example-express` rows come from the server, `example-web` rows from the
 page.
+
+Check the path before clicking around: `npx @autter/runtime-node verify
+--endpoint http://localhost:4318 --key autter_rt_local_dev_only --service
+example-express-app` sends a test event and reads it back, step by step
+(built from this repo: `node packages/runtime-node/dist/cli.js verify …`).
 
 ## Against another ingester
 

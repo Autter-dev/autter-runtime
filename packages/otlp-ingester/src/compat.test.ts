@@ -10,6 +10,7 @@ import {
 	ingesterInfoFromReport,
 	versionAtLeast,
 } from "./compat.js";
+import { compatTableMarkdown, withCompatTable } from "./compat-table.js";
 import { MIGRATIONS } from "./migrations.js";
 import { browserPayloadSchema } from "./normalize-browser.js";
 
@@ -142,4 +143,11 @@ test("compat report marks availability from version and schema state, and round-
 	});
 	assert.equal(ingesterInfoFromReport({ ingester: { version: "<script>" } }), null);
 	assert.equal(ingesterInfoFromReport("nope"), null);
+});
+
+test("docs/COMPATIBILITY.md's table is the manifest (node scripts/compat-table.mjs --write)", () => {
+	const doc = readFileSync(new URL("../../../docs/COMPATIBILITY.md", import.meta.url), "utf8");
+	assert.equal(doc, withCompatTable(doc), "the compatibility table is out of date: run `npm run build -w @autter/otlp-ingester && node scripts/compat-table.mjs --write`");
+	const table = compatTableMarkdown();
+	for (const feature of COMPAT_MANIFEST.features) assert.ok(table.includes(`(\`${feature.id}\`) | ${feature.ingester}+ |`), feature.id);
 });

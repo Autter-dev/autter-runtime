@@ -1,3 +1,4 @@
+import { authHeaders, noteIngestRefusal, resolveIngestKey } from "./ingest-auth.js";
 import {
 	appendFileSync,
 	mkdirSync,
@@ -157,7 +158,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 							method: "POST",
 							headers: {
 								"content-type": "application/json",
-								authorization: `Bearer ${apiKey}`,
+								...authHeaders(resolveIngestKey(apiKey, {})),
 							},
 							body,
 							signal: AbortSignal.timeout(
@@ -169,6 +170,16 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 							failure = Object.assign(new Error(`Runtime log export failed (${response.status})`), {
 								status: response.status,
 							});
+							if (response.status !== 429 && response.status < 500) {
+								// Logged once per status (ingest-auth.ts): a 401 or a
+								// 404 from an ingester without /v1/logs is no longer silent.
+								noteIngestRefusal({
+									status: response.status,
+									route: "/v1/logs",
+									endpoint,
+									body: await response.text().catch(() => ""),
+								});
+							}
 							// A refused key or payload won't change on the next attempt;
 							// 429 and 5xx (e.g. 503 while the ingester can't check the
 							// key) may, after the answer's Retry-After.

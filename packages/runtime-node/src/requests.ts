@@ -186,6 +186,45 @@ export function captureAtBoundary(
 	}
 }
 
+/**
+ * @internal The request the running code belongs to, as error span
+ * attributes (`autter.request.id`, `http.route`, `http.request.method`),
+ * even after its response finished: a floating promise that rejects later
+ * still runs in the request's async context, but its summary is sealed
+ * (`currentOperation()` is empty) and its HTTP span has ended, so an error
+ * reported then gets a span of its own that would otherwise carry neither.
+ * Read from the request summary (autterRequests) and the HTTP server span
+ * in the active context. Never throws; undefined when there is no request.
+ */
+export function requestScopeAttributes(): Attributes | undefined {
+	try {
+		const out: Attributes = {};
+		const state = local.getStore();
+		const active = context.active();
+		const metadata = getRPCMetadata(active);
+		const http = metadata?.type === RPCType.HTTP ? metadata : undefined;
+		const spanAttributes = (http?.span as unknown as { attributes?: Attributes } | undefined)
+			?.attributes;
+		const req = state?.req as (IncomingMessage & { originalUrl?: string }) | undefined;
+		const nodeRequest = !!req && typeof req === "object" && typeof req.url === "string" && req.url.startsWith("/");
+		const requestId = state?.requestId ?? spanAttributes?.["autter.request.id"];
+		if (typeof requestId === "string" && requestId) out["autter.request.id"] = requestId;
+		const route =
+			http?.route ??
+			spanAttributes?.["http.route"] ??
+			(nodeRequest ? (expressRouteOf(req) ?? normalizeRoutePath(pathOf(req))) : undefined);
+		if (typeof route === "string" && route) out["http.route"] = route;
+		const method =
+			(nodeRequest ? req.method : undefined) ??
+			spanAttributes?.["http.request.method"] ??
+			spanAttributes?.["http.method"];
+		if (typeof method === "string" && method) out["http.request.method"] = method.toUpperCase();
+		return Object.keys(out).length > 0 ? out : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** @internal The request summary state Autter attached to a Node request. */
 export function requestStateOf(req: unknown): OperationState | undefined {
 	if (!req || typeof req !== "object") return undefined;

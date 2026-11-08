@@ -28,9 +28,12 @@ jobs:
   clickhouse-e2e:
     # The built ingester against a real ClickHouse, the version production
     # runs: migrations, /healthz readiness (a wrong password, a dropped
-    # table), and retried OTLP exports after a lost response, a partial
-    # fan-out failure and a restart — stored exactly once
-    # (packages/otlp-ingester/scripts/clickhouse-e2e.mjs).
+    # table), retried OTLP exports after a lost response, a partial
+    # fan-out failure and a restart — stored exactly once — and `verify`
+    # reading a test event back from the real tables
+    # (packages/otlp-ingester/scripts/clickhouse-e2e.mjs). Then source maps
+    # end to end, from real bundler builds to stored occurrences
+    # (e2e/sourcemaps/run.mjs).
     runs-on: blacksmith-4vcpu-ubuntu-2404
     services:
       clickhouse:
@@ -52,17 +55,36 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npm run build -w @autter/otlp-ingester
+      # The whole build: the script runs `verify` (Node and Python) against
+      # the real tables, and the source map check below also needs
+      # runtime-browser and runtime-cli.
+      - run: npm run build
       - run: npm run e2e:clickhouse -w @autter/otlp-ingester
         env:
           CLICKHOUSE_URL: http://127.0.0.1:8123
           CLICKHOUSE_ADMIN_PASSWORD: e2e
           EXPECT_CLICKHOUSE_VERSION: 24.8.14.39
+      # A real minified app built with the plugins (Vite 8 with Oxc and with
+      # terser, webpack 5, Next.js 16 with Turbopack), its maps uploaded with
+      # an upload-only key, an error thrown in headless Chromium, and the
+      # stored occurrence read back: original files, lines and functions,
+      # and one issue across the four builds (e2e/sourcemaps/run.mjs). Its
+      # bundlers have their own lockfile, out of the root install.
+      - name: Source maps end to end (install)
+        working-directory: e2e/sourcemaps
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright-core install --with-deps chromium
+      - name: Source maps end to end
+        run: node e2e/sourcemaps/run.mjs
+        env:
+          CLICKHOUSE_URL: http://127.0.0.1:8123
+          CLICKHOUSE_ADMIN_PASSWORD: e2e
 
   examples-e2e:
     # The quickstart as a new user runs it: `docker compose up` with no .env
     # and no key step (ClickHouse 24.8 + the ingester with its built-in local
-    # key), `doctor`, then every example with its own defaults, and the rows
+    # key), `doctor` and `verify`, then every example with its own defaults, and the rows
     # each one sent read back from ClickHouse (scripts/examples-e2e.mjs and
     # examples/python/testing/compose_e2e.py).
     runs-on: blacksmith-4vcpu-ubuntu-2404

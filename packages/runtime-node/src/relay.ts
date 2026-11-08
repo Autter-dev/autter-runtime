@@ -1,3 +1,4 @@
+import { authHeaders, noteIngestRefusal, resolveIngestKey, warnKeyKind, warnMissingKey } from "./ingest-auth.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Attributes } from "@opentelemetry/api";
 import { makeRedactor, type RedactOptions, type Redactor } from "./redact.js";
@@ -19,8 +20,12 @@ import { fingerprintValues, sanitizeBreadcrumbs } from "@autter/runtime-core";
  */
 
 export interface RelayOptions {
-	/** Private ingest key (autter_rt_…). Keep it in an env var. */
-	apiKey: string;
+	/**
+	 * Private ingest key (autter_rt_…). Keep it in an env var. Default:
+	 * AUTTER_RUNTIME_KEY. Without one the relay answers 500 and warns once
+	 * at startup, instead of forwarding with "Bearer undefined".
+	 */
+	apiKey?: string;
 	/** Ingester base URL. Default: https://otlp.autter.dev */
 	endpoint?: string;
 	/** Max accepted request body. Default 64 KB. */
@@ -463,19 +468,72 @@ export function sanitizeBrowserPayload(
 	raw: unknown,
 	redactor: Redactor = defaultRelayRedactor,
 ): object | null {
-	if (typeof raw !== "object" || raw === null) return null;
+	const checked = checkBrowserPayload(raw, redactor);
+	return "payload" in checked ? checked.payload : null;
+}
+
+/** Why a browser payload was refused: the field and what was wrong. Same
+ * shape as the ingester's `issues` (a path into the payload, a message). */
+export interface RelayPayloadIssue {
+	path: Array<string | number>;
+	message: string;
+}
+
+const MAX_RELAY_ISSUES = 5;
+
+function describe(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "an array";
+	if (typeof value === "string") return value ? `"${value.slice(0, 40)}"` : "an empty string";
+	return typeof value === "undefined" ? "missing" : `a ${typeof value}`;
+}
+
+/**
+ * Validate and sanitise a browser payload. On failure, the first few
+ * problems with their field paths (`["events", 3, "type"]`), so a 400 from
+ * the relay says what to fix instead of only "invalid payload".
+ */
+export function checkBrowserPayload(
+	raw: unknown,
+	redactor: Redactor = defaultRelayRedactor,
+): { payload: object } | { issues: RelayPayloadIssue[] } {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return { issues: [{ path: [], message: `expected a JSON object, got ${describe(raw)}` }] };
+	}
 	const p = raw as Record<string, unknown>;
-	if (p.version !== 1) return null;
-	if (typeof p.service !== "string" || !p.service) return null;
-	if (typeof p.environment !== "string" || !p.environment) return null;
-	if (!Array.isArray(p.events) || p.events.length > MAX_EVENTS) return null;
+	const issues: RelayPayloadIssue[] = [];
+	const issue = (path: Array<string | number>, message: string) => {
+		if (issues.length < MAX_RELAY_ISSUES) issues.push({ path, message });
+	};
+	if (p.version !== 1) issue(["version"], `expected 1, got ${describe(p.version)}`);
+	if (typeof p.service !== "string" || !p.service) issue(["service"], `expected a non-empty string, got ${describe(p.service)}`);
+	if (typeof p.environment !== "string" || !p.environment) {
+		issue(["environment"], `expected a non-empty string, got ${describe(p.environment)}`);
+	}
+	if (!Array.isArray(p.events)) issue(["events"], `expected an array, got ${describe(p.events)}`);
+	else if (p.events.length > MAX_EVENTS) issue(["events"], `at most ${MAX_EVENTS} events per batch, got ${p.events.length}`);
+	if (Array.isArray(p.events) && p.events.length <= MAX_EVENTS) {
+		p.events.forEach((rawEvent, index) => {
+			if (typeof rawEvent !== "object" || rawEvent === null) {
+				issue(["events", index], `expected an object, got ${describe(rawEvent)}`);
+				return;
+			}
+			const e = rawEvent as Record<string, unknown>;
+			if (typeof e.type !== "string" || !EVENT_TYPES.has(e.type)) {
+				issue(["events", index, "type"], `expected one of ${[...EVENT_TYPES].join(", ")}, got ${describe(e.type)}`);
+			}
+			if (typeof e.timestamp !== "string") {
+				issue(["events", index, "timestamp"], `expected an ISO 8601 string, got ${describe(e.timestamp)}`);
+			}
+		});
+	}
+	if (issues.length) return { issues };
+	const service = p.service as string;
+	const environment = p.environment as string;
 
 	const events: object[] = [];
-	for (const rawEvent of p.events) {
-		if (typeof rawEvent !== "object" || rawEvent === null) return null;
+	for (const rawEvent of p.events as unknown[]) {
 		const e = rawEvent as Record<string, unknown>;
-		if (typeof e.type !== "string" || !EVENT_TYPES.has(e.type)) return null;
-		if (typeof e.timestamp !== "string") return null;
 		events.push({
 			type: e.type,
 			timestamp: e.timestamp,
@@ -517,13 +575,13 @@ export function sanitizeBrowserPayload(
 		});
 	}
 
-	return {
+	return { payload: {
 		version: 1,
 		...(typeof p.sessionId === "string"
 			? { sessionId: p.sessionId.slice(0, 100) }
 			: {}),
-		service: p.service.slice(0, 200),
-		environment: p.environment.slice(0, 100),
+		service: service.slice(0, 200),
+		environment: environment.slice(0, 100),
 		...(typeof p.release === "string"
 			? { release: p.release.slice(0, 200) }
 			: {}),
@@ -532,8 +590,14 @@ export function sanitizeBrowserPayload(
 			? { sdk: p.sdk }
 			: {}),
 		events,
-	};
+	} };
 }
+
+/** What a relay without an ingest key answers (500: a server misconfiguration). */
+const NO_KEY_BODY = {
+	error: "relay has no ingest key",
+	fix: "set AUTTER_RUNTIME_KEY (a server key, autter_rt_…) where the relay runs",
+} as const;
 
 /** Attempts per forwarded batch, and the longest wait between two. */
 const FORWARD_ATTEMPTS = 3;
@@ -545,7 +609,7 @@ const FORWARD_MAX_WAIT_MS = 10_000;
  * network error is retried after the answer's Retry-After (at most 10 s),
  * else 1 s then 2 s; any other answer is final.
  */
-function forward(payload: object, opts: RelayOptions): void {
+function forward(payload: object, opts: RelayOptions, apiKey: string): void {
 	const endpoint = (opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "");
 	const url = `${endpoint}/v1/browser`;
 	const compat = opts.compatCheck !== false;
@@ -558,7 +622,7 @@ function forward(payload: object, opts: RelayOptions): void {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					authorization: `Bearer ${opts.apiKey}`,
+					...authHeaders(apiKey),
 				},
 				body,
 				signal: AbortSignal.timeout(10_000),
@@ -573,6 +637,17 @@ function forward(payload: object, opts: RelayOptions): void {
 			await response.body?.cancel().catch(() => {});
 			await sleep(seconds > 0 ? Math.min(seconds * 1000, FORWARD_MAX_WAIT_MS) : 1000 * 2 ** (n - 1));
 			return attempt(n + 1);
+		}
+		if (!response.ok) {
+			// The browser already has its 202: this is the only place a
+			// refused key or batch can show up. Once per status (ingest-auth.ts).
+			noteIngestRefusal({
+				status: response.status,
+				route: "/v1/browser",
+				endpoint,
+				body: await response.clone().text().catch(() => ""),
+				via: "relay",
+			});
 		}
 		if (!compat) return;
 		const types = new Set(
@@ -614,9 +689,18 @@ export function createBrowserRelayFetchHandler(
 		opts.perIpRateLimit === false
 			? null
 			: new IpWindow(opts.perIpRateLimit ?? 120);
+	const apiKey = resolveIngestKey(opts.apiKey);
+	if (!apiKey) warnMissingKey("relay");
+	else warnKeyKind(apiKey);
 	return async (request: Request): Promise<Response> => {
 		if (request.method !== "POST") {
 			return new Response(null, { status: 405 });
+		}
+		if (!apiKey) {
+			return new Response(JSON.stringify(NO_KEY_BODY), {
+				status: 500,
+				headers: { "content-type": "application/json" },
+			});
 		}
 		if (limiter) {
 			const ip = fetchClientKey(request, opts);
@@ -647,13 +731,14 @@ export function createBrowserRelayFetchHandler(
 				status: 400,
 			});
 		}
-		const payload = sanitizeBrowserPayload(raw, redactor);
-		if (!payload) {
-			return new Response(JSON.stringify({ error: "invalid payload" }), {
+		const checked = checkBrowserPayload(raw, redactor);
+		if (!("payload" in checked)) {
+			return new Response(JSON.stringify({ error: "invalid payload", issues: checked.issues }), {
 				status: 400,
+				headers: { "content-type": "application/json" },
 			});
 		}
-		forward(payload, opts);
+		forward(checked.payload, opts, apiKey);
 		return new Response(null, { status: 202 });
 	};
 }
@@ -692,19 +777,27 @@ export function createBrowserRelayHandler(
 		}
 	}
 
+	const apiKey = resolveIngestKey(opts.apiKey);
+	if (!apiKey) warnMissingKey("relay");
+	else warnKeyKind(apiKey);
+
 	function handleParsed(raw: unknown, res: ServerResponse): void {
-		const payload = sanitizeBrowserPayload(raw, redactor);
-		if (!payload) {
-			respond(res, 400, { error: "invalid payload" });
+		const checked = checkBrowserPayload(raw, redactor);
+		if (!("payload" in checked)) {
+			respond(res, 400, { error: "invalid payload", issues: checked.issues });
 			return;
 		}
-		forward(payload, opts);
+		forward(checked.payload, opts, apiKey!);
 		respond(res, 202);
 	}
 
 	return (req, res) => {
 		if (req.method !== "POST") {
 			respond(res, 405);
+			return;
+		}
+		if (!apiKey) {
+			respond(res, 500, NO_KEY_BODY);
 			return;
 		}
 		if (limiter) {

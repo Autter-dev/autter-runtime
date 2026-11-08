@@ -10,7 +10,9 @@
  *   node scripts/examples-e2e.mjs
  *
  * Checks, in order:
- *   1. `doctor` passes against the local ingester with the local key;
+ *   1. `doctor` passes against the local ingester with the local key, and
+ *      `verify` (Node and Python) reads a test event back with every step
+ *      passing;
  *   2. examples/express-app: `npm start` (prestart copies the browser SDK),
  *      says it sends to http://localhost:4318, serves the SDK and every chunk
  *      it imports, and its server error, request summary and a browser error
@@ -134,6 +136,20 @@ async function doctor() {
 	const code = await exited;
 	check(code === 0, "doctor exits 0 against the local ingester", output());
 	check(/^\s*key\s+accepted$/m.test(output()), "doctor says the local key is accepted", output());
+	check(/^\s*storage\s+ready: ClickHouse accepts writes$/m.test(output()), "doctor says storage is ready", output());
+
+	console.log("verify");
+	const node = run(process.execPath, [cli, "verify", "--endpoint", INGESTER, "--key", LOCAL_DEV_KEY, "--service", `quickstart-${RUN}`, "--release", RUN], { env: cleanEnv() });
+	const nodeCode = await node.exited;
+	check(nodeCode === 0, "verify exits 0 against the local ingester", node.output());
+	for (const name of ["key", "network", "storage", "auth", "ingest", "stored", "trace", "release", "logs"]) {
+		check(new RegExp(`^\\s*ok\\s+${name}\\b`, "m").test(node.output()), `verify: ${name} ok`, node.output());
+	}
+	const python = run("python3", [join(ROOT, "adapters", "python", "compat.py"), "verify", "--endpoint", INGESTER, "--service", `quickstart-py-${RUN}`, "--release", RUN], { env: cleanEnv({ AUTTER_RUNTIME_KEY: LOCAL_DEV_KEY }) });
+	const pythonCode = await python.exited;
+	check(pythonCode === 0 && /Delivered: a test event/.test(python.output()), "compat.py verify exits 0 against the local ingester", python.output());
+	const wrong = run(process.execPath, [cli, "verify", "--endpoint", INGESTER, "--key", "autter_rt_not_a_real_key_0000000000"], { env: cleanEnv() });
+	check((await wrong.exited) === 1 && /First failing step: auth\./.test(wrong.output()), "verify with a wrong key names auth as the first failing step", wrong.output());
 }
 
 async function expressApp() {
@@ -172,6 +188,10 @@ async function expressApp() {
 	check(seen.size > 1, `the SDK's imports were followed (${[...seen].join(", ")})`);
 
 	check((await fetch(`${base}/api/boom`)).status === 500, "GET /api/boom → 500");
+	const search = await fetch(`${base}/api/orders/search`);
+	check(search.status === 500, "GET /api/orders/search (router with its own error handler) → 500");
+	const searchRequestId = search.headers.get("x-request-id") ?? "";
+	check(/^[\w.-]{8,128}$/.test(searchRequestId), "GET /api/orders/search echoes its request id", searchRequestId);
 	check((await fetch(`${base}/api/checkout?declined`, { method: "POST" })).status === 402, "POST /api/checkout?declined → 402");
 	const relay = await fetch(`${base}/api/autter-runtime`, {
 		method: "POST",
@@ -183,6 +203,12 @@ async function expressApp() {
 	await row(
 		`SELECT error_type, message FROM runtime_error_occurrences WHERE service = 'example-express' AND release = '${RUN}' AND message LIKE '%reading ''total''%' LIMIT 1`,
 		"the server error from /api/boom (runtime_error_occurrences)",
+	);
+	// No autterErrorHandler in that router: the SDK captures Express errors
+	// by default, with the route and the request id.
+	await row(
+		`SELECT error_type FROM runtime_error_occurrences WHERE service = 'example-express' AND release = '${RUN}' AND error_type = 'RangeError' AND message = 'search index unavailable' AND route = '/api/orders/search' AND request_id = '${searchRequestId}' AND position(stack, 'server.js') > 0 LIMIT 1`,
+		"the nested router's error, captured by default with stack, route and request id",
 	);
 	await row(
 		`SELECT status_code FROM runtime_logs WHERE service = 'example-express' AND release = '${RUN}' AND kind = 'request' AND status_code = 402 LIMIT 1`,

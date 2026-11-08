@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
 import { build } from "esbuild";
-import { computeScopes, injectDir, MAX_MAP_CHARS, SCOPES_KEY, uploadDir } from "../dist/index.js";
+import { minify as terser } from "terser";
+import { computeOriginalScopes, computeScopes, flattenIndexMap, injectDir, MAX_MAP_CHARS, ORIGINAL_SCOPES_KEY, SCOPES_KEY, uploadDir } from "../dist/index.js";
 import { framesV3Fingerprint } from "../../otlp-ingester/dist/fingerprint-v3.js";
-import { ScopeIndex } from "../../otlp-ingester/dist/source-map-scopes.js";
+import { OriginalScopeIndex, ScopeIndex } from "../../otlp-ingester/dist/source-map-scopes.js";
 import { parseStackFrames } from "../../otlp-ingester/dist/stack-frames.js";
 import { SourceMapCache, Symbolicator } from "../../otlp-ingester/dist/symbolicate.js";
 import { read, readJson, SERVER_KEY, SIMPLE_MAP, startIngester, tempDir } from "./helpers.mjs";
@@ -17,13 +18,13 @@ const quiet = { log: () => {} };
 
 /** Bundle `entry` of `files` with esbuild, minified, with a source map
  * (sourcesContent included, as esbuild writes it by default). */
-async function bundle(files, { entry = "src/main.js", format = "esm", outfile = "assets/app.js", globalName } = {}) {
+async function bundle(files, { entry = "src/main.js", format = "esm", outfile = "assets/app.js", globalName, minify = true } = {}) {
 	const dir = tempDir(files);
 	await build({
 		entryPoints: [join(dir, entry)],
 		outfile: join(dir, "dist", outfile),
 		bundle: true,
-		minify: true,
+		minify,
 		sourcemap: true,
 		format,
 		...(globalName ? { globalName } : {}),
@@ -159,6 +160,73 @@ test("every kind of function maps to its original name through a minified esbuil
 	assert.ok(names.includes("captured") && names.includes("onPayClick") && !names.includes("computeTotal"));
 	assert.equal(ScopeIndex.from(result.scopes, map.names).size, 18);
 	assert.ok(scopes.length < 18 * 10, scopes);
+});
+
+// terser (webpack's minifier, and Vite's with `minify: "terser"`) inlines
+// single-use functions as NAMELESS expressions at their call site
+// (`String(function(e){…}(o))`), so the bundle has no name token for them.
+const INLINED = {
+	"src/pricing.js": `
+export function applyDiscount(order, code) {
+  const rule = order.discounts[code];
+  if (!rule) throw new Error("@exported-function");
+  return order.subtotal - rule.amount;
+}
+export const roundCents = (value) => {
+  if (Number.isNaN(value)) throw new Error("@exported-arrow");
+  return Math.round(value * 100) / 100;
+};
+export default async function loadOrder() {
+  throw new Error("@export-default-function");
+}
+`,
+	"src/main.js": `
+import loadOrder, { applyDiscount, roundCents } from "./pricing.js";
+function computeTotal(order) {
+  const total = roundCents(applyDiscount(order, order.code));
+  if (total < 0) throw new Error("@local-function");
+  return total;
+}
+window.onCheckout = () => computeTotal(window.order);
+window.onLoad = () => loadOrder();
+[1].forEach(function () {
+  globalThis.seen = "@anonymous-callback";
+});
+`,
+};
+
+test("terser: functions inlined as nameless expressions get their original names back from sourcesContent", async () => {
+	// esbuild bundles (unminified), terser minifies with its default
+	// compress options, composing the two maps (what Vite does).
+	const out = await bundle(INLINED, { minify: false });
+	const esbuildCode = read(out.dir, out.js).replace(/\n\/\/# sourceMappingURL=.*\n?$/, "\n");
+	const esbuildMap = readJson(out.dir, out.map);
+	const minified = await terser(esbuildCode, {
+		module: true,
+		sourceMap: { content: esbuildMap, includeSources: true },
+	});
+	const code = minified.code;
+	const map = JSON.parse(minified.map);
+	for (const marker of ["@exported-function", "@exported-arrow", "@export-default-function"]) {
+		const offset = code.indexOf(marker);
+		const start = Math.max(code.lastIndexOf("function", offset), code.lastIndexOf("=>", offset));
+		assert.match(code.slice(start, start + 12), /^(?:function\(|=>)/, `terser inlined the function around ${marker} without a name: ${code}`);
+	}
+	const result = computeScopes(code, map);
+	assert.ok("scopes" in result, result.error);
+	const names = Object.fromEntries(
+		["@exported-function", "@exported-arrow", "@export-default-function", "@local-function", "@anonymous-callback"].map((marker) => [
+			marker,
+			nameAround(code, result.scopes, map, marker),
+		]),
+	);
+	assert.deepEqual(names, {
+		"@exported-function": "applyDiscount",
+		"@exported-arrow": "roundCents",
+		"@export-default-function": "loadOrder",
+		"@local-function": "computeTotal",
+		"@anonymous-callback": null,
+	});
 });
 
 test("without `names`, minified names are read from sourcesContent; without either they are unknown", async () => {
@@ -340,7 +408,8 @@ test("end to end: minified bundle, inject, upload, real V8 stacks — frames are
 	const [row] = ingester.rows;
 	const stored = JSON.parse(row.map);
 	assert.ok(stored[SCOPES_KEY].scopes.length > 0, "the stored map carries scopes");
-	const { [SCOPES_KEY]: _scopes, ...unscoped } = stored;
+	// "before": a map from a CLI without scopes of either kind.
+	const { [SCOPES_KEY]: _scopes, [ORIGINAL_SCOPES_KEY]: _original, ...unscoped } = stored;
 	const before = JSON.stringify(unscoped);
 	const after = row.map;
 
@@ -443,4 +512,96 @@ test("end to end: a vendor-sized map over 5 MB uploads gzipped and symbolicates,
 	assert.deepEqual(await resolve(small), expected);
 	assert.equal(small.bypassed, 1);
 	assert.equal(small.bytes, 0);
+});
+
+// ── Original scopes: names that survive inlining ─────────────────────────
+
+/** 0-based (line, column) of `marker` in `text`. */
+function positionIn(text, marker) {
+	const before = text.slice(0, text.indexOf(marker)).split("\n");
+	return [before.length - 1, before.at(-1).length];
+}
+
+test("original scopes: each in-app source's functions, named as written (JS, TS, TSX); others get none", () => {
+	const ts = [
+		"export function applyDiscount(order: Order, code: string): number {",
+		"  const rule = order.discounts[code];",
+		"  return order.subtotal - rule!.amount; // @ts-function",
+		"}",
+		"export const roundCents = <T extends number>(value: T): number => Math.round(value * 100 /* @ts-arrow */) / 100;",
+		"class Cart { total(): number { return 1; /* @ts-method */ } }",
+		"top(); // @ts-top-level",
+	].join("\n");
+	const tsx = [
+		"export default function Checkout({ order }: Props) {",
+		"  const onClick = () => { throw new Error('x'); /* @tsx-handler */ };",
+		"  return <button onClick={onClick}>Pay {order.total}</button>; // @tsx-component",
+		"}",
+	].join("\n");
+	const jsx = "export const Badge = (props) => <span>{props.n /* @jsx-arrow */}</span>;\n";
+	const map = {
+		version: 3,
+		sources: ["src/pricing.ts", "src/Checkout.tsx", "src/Badge.jsx", "src/App.vue", "node_modules/x/index.js"],
+		names: ["applyDiscount"],
+		mappings: "",
+		sourcesContent: [ts, tsx, jsx, "<template><div/></template>", null],
+	};
+	const result = computeOriginalScopes(map);
+	assert.ok(result);
+	assert.equal(result.sources[3], null, ".vue is not parsed");
+	assert.equal(result.sources[4], null, "no content (a dependency): nothing");
+	assert.ok(!result.names.includes("applyDiscount"), "names the map already has are referenced, not repeated");
+	const index = OriginalScopeIndex.from(result, map.names);
+	const at = (source, text, marker) => {
+		const found = index.nameAt(source, ...positionIn(text, marker));
+		return found?.kind === "named" ? found.name : found?.kind ?? null;
+	};
+	assert.equal(at(0, ts, "@ts-function"), "applyDiscount");
+	assert.equal(at(0, ts, "@ts-arrow"), "roundCents");
+	assert.equal(at(0, ts, "@ts-method"), "total");
+	assert.equal(at(0, ts, "@ts-top-level"), "anonymous");
+	assert.equal(at(1, tsx, "@tsx-handler"), "onClick");
+	assert.equal(at(1, tsx, "@tsx-component"), "Checkout");
+	assert.equal(at(2, jsx, "@jsx-arrow"), "Badge");
+	assert.equal(index.nameAt(3, 0, 0), null, "a source without scopes falls back to the bundle scopes");
+});
+
+test("upload sends original scopes for in-app sources, and none with --no-sources-content", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const out = await bundle(INLINED, { minify: false });
+	await uploadDir(out.dir, { ...quiet, release: "r1", endpoint: ingester.url, key: SERVER_KEY });
+	const stored = JSON.parse(ingester.rows[0].map);
+	const original = OriginalScopeIndex.from(stored[ORIGINAL_SCOPES_KEY], stored.names);
+	assert.ok(original, "x_autter_original_scopes is stored with the map");
+	const pricing = stored.sources.findIndex((source) => source.endsWith("pricing.js"));
+	const content = stored.sourcesContent[pricing];
+	assert.deepEqual(original.nameAt(pricing, ...positionIn(content, "@exported-function")), { kind: "named", name: "applyDiscount" });
+
+	const bare = await startIngester();
+	t.after(bare.close);
+	await uploadDir(out.dir, { ...quiet, release: "r1", endpoint: bare.url, key: SERVER_KEY, sourcesContent: false });
+	assert.equal(JSON.parse(bare.rows[0].map)[ORIGINAL_SCOPES_KEY], undefined);
+});
+
+test("index maps flatten to the regular map they stand for: offsets, sources, names, contents, ignore lists", () => {
+	const flat = flattenIndexMap({
+		version: 3,
+		file: "app.js",
+		debugId: "c0ffee00-0000-4000-8000-000000000003",
+		sections: [
+			{ offset: { line: 0, column: 0 }, map: { version: 3, sources: ["a.ts"], sourcesContent: ["A"], names: ["one"], mappings: "AAAAA" } },
+			// Same generated line, 10 columns in; nested index map one line down.
+			{ offset: { line: 0, column: 10 }, map: { version: 3, sourceRoot: "lib", sources: ["b.ts"], names: [], mappings: "AAAA,EAAC", ignoreList: [0] } },
+			{ offset: { line: 1, column: 0 }, map: { version: 3, sections: [{ offset: { line: 1, column: 4 }, map: { version: 3, sources: ["c.ts"], names: ["two"], mappings: "AAAAA" } }] } },
+		],
+	});
+	assert.deepEqual(flat.sources, ["a.ts", "lib/b.ts", "c.ts"]);
+	assert.deepEqual(flat.names, ["one", "two"]);
+	assert.deepEqual(flat.sourcesContent, ["A", null, null]);
+	assert.deepEqual(flat.ignoreList, [1]);
+	assert.equal(flat.debugId, "c0ffee00-0000-4000-8000-000000000003");
+	// Line 0: col 0 → a.ts 0:0 "one"; col 10 → b.ts 0:0; col 12 → b.ts 0:1. Line 2: col 4 → c.ts 0:0 "two".
+	assert.equal(flat.mappings, "AAAAA,UCAA,EAAC;;ICADC");
+	assert.throws(() => flattenIndexMap({ version: 3, sections: [{ map: {} }] }), /offset/);
 });

@@ -1,0 +1,20 @@
+{
+	"name": "autter-sourcemaps-e2e",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"description": "A real minified browser app built with the Autter source map plugins, for the end-to-end check in CI (run.mjs). Not a workspace: its bundlers stay out of the root install.",
+	"dependencies": {
+		"@autter/runtime-browser": "file:../../packages/runtime-browser",
+		"@autter/runtime-cli": "file:../../packages/runtime-cli"
+	},
+	"devDependencies": {
+		"next": "16.4.5",
+		"playwright-core": "1.65.0",
+		"react": "19.3.1",
+		"react-dom": "19.3.1",
+		"terser": "5.51.2",
+		"vite": "8.3.6",
+		"webpack": "5.112.2"
+	}
+}

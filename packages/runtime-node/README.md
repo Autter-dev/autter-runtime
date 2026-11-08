@@ -240,16 +240,34 @@ initAutterServer({ ..., instrumentations: [new ExpressInstrumentation()] });
 
 ### Server errors keep their stacks
 
-When a handler throws, the framework answers 500 — and on its own that 500
-is all the tracker sees: a stackless `HttpServerError` grouped by route. Add
-your framework's hook and the thrown error is recorded, with its stack, on
-the request span; the framework then carries on exactly as before.
+**Express (4 and 5): automatic.** With `initAutterServer` alone, the error
+behind a 5xx response is recorded on the request span with its type,
+message and stack, plus the route and (with `autterRequests`) the request id.
+That covers a handler that throws, an async handler that rejects (Express 5),
+`next(err)`, and routers that have their own error handler. (Express 4
+ignores the promise an async handler returns, so its rejection is an
+unhandled rejection: recorded with the request's route and id, see below.)
+Express's own
+behaviour is unchanged. An error that ends in a 4xx response is not
+reported this way, and neither is an error that `autterErrorHandler()` or
+`captureException` already reported, so adding the handler never reports an
+error twice. `captureExpressErrors: false` turns the automatic capture off.
+
+**Everything else needs its hook.** When a Fastify or Koa handler throws, the
+framework answers 500, and on its own that 500 is all the tracker sees: a
+stackless `HttpServerError` grouped by route. Add your framework's hook and
+the thrown error is recorded, with its stack, on the request span; the
+framework then carries on exactly as before. On Express,
+`autterErrorHandler()` still has two uses: it also reports coded errors that
+end in a 4xx (and every error with `{ capture: true }`), and it works in
+logger-only setups (`initAutterLogging`).
 
 ```ts
 import { autterErrorHandler, autterFastifyErrors, autterKoa, captureRequestError } from "@autter/runtime-node";
 
-// Express / Connect: after your routes, before your own error handlers.
-// Records the error, then calls next(err) unchanged.
+// Express / Connect (optional on Express with initAutterServer): after your
+// routes, before your own error handlers. Records the error, then calls
+// next(err) unchanged. Once at app level covers nested routers too.
 app.use(autterErrorHandler());
 
 // Fastify 4/5: an onError hook (Fastify's error handler still answers).
@@ -364,6 +382,12 @@ receive origin `"uncaughtException"` rather than `"unhandledRejection"`.
 `captureUnhandledRejections: false` (or `captureGlobalErrors: false`) restores
 the 1.5.0 behaviour, where a rejection is seen only when it crashes the
 process.
+
+A rejection from a promise started during a request, such as a floating
+`void sendReceipt()` that fails after the response, keeps that request's
+route, method and request id (`http.route`, `http.request.method`,
+`autter.request.id` on its error span). The same holds for a crash, and for
+a `captureException` call made after the response.
 
 ### Version compatibility: checked for you
 

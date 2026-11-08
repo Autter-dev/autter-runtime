@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { framesV3Fingerprint } from "./fingerprint-v3.js";
 import type { SourceMapKey } from "./source-maps-lookup.js";
-import { ScopeIndex } from "./source-map-scopes.js";
+import { OriginalScopeIndex, ScopeIndex } from "./source-map-scopes.js";
 import { parseStackFrames } from "./stack-frames.js";
+import type { FrameSymbolication, StackFrame } from "./types.js";
 import {
 	CONTEXT_LINES,
+	displaySourcePath,
 	parseSourceMap,
 	serverScriptPath,
 	SourceMapCache,
@@ -62,8 +64,8 @@ const SOURCES = [
 	"webpack://shop/./src/vendor-shim/invariant.js",
 ];
 const NAMES = ["total", "computeTotal", "onSubmit", "invariant"];
-/** `sources` entries as the map resolves them ("./" segments normalised). */
-const RESOLVED = SOURCES.map((source) => source.replace("/./", "/"));
+/** `sources` entries as stored on a frame: project-relative (displaySourcePath). */
+const RESOLVED = SOURCES.map((source) => source.replace("webpack://shop/./", ""));
 
 /** One bundle build: the same original code at build-specific generated columns. */
 function buildMap(columns: [number, number, number, number], extra: Record<string, unknown> = {}): string {
@@ -310,25 +312,77 @@ test("a map too big for half the cache is used for its stack and not kept, so ca
 	assert.equal(cache.bypassed, 2);
 });
 
+/** The parsed frames, each marked with the unresolved-frame state. */
+function unresolvedAs(frames: StackFrame[], symbolication: FrameSymbolication): StackFrame[] {
+	return frames.map((frame) => ({ ...frame, symbolication }));
+}
+
+const MISSING_A: FrameSymbolication = { status: "missing_map", bundle: "/assets/index-abc12345.js", release: "r1", debugId: null };
+
 test("symbolication never fails ingest: lookup errors and bad maps keep the parsed frames", async () => {
 	const frames = parseStackFrames(stack(BUILD_A.url, [11, 51, 91]));
 	const failing = new Symbolicator(async () => {
 		throw new Error("clickhouse down");
 	});
-	assert.deepEqual(await failing.symbolicate(frames, scope), frames);
+	assert.deepEqual(await failing.symbolicate(frames, scope), unresolvedAs(frames, MISSING_A));
 	const garbage = new Symbolicator(async () => "{not json");
-	assert.deepEqual(await garbage.symbolicate(frames, scope), frames);
+	assert.deepEqual(await garbage.symbolicate(frames, scope), unresolvedAs(frames, MISSING_A));
 	const noPosition = new Symbolicator(fetcherFor({ "/assets/index-abc12345.js": BUILD_A.map }));
 	const far = parseStackFrames(`Error: x\n    at f (${BUILD_A.url}:9:1)`);
-	assert.deepEqual(await noPosition.symbolicate(far, scope), far);
+	assert.deepEqual(await noPosition.symbolicate(far, scope), unresolvedAs(far, { ...MISSING_A, status: "no_mapping" }));
 });
 
 test("no release and no debug id: nothing to look up", async () => {
 	const calls: SourceMapKey[] = [];
 	const symbolicator = new Symbolicator(fetcherFor({}, calls));
 	const frames = parseStackFrames(stack(BUILD_A.url, [11, 51, 91]));
-	assert.deepEqual(await symbolicator.symbolicate(frames, { ...scope, release: null }), frames);
+	assert.deepEqual(
+		await symbolicator.symbolicate(frames, { ...scope, release: null }),
+		unresolvedAs(frames, { ...MISSING_A, status: "no_release", release: null }),
+	);
 	assert.equal(calls.length, 0);
+});
+
+test("an unresolved frame says which bundle's map is missing: path, release and debug id", async () => {
+	const symbolicator = new Symbolicator(fetcherFor({}));
+	const id = "c0ffee00-0000-4000-8000-000000000002";
+	const frames = parseStackFrames(
+		[
+			"TypeError: x",
+			`    at a (${BUILD_A.url}?v=3:1:11)`,
+			"    at b (https://cdn.example.com/static/js/main.4f3c.js:1:20)",
+			// Not looked up and not marked: a dependency, a non-JS file, a native frame.
+			"    at c (https://app.example.com/node_modules/.vite/deps/react-dom.js:1:5)",
+			"    at d (https://app.example.com/page.html:10:3)",
+			"    at Array.forEach (<anonymous>)",
+		].join("\n"),
+	);
+	const out = await symbolicator.symbolicate(frames, { ...scope, debugIds: { [`${BUILD_A.url}?v=3`]: id } });
+	assert.deepEqual(out.map((frame) => frame.symbolication ?? null), [
+		{ status: "missing_map", bundle: "/assets/index-abc12345.js", release: "r1", debugId: id },
+		{ status: "missing_map", bundle: "/static/js/main.4f3c.js", release: "r1", debugId: null },
+		null,
+		null,
+		null,
+	]);
+	// Server stacks are never marked: an unbundled Node app needs no map.
+	const server = await symbolicator.symbolicate(parseStackFrames("Error: x\n    at f (/app/dist/server.js:1:10)"), {
+		...scope,
+		server: true,
+	});
+	assert.equal(server[0]!.symbolication, undefined);
+});
+
+test("resolved files are project-relative: Vite's ../../src and webpack://name/./src", () => {
+	assert.equal(displaySourcePath("../../src/checkout/cart.ts"), "src/checkout/cart.ts");
+	assert.equal(displaySourcePath("../../../src/main.js?v=1"), "src/main.js");
+	assert.equal(displaySourcePath("webpack://shop/./src/checkout/cart.ts"), "src/checkout/cart.ts");
+	assert.equal(displaySourcePath("webpack:///src/a.js"), "src/a.js");
+	assert.equal(displaySourcePath("webpack://shop/../node_modules/react/index.js"), "node_modules/react/index.js");
+	assert.equal(displaySourcePath("./src/a.ts"), "src/a.ts");
+	assert.equal(displaySourcePath("turbopack:///[project]/src/app/page.tsx"), "src/app/page.tsx");
+	assert.equal(displaySourcePath("/home/runner/work/app/src/a.ts"), "/home/runner/work/app/src/a.ts");
+	assert.equal(displaySourcePath("https://cdn.example.com/src/a.ts"), "https://cdn.example.com/src/a.ts");
 });
 
 test("a debug id for the script is passed to the lookup, even without a release", async () => {
@@ -548,7 +602,7 @@ test("with scopes, a frame is named after the function it is in, not its call si
 	assert.deepEqual(captured, {
 		function: "captured",
 		module: null,
-		filename: "webpack://shop/src/checkout/actions.ts",
+		filename: "src/checkout/actions.ts",
 		lineno: 10,
 		colno: 11,
 		inApp: true,
@@ -653,4 +707,49 @@ test("the cache budget counts a map's decoded mappings and its scope table", asy
 test("the x_autter_scopes encoding is compact: a few bytes per function", () => {
 	assert.ok(SCOPES.scopes.length <= SCOPE_ROWS.length * 9, SCOPES.scopes);
 	assert.match(SCOPES.scopes, /^[A-Za-z0-9+/,;]+$/);
+});
+
+// ── Original scopes: inlined functions keep their own names ───────────────
+
+test("with original scopes, an inlined function's frame is named after itself, not the function it was inlined into", async () => {
+	// SWC inlined applyDiscount (pricing.ts) into onCheckoutClick (main.ts):
+	// one bundle function, `e`, holds both. Generated line 0: col 10 →
+	// pricing.ts 3:4 (the throw, inlined); col 40 → main.ts 7:2.
+	const names = ["onCheckoutClick", "applyDiscount"];
+	const base = {
+		version: 3,
+		sources: ["src/main.ts", "src/pricing.ts"],
+		names,
+		mappings: mappings([[[10, 1, 3, 4], [40, 0, 7, 2]]]),
+		// The bundle function at columns 0–100 is onCheckoutClick.
+		x_autter_scopes: { version: 1, names: [], scopes: encodeScopes([[0, 0, 0, 100, 0]]) },
+	};
+	const original = {
+		version: 1,
+		names: [],
+		// main.ts: onCheckoutClick spans lines 6–9; pricing.ts: applyDiscount lines 1–5.
+		sources: [encodeScopes([[6, 0, 9, 1, 0]]), encodeScopes([[1, 0, 5, 1, 1]])],
+	};
+	const url = "https://app.example.com/assets/index-0badc0de.js";
+	const stackText = ["TypeError: x", `    at e (${url}:1:11)`, `    at HTMLButtonElement.e (${url}:1:41)`].join("\n");
+	const run = async (map: Record<string, unknown>) => {
+		const symbolicator = new Symbolicator(fetcherFor({ "/assets/index-0badc0de.js": JSON.stringify(map) }));
+		const frames = await symbolicator.symbolicate(parseStackFrames(stackText), scope);
+		return frames.map((frame) => `${frame.function}@${frame.filename}:${frame.lineno}`);
+	};
+	// Bundle scopes alone: the throw in pricing.ts reads as onCheckoutClick.
+	assert.deepEqual(await run(base), ["onCheckoutClick@src/pricing.ts:4", "onCheckoutClick@src/main.ts:8"]);
+	assert.deepEqual(await run({ ...base, x_autter_original_scopes: original }), [
+		"applyDiscount@src/pricing.ts:4",
+		"onCheckoutClick@src/main.ts:8",
+	]);
+	// A source without original scopes, or a malformed field, falls back to the bundle scopes.
+	assert.deepEqual(await run({ ...base, x_autter_original_scopes: { ...original, sources: [original.sources[0], null] } }), [
+		"onCheckoutClick@src/pricing.ts:4",
+		"onCheckoutClick@src/main.ts:8",
+	]);
+	for (const bad of [null, "x", { ...original, version: 2 }, { ...original, names: [1] }, { ...original, sources: "AAAA" }]) {
+		assert.deepEqual(await run({ ...base, x_autter_original_scopes: bad }), ["onCheckoutClick@src/pricing.ts:4", "onCheckoutClick@src/main.ts:8"], JSON.stringify(bad));
+	}
+	assert.equal(OriginalScopeIndex.from(original, names)?.nameAt(1, 3, 4)?.kind, "named");
 });

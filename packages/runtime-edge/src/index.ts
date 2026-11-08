@@ -306,7 +306,10 @@ async function postLogs(destination: Destination, batch: OtlpLogRecord[]): Promi
 				body,
 			});
 			if (response.ok) return true;
-			if (response.status !== 429 && response.status < 500) return false;
+			if (response.status !== 429 && response.status < 500) {
+				await warnRefusedOnce(destination.endpoint, response);
+				return false;
+			}
 			retryAfter = response.headers.get("retry-after");
 		} catch {
 			/* network error: retried below */
@@ -316,6 +319,40 @@ async function postLogs(destination: Destination, batch: OtlpLogRecord[]): Promi
 		const wait = seconds > 0 ? Math.min(seconds * 1000, MAX_RETRY_WAIT_MS) : 250 * 2 ** (attempt - 1);
 		await new Promise((resolve) => setTimeout(resolve, wait));
 	}
+}
+
+const refusalsWarned = new Set<number>();
+
+/**
+ * A refused batch (401 bad key, 403 wrong key kind, 404 no /v1/logs on an
+ * older ingester, 400…) is dropped for good: say so once per status per
+ * isolate, with the ingester's reason, instead of failing silently.
+ */
+async function warnRefusedOnce(endpoint: string, response: Response): Promise<void> {
+	if (refusalsWarned.has(response.status)) return;
+	refusalsWarned.add(response.status);
+	let reason = "";
+	try {
+		const body = (await response.text()).slice(0, 2000);
+		try {
+			const parsed = JSON.parse(body) as { error?: unknown };
+			reason = typeof parsed.error === "string" ? parsed.error : "";
+		} catch {
+			reason = body;
+		}
+	} catch {
+		/* no body */
+	}
+	reason = reason.replace(/\s+/g, " ").trim().slice(0, 200);
+	const hint =
+		response.status === 401
+			? " Check AUTTER_RUNTIME_KEY (a server key, autter_rt_…)."
+			: response.status === 404
+				? " The ingester has no /v1/logs: it is older than 1.4.0, or the endpoint has an extra path."
+				: "";
+	console.warn(
+		`[autter-runtime-edge] ${endpoint}/v1/logs refused a batch (${response.status}${reason ? `: ${reason}` : ""}); those records are dropped.${hint}`,
+	);
 }
 
 function randomId(): string {

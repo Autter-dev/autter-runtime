@@ -56,6 +56,7 @@ import {
 	type AutterExportErrorHandler,
 	type AutterFlushResult,
 } from "./export-errors.js";
+import { resolveIngestKey } from "./ingest-auth.js";
 
 /**
  * Logger-only mode: requests, operations, coded errors, sinks and enrichers
@@ -215,7 +216,9 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 	const captured = new WeakSet<object>();
 	configureRuntimeLogger({
 		endpoint,
-		apiKey: options.apiKey ?? "",
+		// Normalised ("undefined"/empty is no key), no env fallback: without
+		// an apiKey this mode logs locally only, by design.
+		apiKey: resolveIngestKey(options.apiKey, {}) ?? "",
 		service: options.service,
 		environment,
 		...(options.release ? { release: options.release } : {}),

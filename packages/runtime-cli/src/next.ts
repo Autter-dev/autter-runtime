@@ -56,6 +56,13 @@ function hasAfterCompileHook(version: string | null): boolean {
 	return true;
 }
 
+/** Next.js 16+ builds with Turbopack by default and fails a build whose
+ * config has a `webpack` function but no `turbopack` key. */
+function turbopackByDefault(version: string | null): boolean {
+	const major = version ? Number(/^(\d+)\./.exec(version)?.[1]) : NaN;
+	return major >= 16;
+}
+
 function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions): NextConfigObject {
 	// Maps the user already serves publicly stay public and stay on disk.
 	const publicMaps = config.productionBrowserSourceMaps === true;
@@ -83,7 +90,8 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 	};
 	const base = String(config.assetPrefix || config.basePath || "").replace(/\/+$/, "");
 	const nextPrefix = `${base}/_next/`;
-	const useHook = hasAfterCompileHook(installedNextVersion());
+	const nextVersion = installedNextVersion();
+	const useHook = hasAfterCompileHook(nextVersion);
 	const userWebpack = config.webpack as
 		| ((webpackConfig: WebpackConfigLike, context: WebpackContextLike) => WebpackConfigLike)
 		| undefined;
@@ -134,6 +142,12 @@ function wrapConfig(config: NextConfigObject, options: AutterSourceMapsOptions):
 			return result;
 		},
 	};
+	// The `webpack` function above is only for webpack builds (`next build
+	// --webpack`); on Next.js 16 it would otherwise fail the default Turbopack
+	// build ("using Turbopack, with a `webpack` config and no `turbopack`
+	// config"). An empty `turbopack` config is what Next asks for; one the
+	// user set is kept as is.
+	if (turbopackByDefault(nextVersion) && config.turbopack === undefined) wrapped.turbopack = {};
 	if (useHook) {
 		// Turbopack emits client maps only with productionBrowserSourceMaps; the
 		// hook hides them (drops the sourceMappingURL comment) after the build

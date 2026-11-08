@@ -7,6 +7,16 @@ export const INGEST_KEY_SCOPES: readonly IngestKeyScope[] = ["server", "client",
 /** Prefix of upload-only keys (`autter_rtu_…`): source map uploads from CI. */
 export const UPLOAD_KEY_PREFIX = "autter_rtu_";
 
+/**
+ * The built-in local development key. Accepted only by an ingester started
+ * with AUTTER_LOCAL_DEV=1 (the repo's docker-compose.yml sets it), without a
+ * key validator, and only from loopback and private addresses: see
+ * localDevMode and isLocalAddress. Every other ingester refuses it, also when
+ * it is listed in AUTTER_INGEST_KEYS. It is not a secret: never use it, or
+ * AUTTER_LOCAL_DEV, on an ingester other machines can reach.
+ */
+export const LOCAL_DEV_KEY = "autter_rt_local_dev_only";
+
 export function isIngestKeyScope(value: unknown): value is IngestKeyScope {
 	return typeof value === "string" && (INGEST_KEY_SCOPES as readonly string[]).includes(value);
 }
@@ -59,6 +69,11 @@ export interface IngesterConfig {
 	/** Webhook that maps a key to a tenant (cloud). POST {key} → {orgId, repositoryId}. */
 	keyValidatorUrl: string | null;
 	keyValidatorToken: string | null;
+	/**
+	 * Local development mode (AUTTER_LOCAL_DEV=1): accept LOCAL_DEV_KEY from
+	 * loopback and private addresses. Refused at startup with a key validator.
+	 */
+	localDev?: boolean;
 	/** Optional webhook receiving fingerprinted occurrences for issue grouping. */
 	sinkUrl: string | null;
 	sinkToken: string | null;
@@ -270,15 +285,69 @@ export function parseIngestKeys(raw: string | undefined): StaticIngestKey[] {
 	return keys;
 }
 
+/**
+ * AUTTER_LOCAL_DEV: true for 1/true/yes. Refused together with a key
+ * validator (the hosted and cloud-connected setups), so the flag cannot open
+ * a deployed ingester to the built-in key.
+ */
+export function localDevMode(raw: string | undefined, keyValidatorUrl: string | null): boolean {
+	if (!/^(1|true|yes)$/i.test(raw?.trim() ?? "")) return false;
+	if (keyValidatorUrl) {
+		throw new Error(
+			"AUTTER_LOCAL_DEV is for the local docker compose setup and cannot be combined with AUTTER_KEY_VALIDATOR_URL — unset AUTTER_LOCAL_DEV",
+		);
+	}
+	return true;
+}
+
+/**
+ * The static keys an ingester uses: LOCAL_DEV_KEY is added in local dev mode
+ * and removed (with an error) everywhere else.
+ */
+export function withLocalDevKey(keys: StaticIngestKey[], localDev: boolean): StaticIngestKey[] {
+	const others = keys.filter((entry) => entry.key !== LOCAL_DEV_KEY);
+	if (!localDev) {
+		if (others.length < keys.length) {
+			console.error(
+				`AUTTER_INGEST_KEYS lists the built-in local key ${LOCAL_DEV_KEY}, which only an ingester started with AUTTER_LOCAL_DEV=1 accepts — ignoring it`,
+			);
+		}
+		return others;
+	}
+	return [...others, { key: LOCAL_DEV_KEY, orgId: "local", repositoryId: "local", scope: "server" }];
+}
+
+/**
+ * Loopback or private-network addresses: this machine, or a Docker bridge
+ * gateway in front of it. The local dev key is refused from anything else.
+ */
+export function isLocalAddress(address: string | undefined): boolean {
+	let ip = (address ?? "").trim().toLowerCase();
+	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
+	if (mapped) ip = mapped[1]!;
+	const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(ip);
+	if (v4) {
+		const a = Number(v4[1]);
+		const b = Number(v4[2]);
+		return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+	}
+	if (ip === "::1") return true;
+	// fc00::/7 unique local, fe80::/10 link-local.
+	return /^f[cd][0-9a-f]{0,2}:/.test(ip) || /^fe[89ab][0-9a-f]?:/.test(ip);
+}
+
 export function loadConfig(): IngesterConfig {
+	const keyValidatorUrl = process.env.AUTTER_KEY_VALIDATOR_URL || null;
+	const localDev = localDevMode(process.env.AUTTER_LOCAL_DEV, keyValidatorUrl);
 	const config: IngesterConfig = {
 		port: intEnv("PORT", 4318),
 		clickhouseUrl: process.env.CLICKHOUSE_URL || null,
 		clickhouseUser: process.env.CLICKHOUSE_USER || "default",
 		clickhousePassword: process.env.CLICKHOUSE_PASSWORD || "",
 		clickhouseDatabase: process.env.CLICKHOUSE_DATABASE || "autter_runtime",
-		ingestKeys: parseIngestKeys(process.env.AUTTER_INGEST_KEYS),
-		keyValidatorUrl: process.env.AUTTER_KEY_VALIDATOR_URL || null,
+		ingestKeys: withLocalDevKey(parseIngestKeys(process.env.AUTTER_INGEST_KEYS), localDev),
+		keyValidatorUrl,
+		localDev,
 		keyValidatorToken: process.env.AUTTER_KEY_VALIDATOR_TOKEN || null,
 		sinkUrl: process.env.AUTTER_SINK_URL || null,
 		sinkToken: process.env.AUTTER_SINK_TOKEN || null,
@@ -329,9 +398,14 @@ export function loadConfig(): IngesterConfig {
 			`Invalid CLICKHOUSE_DATABASE name: ${config.clickhouseDatabase}`,
 		);
 	}
+	if (localDev) {
+		console.warn(
+			`WARNING: local dev mode (AUTTER_LOCAL_DEV): accepting the built-in key ${LOCAL_DEV_KEY} from this machine and private networks. Never set AUTTER_LOCAL_DEV on a deployed ingester.`,
+		);
+	}
 	if (config.ingestKeys.length === 0 && !config.keyValidatorUrl) {
 		console.warn(
-			"No AUTTER_INGEST_KEYS and no AUTTER_KEY_VALIDATOR_URL configured — all ingest requests will be rejected with 401",
+			"No AUTTER_INGEST_KEYS and no AUTTER_KEY_VALIDATOR_URL configured — all ingest requests will be rejected with 401 (for a local try-out, the repo's docker-compose.yml sets AUTTER_LOCAL_DEV=1)",
 		);
 	}
 	return config;

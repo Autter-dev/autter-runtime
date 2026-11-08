@@ -87,6 +87,8 @@ function rateLimitFrom(value: string | undefined): number | null {
 }
 
 let windowFor: { limit: number; window: VisitorWindow } | null = null;
+/** Logged once per isolate: where this relay forwards to. */
+let announcedUpstream = false;
 
 function visitorKey(request: Request): string {
   const cf = (request as unknown as { cf?: unknown }).cf;
@@ -142,7 +144,13 @@ export default {
       return new Response("Payload too large", { status: 413, headers: corsHeaders(origin) });
     }
 
+    // Hosted Autter unless AUTTER_INGEST_URL says otherwise (wrangler.jsonc
+    // sets it; .dev.vars.example points `wrangler dev` at a local ingester).
     const upstream = env.AUTTER_INGEST_URL ?? "https://otlp.autter.dev/v1/browser";
+    if (!announcedUpstream) {
+      announcedUpstream = true;
+      console.log(`[autter-relay] forwarding browser events to ${upstream}`);
+    }
     const headers = new Headers();
     headers.set("Content-Type", "application/json");
     // Forward Origin so the ingester can enforce the client key's allow-list.

@@ -20,6 +20,13 @@ and avoids that loss — no Express/Node backend required.
    initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
    ```
 
+Locally, against the repo's `docker compose up` ingester:
+`cp .dev.vars.example .dev.vars && npx wrangler dev`. `.dev.vars` sets
+`AUTTER_INGEST_URL=http://localhost:4318/v1/browser` and the local key, and
+only applies to `wrangler dev`. The relay logs where it forwards on its first
+request; without `AUTTER_INGEST_URL` that is Autter cloud, the purpose of
+this deploy template.
+
 Contract (mirrors `createBrowserRelayHandler`): POST-only, 64KB cap,
 per-visitor rate limit, `Origin` forwarded for allow-list checks, `Cookie`
 stripped, 202 on accept.

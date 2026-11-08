@@ -134,6 +134,7 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / empty | |
 | `CLICKHOUSE_DATABASE` | `autter_runtime` | Created automatically |
 | `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` (optional `scope`, `allowedOrigins`, `suppression`) |
+| `AUTTER_LOCAL_DEV` | off | `1`: local development only. Also accept the built-in key `autter_rt_local_dev_only`, from loopback and private addresses only. Set by the repo's `docker-compose.yml`, never by the deploys. Refused at startup together with `AUTTER_KEY_VALIDATOR_URL`; without it, a listed `autter_rt_local_dev_only` is ignored |
 | `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId, scope?, allowedOrigins?, suppression?}`, or 404 for an unknown or revoked key (60 s cache; see [Validator outages](#validator-outages)) |
 | `AUTTER_KEY_VALIDATOR_TOKEN` | — | Bearer token sent to the validator |
 | `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once, across restarts with an outbox (`docs/ARCHITECTURE.md`) |
@@ -311,16 +312,20 @@ Never edit or reorder a shipped migration; append a corrective one.
 
 ```bash
 docker compose up clickhouse   # from the repo root
-AUTTER_INGEST_KEYS='[{"key":"dev-key","orgId":"org1","repositoryId":"repo1"}]' \
+AUTTER_LOCAL_DEV=1 \
 CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_PASSWORD=dev \
 npm run dev
 ```
+
+`AUTTER_LOCAL_DEV=1` accepts the built-in key `autter_rt_local_dev_only`
+(tenant `local`/`local`) from loopback and private addresses. Or run
+`docker compose up` from the repo root, which sets it for the container.
 
 Send a test error span:
 
 ```bash
 curl -s http://localhost:4318/v1/traces \
-  -H 'authorization: Bearer dev-key' -H 'content-type: application/json' \
+  -H 'authorization: Bearer autter_rt_local_dev_only' -H 'content-type: application/json' \
   -d '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"payments-api"}},{"key":"service.version","value":{"stringValue":"e4a218f"}}]},"scopeSpans":[{"spans":[{"traceId":"0123456789abcdef0123456789abcdef","spanId":"0123456789abcdef","name":"POST /orders/:id","kind":2,"startTimeUnixNano":"1753100000000000000","endTimeUnixNano":"1753100000120000000","status":{"code":2,"message":"boom"},"attributes":[{"key":"http.route","value":{"stringValue":"/orders/:id"}},{"key":"http.response.status_code","value":{"intValue":500}}],"events":[{"name":"exception","timeUnixNano":"1753100000100000000","attributes":[{"key":"exception.type","value":{"stringValue":"TypeError"}},{"key":"exception.message","value":{"stringValue":"cannot read x"}},{"key":"exception.stacktrace","value":{"stringValue":"TypeError: cannot read x\n    at handler (/app/dist/orders.js:12:3)"}}]}]}]}]}]}'
 ```
 

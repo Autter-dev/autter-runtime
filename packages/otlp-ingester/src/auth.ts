@@ -1,6 +1,6 @@
 import type { Request } from "express";
 import { INGESTER_VERSION_HEADER } from "./compat.js";
-import { defaultScopeFor, isIngestKeyScope, type IngesterConfig } from "./config.js";
+import { defaultScopeFor, isIngestKeyScope, LOCAL_DEV_KEY, type IngesterConfig } from "./config.js";
 import { ingesterVersion } from "./sdk-versions.js";
 import { parseSuppressionRules } from "./suppression.js";
 import type { IngestContext } from "./types.js";
@@ -124,6 +124,9 @@ export class KeyResolver {
 		this.unknown = new LruMap(options.unknownKeys ?? UNKNOWN_KEYS_MAX);
 		this.now = options.now ?? Date.now;
 		for (const entry of config.ingestKeys) {
+			// The built-in local key works only in local dev mode, however the
+			// config was built (config.ts withLocalDevKey adds and strips it).
+			if (entry.key === LOCAL_DEV_KEY && !config.localDev) continue;
 			const scope = entry.scope ?? defaultScopeFor(entry.key);
 			if (!isIngestKeyScope(scope)) continue;
 			const suppression = parseSuppressionRules(entry.suppression);

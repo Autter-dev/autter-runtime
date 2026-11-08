@@ -51,12 +51,20 @@ npm run build            # builds all packages in dependency order
 Run the full stack locally:
 
 ```bash
-# A throwaway local ingest key (no key is committed to the repo).
-export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
-export AUTTER_INGEST_KEYS='[{"key":"'"$AUTTER_RUNTIME_KEY"'","orgId":"local","repositoryId":"local"}]'
 docker compose up -d clickhouse   # local ClickHouse (:8123, password "dev")
-CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_PASSWORD=dev \
-  npm run dev                     # ingester on :4318, accepting $AUTTER_RUNTIME_KEY
+export AUTTER_RUNTIME_KEY=autter_rt_local_dev_only   # the built-in local key
+CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_PASSWORD=dev AUTTER_LOCAL_DEV=1 \
+  npm run dev                     # ingester on :4318, accepting the local key
+```
+
+`AUTTER_LOCAL_DEV=1` makes the ingester accept `autter_rt_local_dev_only`
+from loopback and private addresses only (`docker compose up` sets it for
+the containerised ingester). Or run everything in containers with
+`docker compose up`. Before opening a PR that touches the quickstart or the
+examples, run the check CI runs (`examples-e2e`):
+
+```bash
+docker compose up -d --build --wait && npm run build && node scripts/examples-e2e.mjs
 ```
 
 Send yourself a test error and read it back:

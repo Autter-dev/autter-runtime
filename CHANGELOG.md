@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- The quickstart works out of the box. `docker compose up` used to start the ingester with no key, so every request got 401 while the website promised a `dev-key`. The repo's `docker-compose.yml` now sets `AUTTER_LOCAL_DEV=1`, and the ingester then accepts one built-in key, `autter_rt_local_dev_only`, in the documented server key format. Auth stays closed everywhere else: the key is accepted only with that flag, only from loopback and private addresses (the socket address, not `X-Forwarded-For`), and the flag is refused at startup next to `AUTTER_KEY_VALIDATOR_URL`. Without the flag a listed copy of the key is ignored with an error. The single-server and AWS deploys never pass the flag, and Autter cloud uses the key validator, so nothing changes there (`otlp-ingester`).
+- `examples/express-app`: `npm start` copies every file of the built browser SDK, not only `index.js`, whose shared chunk then 404'd and silently stopped the page's tracker. The copy is a Node script (`scripts/copy-sdk.mjs`) instead of `mkdir -p` and `cp`, so it runs on Windows, and it fails loudly if any import is missing. With no `AUTTER_ENDPOINT` the example sends to `http://localhost:4318` with the local key instead of to `https://otlp.autter.dev` with `dev-key`; with an endpoint and no key it exits with an error. It logs where it sends.
+- `examples/edge-worker` defaults to `http://localhost:4318` and logs where it sends; `examples/edge-worker` and `examples/runtime-relay` ship a `.dev.vars.example` for `wrangler dev` against the local ingester.
+- Docs: the README, Getting started, CONTRIBUTING, the ingester README and the examples give a concrete `AUTTER_ENDPOINT` (`http://localhost:4318` locally, `https://otlp.autter.dev` for Autter cloud), and the quickstart ends with `doctor` and a query that shows your event.
+- CI: a new `examples-e2e` job runs `docker compose up` with no `.env`, `doctor`, every example (Express, the edge worker and relay run in Node, and the four Python recipes) with its defaults, and reads each one's rows back from ClickHouse 24.8 (`scripts/examples-e2e.mjs`, `examples/python/testing/compose_e2e.py`).
+
 ## [1.12.1] - 2026-11-08
 
 Packages: `otlp-ingester` 1.12.1. The SDKs are unchanged from 1.12.0.

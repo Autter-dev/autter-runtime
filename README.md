@@ -143,7 +143,8 @@ runtime-edge at build time, never published.
 
 Runnable demo: [`examples/express-app`](examples/express-app) — browser
 tracker → relay → ingester, OTel server tracker, request summaries and coded
-errors, against a compose-run ClickHouse. Edge:
+errors. `docker compose up` here, then `npm start` in the example: it sends
+to the local ingester with the local key, no setup. Edge:
 [`examples/edge-worker`](examples/edge-worker) (Cloudflare Worker).
 
 ## Supported stacks
@@ -221,22 +222,37 @@ docker run -p 4318:4318 \
   ghcr.io/autter-dev/otlp-ingester:latest
 ```
 
-Or for local development with a bundled ClickHouse:
+Or for local development with a bundled ClickHouse, from a clone of this repo:
 
 ```bash
-# Generate a local key and save its mapping in the git-ignored .env file.
-export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
-(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
-docker compose up          # local ClickHouse + ingester on :4318
+docker compose up          # local ClickHouse + ingester on http://localhost:4318
 ```
 
-Point your OpenTelemetry exporter at it:
+No key step: the dev compose file accepts the built-in local key
+`autter_rt_local_dev_only` from your machine (only there, and never on a
+deployed ingester; see [Getting started](docs/GETTING-STARTED.md#2-run-the-ingester)).
+Point your app at it and check the connection:
+
+```bash
+export AUTTER_ENDPOINT=http://localhost:4318
+export AUTTER_RUNTIME_KEY=autter_rt_local_dev_only
+npx @autter/runtime-node doctor --endpoint "$AUTTER_ENDPOINT"   # ends with "key  accepted"
+```
+
+Or with any OpenTelemetry exporter:
 
 ```ts
 new OTLPTraceExporter({
   url: "http://localhost:4318/v1/traces",
   headers: { authorization: `Bearer ${process.env.AUTTER_RUNTIME_KEY}` },
 });
+```
+
+Then trigger an error and see it stored:
+
+```bash
+docker compose exec clickhouse clickhouse-client --password dev --query \
+  "SELECT service, error_type, message FROM autter_runtime.runtime_error_occurrences ORDER BY occurred_at DESC LIMIT 5"
 ```
 
 ## Design principles

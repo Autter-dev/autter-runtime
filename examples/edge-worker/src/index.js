@@ -17,17 +17,30 @@ const quotaErrors = defineRuntimeErrors("quota", {
 	}),
 });
 
+// Without AUTTER_ENDPOINT the example sends to the local `docker compose up`
+// ingester, never to a hosted one. wrangler.toml sets the endpoint for
+// deploys; .dev.vars (from .dev.vars.example) points `wrangler dev` here.
+const LOCAL_ENDPOINT = "http://localhost:4318";
+let announced = false;
+
 export default withAutter(
 	// Bindings only exist per request, so options can be a function of env.
-	(env) => ({
-		apiKey: env.AUTTER_RUNTIME_KEY,
-		endpoint: env.AUTTER_ENDPOINT,
-		service: "edge-example",
-		environment: env.ENVIRONMENT,
-		ignore: ["/healthz"],
-		// Thrown errors become `{ error: { message, code, fix, requestId } }`.
-		errorResponse: true,
-	}),
+	(env) => {
+		const endpoint = env.AUTTER_ENDPOINT || LOCAL_ENDPOINT;
+		if (!announced) {
+			announced = true;
+			console.log(`[edge-example] sending telemetry to ${endpoint}`);
+		}
+		return {
+			apiKey: env.AUTTER_RUNTIME_KEY,
+			endpoint,
+			service: "edge-example",
+			environment: env.ENVIRONMENT,
+			ignore: ["/healthz"],
+			// Thrown errors become `{ error: { message, code, fix, requestId } }`.
+			errorResponse: true,
+		};
+	},
 	async (request, env, _ctx, rt) => {
 		const url = new URL(request.url);
 		if (url.pathname === "/healthz") return new Response("ok");

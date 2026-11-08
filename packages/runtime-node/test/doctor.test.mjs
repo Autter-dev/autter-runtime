@@ -39,19 +39,63 @@ const config = {
 	metricsTtlDays: 90, llmCallTtlDays: 90,
 };
 
-test("doctor passes (exit 0) against a current ingester", async () => {
+test("doctor: versions match but storage is unconfigured → exit 1, not a plain \"Compatible.\"", async () => {
+	// Before: "Compatible." while every ingest request got 503 "storage not configured".
 	const server = createIngesterApp(config).app.listen(0, "127.0.0.1");
 	await new Promise((resolve) => server.once("listening", resolve));
 	try {
-		const { code, stdout } = await runCli(["--endpoint", `http://127.0.0.1:${server.address().port}`, "--json"]);
+		const endpoint = `http://127.0.0.1:${server.address().port}`;
+		const { code, stdout } = await runCli(["--endpoint", endpoint, "--json"]);
 		const report = JSON.parse(stdout);
-		assert.equal(code, 0, stdout);
-		assert.equal(report.exitCode, 0);
+		assert.equal(code, 1, stdout);
 		assert.match(report.ingester.version, /^\d+\.\d+\.\d+/);
 		assert.equal(report.ingester.schema.status, "unconfigured");
+		assert.deepEqual(
+			{ state: report.storage.state, ok: report.storage.ok, writeChecked: report.storage.writeChecked },
+			{ state: "unconfigured", ok: false, writeChecked: true },
+		);
+		assert.equal(report.key, "not_checked");
 		assert.ok(report.features.some((f) => f.id === "operation_logging" && f.status === "ok"));
+		assert.equal(report.skew[0].status, "in_sync");
 		assert.deepEqual(report.issues, []);
+
+		const text = await runCli(["--endpoint", endpoint]);
+		assert.match(text.stdout, /storage {4}NOT READY: no ClickHouse configured \(CLICKHOUSE_URL unset\)/);
+		assert.match(text.stdout, /key {8}not checked \(pass --key or set AUTTER_RUNTIME_KEY\)/);
+		assert.match(text.stdout, /Not ready: the ingester cannot store data right now/);
+		assert.doesNotMatch(text.stdout, /^Compatible\.$/m);
 	} finally {
+		await close(server);
+	}
+});
+
+test("doctor passes (exit 0) when storage is ready; without a key it says the key was not checked", async () => {
+	const app = createIngesterApp({ ...config, clickhouseUrl: "http://127.0.0.1:1", sinkOutboxDir: null });
+	app.store.ensureSchema = async () => {};
+	app.store.probe = async () => ({ state: "up", checkedAt: new Date().toISOString(), latencyMs: 1 });
+	for (const name of Object.getOwnPropertyNames(Object.getPrototypeOf(app.store))) {
+		if (name.startsWith("insert")) app.store[name] = async () => {};
+	}
+	const server = app.app.listen(0, "127.0.0.1");
+	await new Promise((resolve) => server.once("listening", resolve));
+	try {
+		const endpoint = `http://127.0.0.1:${server.address().port}`;
+		const unchecked = await runCli(["--endpoint", endpoint]);
+		assert.equal(unchecked.code, 0, unchecked.stdout);
+		assert.match(unchecked.stdout, /storage {4}ready: ClickHouse accepts writes/);
+		assert.match(unchecked.stdout, /Versions compatible and storage ready\. Key not checked/);
+		assert.match(unchecked.stdout, /ok {3}@autter\/runtime-node@[\d.]+: in sync with ingester/);
+		const checked = await runCli(["--endpoint", endpoint, "--key", "good"]);
+		assert.equal(checked.code, 0, checked.stdout);
+		assert.match(checked.stdout, /Ready: versions compatible, storage ready, key accepted/);
+		const rejected = await runCli(["--endpoint", endpoint, "--key", "nope", "--json"]);
+		assert.equal(rejected.code, 1);
+		assert.equal(JSON.parse(rejected.stdout).key, "rejected");
+		assert.equal(JSON.parse(rejected.stdout).keyDetail, "invalid ingest key");
+	} finally {
+		app.sink?.stop();
+		await app.collapse.stop();
+		await app.drops.stop();
 		await close(server);
 	}
 });
@@ -69,6 +113,8 @@ test("doctor exits 1 and names the fix when the ingester is too old", async () =
 		assert.equal(code, 1, stdout);
 		assert.match(stdout, /ingester\s+@autter\/otlp-ingester@1\.3\.4/);
 		assert.match(stdout, /FAIL Operation logging/);
+		// Version skew, named per SDK.
+		assert.match(stdout, /FAIL @autter\/runtime-node@[\d.]+: ingester 1\.3\.4 is behind: \d+ feature\(s\) this SDK sends need ingester >= [\d.]+ \(.*operation_logging/);
 		assert.match(stdout, /Operation logging needs ingester >= 1\.4\.0; yours is 1\.3\.4\. Upgrade the ingester: docker pull/);
 	} finally {
 		await close(old);
@@ -114,6 +160,9 @@ test("doctor reports a rejected key and exits 1; unreachable ingester exits 2", 
 	const down = await runCli(["--endpoint", "http://127.0.0.1:9", "--timeout", "1000"]);
 	assert.equal(down.code, 2, down.stdout);
 	assert.match(down.stdout, /unreachable/);
+	// Where it breaks, not just "could not reach".
+	assert.match(down.stdout, /FAIL tcp {3}127\.0\.0\.1:9 ECONNREFUSED/);
+	assert.match(down.stdout, /Could not reach the ingester: the TCP step failed/);
 });
 
 test("doctor tells a validator outage (503 + Retry-After) from a storage outage (503)", async () => {

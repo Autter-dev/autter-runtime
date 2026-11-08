@@ -613,3 +613,32 @@ test("shared outbox (EFS): a task adopts the batches of a task that is gone, nev
 	forwarderC.stop();
 	forwarderL.stop();
 });
+
+test("a 503 waits for sibling inserts still in flight, so an immediate retry writes nothing twice", async (t) => {
+	// The metrics insert is refused at once; the spans insert is acknowledged
+	// only later, as an async insert is after its buffer flushes.
+	let refuseMetrics = true;
+	const ch = await clickhouse((call) => (call.table === "runtime_metrics_1m" && refuseMetrics ? "auth" : "ok"));
+	t.after(() => close(ch.server));
+	const slow = await listen((req, body, res) => {
+		const query = new URL(req.url ?? "/", "http://x").searchParams.get("query") ?? body;
+		const forward = () =>
+			void fetch(`${ch.url}${req.url}`, { method: "POST", body }).then(async (r) => {
+				res.writeHead(r.status).end(await r.text());
+			});
+		if (/^INSERT/.test(query) && /runtime_spans/.test(query)) setTimeout(forward, 300);
+		else forward();
+	});
+	t.after(() => close(slow.server));
+	const app = await startApp(config({ clickhouseUrl: slow.url }));
+	t.after(() => app.stop());
+	const body = traceBody();
+	const started = Date.now();
+	assert.equal((await app.post("/v1/traces", body)).status, 503);
+	assert.ok(Date.now() - started >= 250, "the 503 came after the slow sibling settled");
+	assert.equal(ch.inserts("runtime_spans").length, 1, "the sibling committed before the answer");
+	refuseMetrics = false;
+	assert.equal((await app.post("/v1/traces", body)).status, 200);
+	assert.equal(ch.inserts("runtime_spans").length, 1, "the retry did not write spans again");
+	assert.equal(ch.inserts("runtime_metrics_1m").filter((c) => c.rows > 0).length, 2);
+});

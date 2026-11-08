@@ -649,7 +649,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		}
 		await receipts.coalesce(digest, async () => {
 			const done = await receipts.committed(digest, pending.map((write) => write.table));
-			await Promise.all(
+			// allSettled, not all: when one insert is refused at once (a
+			// privilege, a missing table) its siblings are still in flight —
+			// an async insert is acknowledged only after its buffer flushes.
+			// Answering 503 before they settle would let the exporter's retry
+			// overtake them, find no receipt and write those rows twice.
+			const results = await Promise.allSettled(
 				pending
 					.filter((write) => !done.has(write.table))
 					.map(async (write) => {
@@ -657,6 +662,8 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 						await receipts.add(digest, write.table);
 					}),
 			);
+			const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+			if (failed) throw failed.reason;
 		});
 	}
 

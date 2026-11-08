@@ -108,6 +108,36 @@ export interface StackFrame {
 	preContext?: string[];
 	/** Up to 5 lines after it, in file order, ≤ 300 chars each. */
 	postContext?: string[];
+	/**
+	 * Why an in-app browser JS frame stayed minified, and which upload would
+	 * resolve it (1.13.0). Only on unresolved in-app `.js`/`.mjs`/`.cjs`
+	 * frames of a browser stack; absent on resolved frames and on server
+	 * frames (an unbundled Node app's frames are readable without a map).
+	 */
+	symbolication?: FrameSymbolication;
+}
+
+/**
+ * The unresolved-frame state (1.13.0): enough for the platform to say
+ * "the map for /assets/index-4f3c.js (debug id …, release …) is missing:
+ * upload it with `autter-runtime sourcemaps upload`".
+ *
+ * - `missing_map`: the bundle was looked up (by debug id, else release +
+ *   path) and no map was uploaded for it, or the lookup failed.
+ * - `no_release`: nothing to look a map up by: the bundle has no debug id
+ *   (not injected, or the SDK predates 1.6.0) and the event has no release.
+ * - `no_mapping`: a map was found, but has no mapping at this position (the
+ *   deployed bundle is not the one the map was uploaded for, e.g. it was
+ *   minified or copied again after inject).
+ */
+export interface FrameSymbolication {
+	status: "missing_map" | "no_release" | "no_mapping";
+	/** The bundle's path as maps are stored under it (`/assets/index-4f3c.js`). */
+	bundle: string;
+	/** The event's release, when it has one. */
+	release: string | null;
+	/** The bundle's debug id, when the SDK sent one. */
+	debugId: string | null;
 }
 
 /**

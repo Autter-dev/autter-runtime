@@ -193,3 +193,57 @@ export class ScopeIndex {
 		return ANONYMOUS_SCOPE;
 	}
 }
+
+/**
+ * Function scopes of the ORIGINAL sources (`x_autter_original_scopes`,
+ * written by @autter/runtime-cli 1.4.0+): per source file, every function
+ * with its original range and name, as written.
+ *
+ * A minifier that inlines functions (SWC in Next.js, terser) moves a
+ * function's body into its caller's, so the bundle scope a frame ran in is
+ * the caller: the throw in `applyDiscount` inlined into `onCheckoutClick`
+ * read as `onCheckoutClick` at pricing.js:4. A frame's ORIGINAL position
+ * lies in exactly one original function, whichever bundle function it was
+ * inlined into, so these name it `applyDiscount` in every build: the
+ * innermost frame (and so the cause-v1 identity) reads the same whether or
+ * not the build inlined it.
+ *
+ * Shape: `{ version: 1, names: string[], sources: (string | null)[] }`,
+ * `sources` aligned with the map's `sources`, each one encoded like
+ * `x_autter_scopes.scopes` (positions in that source file), name indexes
+ * continuing the map's own `names` with `names`. A malformed source entry
+ * is dropped alone (that source falls back to the bundle scopes); a
+ * malformed field as a whole is ignored.
+ */
+export const ORIGINAL_SCOPES_KEY = "x_autter_original_scopes";
+
+export class OriginalScopeIndex {
+	private constructor(private readonly bySource: ReadonlyArray<ScopeIndex | null>) {}
+
+	/** Estimated memory, like ScopeIndex.bytes. */
+	get bytes(): number {
+		let bytes = 64 + 8 * this.bySource.length;
+		for (const scopes of this.bySource) bytes += scopes?.bytes ?? 0;
+		return bytes;
+	}
+
+	static from(raw: unknown, mapNames: readonly unknown[] = []): OriginalScopeIndex | null {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+		const { version, names, sources } = raw as Record<string, unknown>;
+		if (version !== 1 || !Array.isArray(names) || !Array.isArray(sources)) return null;
+		if (!names.every((name) => typeof name === "string")) return null;
+		const bySource = sources.map((scopes) =>
+			typeof scopes === "string" && scopes ? ScopeIndex.from({ version: 1, names, scopes }, mapNames) : null,
+		);
+		return bySource.some(Boolean) ? new OriginalScopeIndex(bySource) : null;
+	}
+
+	/**
+	 * The original function containing a 0-based ORIGINAL (source, line,
+	 * column): named, or anonymous (an anonymous function, or top-level
+	 * code). Null when that source has no scopes.
+	 */
+	nameAt(source: number, line: number, column: number): ScopeName | null {
+		return this.bySource[source]?.nameAt(line, column) ?? null;
+	}
+}

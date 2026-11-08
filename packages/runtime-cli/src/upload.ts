@@ -4,6 +4,8 @@ import { promisify } from "node:util";
 import { gzip as gzipCallback } from "node:zlib";
 import { normalizeDebugId, readDebugIdComment } from "./debug-id.js";
 import { findBundles, stripSourceMappingUrl, type BundleWithMap } from "./files.js";
+import { flattenIndexMap, isIndexMap } from "./index-map.js";
+import { computeOriginalScopes, ORIGINAL_SCOPES_KEY } from "./original-scopes.js";
 import { resolveRelease } from "./release.js";
 import { computeScopes, SCOPES_KEY } from "./scopes.js";
 
@@ -220,6 +222,15 @@ async function prepare(
 	} catch {
 		return { error: "map is not valid JSON" };
 	}
+	// An index map (Turbopack writes them for some Next.js server files) is
+	// sent as the one regular map it stands for.
+	if (map && map.version === 3 && isIndexMap(map)) {
+		try {
+			map = flattenIndexMap(map);
+		} catch (err) {
+			return { error: `index source map could not be flattened (${err instanceof Error ? err.message : String(err)})` };
+		}
+	}
 	if (!map || map.version !== 3 || typeof map.mappings !== "string" || !Array.isArray(map.sources)) {
 		return { error: "not a version 3 source map with mappings and sources" };
 	}
@@ -229,16 +240,30 @@ async function prepare(
 	// Function scopes, computed on the bundle as it is served (after inject),
 	// so their positions match browser stacks. Never sent stale: any scopes
 	// already in the map are replaced or dropped.
-	const { [SCOPES_KEY]: _stale, ...plain } = map;
+	const { [SCOPES_KEY]: _stale, [ORIGINAL_SCOPES_KEY]: _staleOriginal, ...plain } = map;
 	const scopes = computeScopes(code, map);
 	// In-app sources' content rides along (RF-05: context lines on issues),
 	// bounded so it never pushes a map over the limit.
 	const stored = { sourcesContent };
 	let json = storedMapJson(plain, stored);
+	// The original sources' own function scopes, from the contents that are
+	// stored (in-app sources only): inlined functions keep their own names.
+	const original = sourcesContent ? computeOriginalScopes(JSON.parse(json) as Record<string, unknown>) : null;
+	const withScopes = "scopes" in scopes ? { [SCOPES_KEY]: scopes.scopes } : {};
+	const withOriginal = original ? { [ORIGINAL_SCOPES_KEY]: original } : {};
+	const fitting = (fields: Record<string, unknown>) => {
+		const candidate = storedMapJson({ ...plain, ...fields }, stored);
+		return fits(candidate, uploadBody(release, filename, debugId, candidate)) ? candidate : null;
+	};
+	const full = fitting({ ...withScopes, ...withOriginal });
+	const scopedOnly = full ?? (original ? fitting(withScopes) : null);
+	if (full) json = full;
+	else if (scopedOnly) {
+		json = scopedOnly;
+		log(`warning: ${bundle.path}: its map is over 32 MB with original function scopes, so it is uploaded without them (inlined functions are named after their caller)`);
+	}
 	if ("scopes" in scopes) {
-		const scoped = storedMapJson({ ...plain, [SCOPES_KEY]: scopes.scopes }, stored);
-		if (fits(scoped, uploadBody(release, filename, debugId, scoped))) json = scoped;
-		else if (fits(json, uploadBody(release, filename, debugId, json))) {
+		if (!full && !scopedOnly && fits(json, uploadBody(release, filename, debugId, json))) {
 			log(`warning: ${bundle.path}: its map is over 32 MB with function scopes, so it is uploaded without them (frames keep call-site names)`);
 		}
 	} else {

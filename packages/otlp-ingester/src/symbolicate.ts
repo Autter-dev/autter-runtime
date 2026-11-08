@@ -7,10 +7,10 @@ import {
 	type MappedSegment,
 } from "./source-map-mappings.js";
 import { scrubText } from "./redact.js";
-import { SCOPES_KEY, ScopeIndex, type ScopeName } from "./source-map-scopes.js";
+import { ORIGINAL_SCOPES_KEY, OriginalScopeIndex, SCOPES_KEY, ScopeIndex, type ScopeName } from "./source-map-scopes.js";
 import type { SourceMapKey } from "./source-maps-lookup.js";
 import { isInAppPath, stripQueryAndHash } from "./stack-frames.js";
-import type { StackFrame } from "./types.js";
+import type { FrameSymbolication, StackFrame } from "./types.js";
 
 /**
  * Symbolication at ingest: minified browser frames, and bundled Node and
@@ -126,6 +126,25 @@ export function serverScriptPath(filename: string): string | null {
 	return scriptPath(path);
 }
 
+/**
+ * A resolved frame's file as people (and the fix generator) read it: the
+ * map's `sources` entry made project-relative. Bundlers write sources
+ * relative to the map file (`../../src/checkout/cart.ts` for Vite's
+ * `dist/assets/`) or under a `webpack://<name>/` scheme
+ * (`webpack://app/./src/checkout/cart.ts`); both become
+ * `src/checkout/cart.ts`, as does Turbopack's
+ * `turbopack:///[project]/src/checkout/cart.ts`. Absolute paths and URLs are kept. frames-v3 only
+ * hashes the basename, so this never changes grouping; in-app is decided on
+ * the source as written.
+ */
+export function displaySourcePath(source: string): string {
+	const path = stripQueryAndHash(source)
+		.replace(/^webpack:\/\/[^/]*\//, "")
+		.replace(/^turbopack:\/\/\/\[project\]\//, "")
+		.replace(/^(?:\.\.?\/)+/, "");
+	return path || stripQueryAndHash(source);
+}
+
 // ── Cache ─────────────────────────────────────────────────────────────────
 
 export interface SourceMapCacheOptions {
@@ -157,6 +176,8 @@ export interface LoadedSourceMap {
 	 * (see `contentOf`). */
 	map: TraceMap;
 	scopes: ScopeIndex | null;
+	/** The original sources' own function scopes (inlined functions keep their names). */
+	originalScopes?: OriginalScopeIndex | null;
 	/** Original positions for 0-based generated positions (one call per stack). */
 	lookup(positions: readonly GeneratedPosition[]): Array<MappedSegment | null>;
 	/** Estimated heap: decoded mappings (when decoded), strings and scopes;
@@ -419,12 +440,19 @@ export function parseSourceMapWithContents(json: string, maxDecodedBytes = Numbe
 	} catch {
 		scopes = null;
 	}
+	let originalScopes: OriginalScopeIndex | null = null;
+	try {
+		originalScopes = OriginalScopeIndex.from(fields[ORIGINAL_SCOPES_KEY], map.names);
+	} catch {
+		originalScopes = null;
+	}
 	const bytes =
 		decodedMappingsBytes(mappings) +
 		stringsBytes(map.names) +
 		stringsBytes(map.sources) +
 		stringsBytes(map.resolvedSources) +
-		(scopes?.bytes ?? 0);
+		(scopes?.bytes ?? 0) +
+		(originalScopes?.bytes ?? 0);
 	// Standalone use (and a map too big to cache): the contents travel with
 	// this parse; SourceMapCache replaces this for the maps it keeps. Built
 	// outside this scope so `lookup`'s closure never holds the contents.
@@ -435,6 +463,7 @@ export function parseSourceMapWithContents(json: string, maxDecodedBytes = Numbe
 			loaded: {
 				map,
 				scopes,
+				originalScopes,
 				bytes,
 				cacheable: true,
 				lookup: (positions) => positions.map((position) => decoded.find(position.line, position.column)),
@@ -444,7 +473,7 @@ export function parseSourceMapWithContents(json: string, maxDecodedBytes = Numbe
 		};
 	}
 	return {
-		loaded: { map, scopes, bytes, cacheable: false, lookup: (positions) => findInMappings(mappings, positions), contentOf },
+		loaded: { map, scopes, originalScopes, bytes, cacheable: false, lookup: (positions) => findInMappings(mappings, positions), contentOf },
 		contents,
 	};
 }
@@ -526,6 +555,9 @@ interface Resolution {
 	nameHere: string | null;
 	/** The function this frame is in, when its map carries scopes. */
 	scope: ScopeName | null;
+	/** The ORIGINAL function its original position is in, when its map
+	 * carries original scopes for that source. */
+	original: ScopeName | null;
 }
 
 export class Symbolicator {
@@ -582,20 +614,45 @@ export class Symbolicator {
 		};
 	}
 
+	/**
+	 * The unresolved-frame state of a browser frame a map could have resolved
+	 * (in-app, JS, with a position): why it stayed minified and which
+	 * bundle's map would resolve it. Other frames are returned as given.
+	 */
+	private unresolved(
+		frame: StackFrame,
+		scope: SymbolicationScope,
+		key: SourceMapKey | null,
+		map: LoadedSourceMap | null,
+	): StackFrame {
+		if (scope.server || !frame.inApp || !frame.filename || frame.lineno == null || frame.lineno < 1) return frame;
+		if (!JS_FILE_RE.test(frame.filename)) return frame;
+		const bundle = key?.filename ?? scriptPath(frame.filename);
+		if (!bundle) return frame;
+		const symbolication: FrameSymbolication = {
+			status: !key ? "no_release" : !map ? "missing_map" : "no_mapping",
+			bundle,
+			release: scope.release ?? null,
+			debugId: key?.debugId ?? this.debugIdFor(frame.filename, scope.debugIds),
+		};
+		return { ...frame, symbolication };
+	}
+
 	private async resolveAll(frames: StackFrame[], scope: SymbolicationScope): Promise<StackFrame[]> {
 		const keys = frames.map((frame) => this.keyFor(frame, scope));
-		if (!keys.some(Boolean)) return frames;
-		const maps = await Promise.all(
-			keys.map((key) => (key ? this.cache.get(key, this.fetchMap) : Promise.resolve(null))),
-		);
+		const maps = keys.some(Boolean)
+			? await Promise.all(keys.map((key) => (key ? this.cache.get(key, this.fetchMap) : Promise.resolve(null))))
+			: keys.map(() => null);
 		const resolutions = resolveFrames(frames, maps);
-		if (!resolutions.some(Boolean)) return frames;
 		return frames.map((frame, i) => {
 			const resolution = resolutions[i];
-			if (!resolution) return frame;
-			const { scope } = resolution;
-			if (scope?.kind === "named") return { ...resolution.frame, function: scope.name };
-			if (scope?.kind === "anonymous") return { ...resolution.frame, function: null };
+			if (!resolution) return this.unresolved(frame, scope, keys[i] ?? null, maps[i] ?? null);
+			// The original function wins: a function inlined into its caller
+			// still reads as itself. Else the bundle function the frame ran in.
+			const original = resolution.original;
+			const fn = original && original.kind !== "unknown" ? original : resolution.scope;
+			if (fn?.kind === "named") return { ...resolution.frame, function: fn.name };
+			if (fn?.kind === "anonymous") return { ...resolution.frame, function: null };
 			// No scopes (an older upload), or a function whose name the CLI
 			// could not map: innermost first, so the caller is the next frame.
 			const callerName = resolutions[i + 1]?.nameHere ?? null;
@@ -651,7 +708,6 @@ function resolveFrame(
 	if (!segment) return null;
 	const source = map.resolvedSources[segment.source];
 	if (!source) return null;
-	const filename = stripQueryAndHash(source);
 	const ignored = (() => {
 		try {
 			return isIgnored(map, source);
@@ -660,7 +716,8 @@ function resolveFrame(
 		}
 	})();
 	const line = segment.line + 1;
-	const inApp = !ignored && isInAppPath(filename);
+	const inApp = !ignored && isInAppPath(stripQueryAndHash(source));
+	const filename = displaySourcePath(source);
 	const resolved: StackFrame = {
 		function: frame.function,
 		module: null,
@@ -677,5 +734,6 @@ function resolveFrame(
 		frame: resolved,
 		nameHere: typeof name === "string" ? name : null,
 		scope: loaded.scopes ? loaded.scopes.nameAt(position.line, position.column) : null,
+		original: loaded.originalScopes?.nameAt(segment.source, segment.line, segment.column) ?? null,
 	};
 }

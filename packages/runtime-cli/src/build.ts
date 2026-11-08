@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
-import { findBundles, removeSourceMaps } from "./files.js";
+import { findBundles, removeSourceMaps, stripSourceMappingUrl, type BundleWithMap } from "./files.js";
 import { injectDir, type InjectResult } from "./inject.js";
 import { uploadDir, type UploadSummary } from "./upload.js";
 
@@ -144,15 +145,20 @@ export async function processBuildOutput(input: {
 	let outcome = "they were uploaded";
 	// Listed before the upload step, which deletes the maps it uploads.
 	const owners = new Map<string, string>();
+	// Bundles are paired with their maps through their `sourceMappingURL`
+	// comment when the map is not `<bundle>.map` (Turbopack names a chunk's
+	// map after its own hash), so the comment stays until the upload step is
+	// over and is removed afterwards (`stripSourceMappingUrl`).
+	let paired: BundleWithMap[] = [];
+	if (input.ownMaps || input.stripSourceMappingUrl) paired = await findBundles(input.dir, input.files);
 	if (input.ownMaps) {
-		for (const bundle of await findBundles(input.dir, input.files)) owners.set(bundle.map, bundle.js);
+		for (const bundle of paired) owners.set(bundle.map, bundle.js);
 	}
 	try {
 		try {
 			result.injected = await injectDir(input.dir, {
 				files: input.files,
 				dryRun: options.dryRun,
-				stripSourceMappingUrl: input.stripSourceMappingUrl,
 			});
 			const changed = result.injected.filter((r) => r.status === "injected").length;
 			if (result.injected.length) {
@@ -185,6 +191,7 @@ export async function processBuildOutput(input: {
 			for (const line of formatUploadSummary(result.upload)) log(line);
 			const { failed, uploaded, skipped, dryRun } = result.upload;
 			if (dryRun) outcome = "dry run, nothing was uploaded";
+			else if (failed.length + uploaded.length + skipped.length === 0) outcome = "no bundle was paired with a map to upload";
 			else if (failed.length) {
 				outcome = `${failed.length} of ${failed.length + uploaded.length + skipped.length} could not be uploaded (${failed[0]!.error})`;
 			}
@@ -199,9 +206,25 @@ export async function processBuildOutput(input: {
 		}
 	} finally {
 		// Also when the step above returned early or threw.
+		await hideMaps();
 		await cleanUp();
 	}
 	return result;
+
+	/** Drop the `sourceMappingURL` comments of the maps that stay on disk
+	 * (deleted maps lose theirs as they go), so no bundle points at a map. */
+	async function hideMaps(): Promise<void> {
+		if (!input.stripSourceMappingUrl || options.dryRun) return;
+		for (const bundle of paired) {
+			try {
+				const code = await readFile(bundle.js, "utf8");
+				const stripped = stripSourceMappingUrl(code);
+				if (stripped !== code) await writeFile(bundle.js, stripped);
+			} catch {
+				// a bundle that vanished has nothing to hide
+			}
+		}
+	}
 
 	async function cleanUp(): Promise<void> {
 		if (!input.ownMaps) return;

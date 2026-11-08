@@ -25,6 +25,40 @@ jobs:
       - run: npm run size -w @autter/runtime-browser
       - run: python3 -m unittest discover -s adapters/python -v
 
+  clickhouse-e2e:
+    # The built ingester against a real ClickHouse, the version production
+    # runs: migrations, /healthz readiness (a wrong password, a dropped
+    # table), and retried OTLP exports after a lost response, a partial
+    # fan-out failure and a restart — stored exactly once
+    # (packages/otlp-ingester/scripts/clickhouse-e2e.mjs).
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8.14.39
+        ports:
+          - 8123:8123
+        env:
+          CLICKHOUSE_PASSWORD: e2e
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run build -w @autter/otlp-ingester
+      - run: npm run e2e:clickhouse -w @autter/otlp-ingester
+        env:
+          CLICKHOUSE_URL: http://127.0.0.1:8123
+          CLICKHOUSE_ADMIN_PASSWORD: e2e
+          EXPECT_CLICKHOUSE_VERSION: 24.8.14.39
+
   python:
     # The always-on error adapter with the OpenTelemetry SDK installed, and
     # each Python recipe run for real against a stub OTLP receiver. No

@@ -89,62 +89,129 @@ export function retryable(state: StorageState): boolean {
 }
 
 export interface WriteHealthStats {
-	/** Last successful ingest write. */
+	/** Last successful ingest write (any table). */
 	lastOkAt: string | null;
-	/** Last failed ingest write, and its category. */
+	/** Last failed ingest write (any table), and its category. */
 	lastErrorAt: string | null;
 	lastError: StorageErrorCategory | null;
-	/** Failed writes since the last success. */
+	/** Failed writes since the last success, summed over the tables that
+	 * are failing now. */
 	consecutiveFailures: number;
+	/** Tables whose most recent write failed (names, no tenant data). */
+	failingTables: string[];
 	/** Seconds since the last successful write while writes are failing
-	 * (how far behind storage is); 0 when the last write succeeded. */
+	 * (how far behind storage is); 0 when nothing is failing. */
 	lagSeconds: number;
 	okWrites: number;
 	failedWrites: number;
 }
 
-/** Outcome of real ingest writes. */
+interface TableHealth {
+	lastOk: number;
+	lastError: number;
+	category: StorageErrorCategory | null;
+	consecutive: number;
+}
+
+/**
+ * Outcome of real ingest writes, per table. A success on one table says
+ * nothing about another: one request writes several tables in parallel, and
+ * a table that refuses every insert (a missing grant, a dropped table) must
+ * keep the ingester unready even while its siblings keep succeeding.
+ */
 export class WriteHealth {
+	private readonly tables = new Map<string, TableHealth>();
 	private lastOk = 0;
 	private lastError = 0;
 	private lastCategory: StorageErrorCategory | null = null;
-	private consecutive = 0;
 	private ok = 0;
 	private failed = 0;
 
 	constructor(private readonly now: () => number = Date.now) {}
 
-	recordOk(): void {
-		this.lastOk = this.now();
-		this.consecutive = 0;
-		this.ok += 1;
+	private table(name: string): TableHealth {
+		let health = this.tables.get(name);
+		if (!health) {
+			health = { lastOk: 0, lastError: 0, category: null, consecutive: 0 };
+			this.tables.set(name, health);
+		}
+		return health;
 	}
 
-	recordFailure(category: StorageErrorCategory): void {
-		this.lastError = this.now();
-		this.lastCategory = category;
-		this.consecutive += 1;
-		this.failed += 1;
-	}
-
-	/** True while the most recent write failed and it is recent: a probe
-	 * that succeeds must not hide real inserts that do not. */
-	failing(windowMs: number): boolean {
-		return this.consecutive > 0 && this.now() - this.lastError <= windowMs;
-	}
-
-	lastCategoryOrNull(): StorageErrorCategory | null {
-		return this.lastCategory;
-	}
-
-	stats(): WriteHealthStats {
+	/** A write to `table` succeeded; without a table, every table is cleared. */
+	recordOk(table?: string): void {
 		const now = this.now();
+		this.lastOk = now;
+		this.ok += 1;
+		const targets = table === undefined ? [...this.tables.values()] : [this.table(table)];
+		for (const health of targets) {
+			health.lastOk = now;
+			health.consecutive = 0;
+		}
+	}
+
+	recordFailure(category: StorageErrorCategory, table = ""): void {
+		const now = this.now();
+		this.lastError = now;
+		this.lastCategory = category;
+		this.failed += 1;
+		const health = this.table(table);
+		health.lastError = now;
+		health.category = category;
+		health.consecutive += 1;
+	}
+
+	/** Forget failures of `category` (e.g. "schema" once the tables were
+	 * recreated). True when any table was cleared. */
+	clearCategory(category: StorageErrorCategory): boolean {
+		let cleared = false;
+		for (const health of this.tables.values()) {
+			if (health.consecutive > 0 && health.category === category) {
+				health.consecutive = 0;
+				cleared = true;
+			}
+		}
+		return cleared;
+	}
+
+	/** Forget a table's failures. True when it was failing. */
+	clearTable(table: string): boolean {
+		const health = this.tables.get(table);
+		if (!health || health.consecutive === 0) return false;
+		health.consecutive = 0;
+		return true;
+	}
+
+	/** Tables whose latest write failed within `windowMs`. */
+	private failingTables(windowMs: number): Array<[string, TableHealth]> {
+		const now = this.now();
+		return [...this.tables].filter(([, health]) => health.consecutive > 0 && now - health.lastError <= windowMs);
+	}
+
+	/** True while some table's most recent write failed, recently: a probe
+	 * that succeeds, or another table that accepts writes, must not hide
+	 * real inserts that do not. */
+	failing(windowMs: number): boolean {
+		return this.failingTables(windowMs).length > 0;
+	}
+
+	/** The category of the most recent failure among the failing tables. */
+	lastCategoryOrNull(windowMs = Number.POSITIVE_INFINITY): StorageErrorCategory | null {
+		const failing = this.failingTables(windowMs).sort(([, a], [, b]) => b.lastError - a.lastError);
+		return failing[0]?.[1].category ?? this.lastCategory;
+	}
+
+	stats(windowMs = Number.POSITIVE_INFINITY): WriteHealthStats {
+		const now = this.now();
+		const failing = this.failingTables(windowMs);
+		const consecutive = failing.reduce((sum, [, health]) => sum + health.consecutive, 0);
 		return {
 			lastOkAt: this.lastOk ? new Date(this.lastOk).toISOString() : null,
 			lastErrorAt: this.lastError ? new Date(this.lastError).toISOString() : null,
 			lastError: this.lastCategory,
-			consecutiveFailures: this.consecutive,
-			lagSeconds: this.consecutive > 0 && this.lastOk ? Math.round((now - this.lastOk) / 1000) : 0,
+			consecutiveFailures: consecutive,
+			failingTables: failing.map(([name]) => name.replace(/^[^.]*\./, "")).filter(Boolean).sort(),
+			lagSeconds: consecutive > 0 && this.lastOk ? Math.round((now - this.lastOk) / 1000) : 0,
 			okWrites: this.ok,
 			failedWrites: this.failed,
 		};

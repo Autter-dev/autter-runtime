@@ -30,7 +30,7 @@ import {
 	type DropReason,
 	type PartialSuccess,
 } from "./ingest-drops.js";
-import { ClickHouseStore } from "./clickhouse.js";
+import { ClickHouseStore, routeLatencyPoints } from "./clickhouse.js";
 import { normalizeLatencyHistograms } from "./latency.js";
 import { UPLOAD_KEY_PREFIX, type IngesterConfig } from "./config.js";
 import { deriveFields, occurrenceIdFor } from "./fingerprint.js";
@@ -595,12 +595,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 
 	async function readinessReport() {
 		const probe = await readiness.get();
-		const writes = store.writes.stats();
+		const writes = store.writes.stats(WRITE_FAILURE_WINDOW_MS);
 		let state: StorageState = probe.state;
 		// The probe passing does not clear real writes that keep failing (a
 		// table the probe does not touch, a grant on one table).
 		if (state === "up" && store.writes.failing(WRITE_FAILURE_WINDOW_MS)) {
-			state = stateFor(store.writes.lastCategoryOrNull() ?? "error");
+			state = stateFor(store.writes.lastCategoryOrNull(WRITE_FAILURE_WINDOW_MS) ?? "error");
 		}
 		const ok = state === "up";
 		const dropTotals = drops.totals();
@@ -649,7 +649,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		}
 		await receipts.coalesce(digest, async () => {
 			const done = await receipts.committed(digest, pending.map((write) => write.table));
-			await Promise.all(
+			// allSettled, not all: when one insert is refused at once (a
+			// privilege, a missing table) its siblings are still in flight —
+			// an async insert is acknowledged only after its buffer flushes.
+			// Answering 503 before they settle would let the exporter's retry
+			// overtake them, find no receipt and write those rows twice.
+			const results = await Promise.allSettled(
 				pending
 					.filter((write) => !done.has(write.table))
 					.map(async (write) => {
@@ -657,13 +662,15 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 						await receipts.add(digest, write.table);
 					}),
 			);
+			const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+			if (failed) throw failed.reason;
 		});
 	}
 
 	/** Throw unless storage can take writes (cached readiness). */
 	async function requireWritable(): Promise<void> {
 		if (store.writes.failing(WRITE_FAILURE_WINDOW_MS)) {
-			throw new Error(`storage is failing writes (${store.writes.lastCategoryOrNull() ?? "error"})`);
+			throw new Error(`storage is failing writes (${store.writes.lastCategoryOrNull(WRITE_FAILURE_WINDOW_MS) ?? "error"})`);
 		}
 		const probe = await readiness.get();
 		if (probe.state !== "up") throw new Error(`storage not writable (${probe.state})`);
@@ -1128,6 +1135,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_spans", rows: spans.length, run: (token) => store.insertSpans(ctx, spans, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 				{ table: "runtime_llm_calls", rows: llmCalls.length, run: (token) => store.insertLlmCalls(ctx, llmCalls, token) },
 			]);
 		} catch (err) {
@@ -1183,6 +1191,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				{ table: "runtime_logs", rows: logs.length, run: (token) => store.insertLogs(ctx, logs, token) },
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();
@@ -1241,6 +1250,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			await writeAll(digest, [
 				{ table: "runtime_latency_histograms", rows: latency.length, run: (token) => store.insertLatencyHistograms(ctx, latency, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 				{ table: "runtime_memory_samples", rows: memorySamples.length, run: (token) => store.insertMemorySamples(ctx, memorySamples, token) },
 			]);
 		} catch (err) {
@@ -1314,6 +1324,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			await writeAll(digest, [
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();

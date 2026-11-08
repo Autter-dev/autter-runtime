@@ -93,6 +93,15 @@ export const DEDUP_WINDOW = 10_000;
  * guard, never a reason to refuse telemetry. */
 const DEDUP_SETTING_REFUSED = new Set(["115", "36", "48", "1", "344"]);
 
+/** WriteHealth key for a failed schema check (no table was written). */
+const SCHEMA_WRITE = "(schema)";
+const SCHEMA_RECORDED = Symbol("schemaFailureRecorded");
+
+/** Metric points that carry latency samples (runtime_route_latency_input rows). */
+export function routeLatencyPoints(points: RuntimeMetricPoint[]): RuntimeMetricPoint[] {
+	return points.filter((p) => p.latency && p.latency.valuesMs.length > 0);
+}
+
 /** Source maps above this go in with a plain insert (below ClickHouse's
  * default async_insert_max_data_size of 10 MiB). */
 const ASYNC_INSERT_MAX_MAP_CHARS = 8 * 1024 * 1024;
@@ -334,6 +343,10 @@ export class ClickHouseStore {
 			await this.applyDedupWindow();
 			this.appliedIds = migrations.map((migration) => migration.id);
 			this.schemaState = "ready";
+			// Every table exists again: a "table missing" failure, and a failed
+			// schema check, are resolved.
+			const clearedSchema = this.writes.clearCategory("schema");
+			if (this.writes.clearTable(SCHEMA_WRITE) || clearedSchema) this.onWriteStateChange?.();
 		})().catch((err) => {
 			this.ensurePromise = null;
 			this.schemaState = "failed";
@@ -429,10 +442,22 @@ export class ClickHouseStore {
 	private async insertTracked(
 		params: { table: string; format: "JSONEachRow"; clickhouse_settings?: ClickHouseSettings; values: unknown[] },
 		dedupToken?: string,
+		/** Count the outcome toward readiness: ingest writes do; background
+		 * bookkeeping (SDK versions, drop counts, ingester info, dead
+		 * letters) is best-effort and does not. */
+		track = true,
 	): Promise<void> {
 		const wasFailing = this.writes.stats().consecutiveFailures > 0;
 		try {
-			await this.ensureSchema();
+			try {
+				await this.ensureSchema();
+			} catch (err) {
+				// The schema check failed, not this table's insert (which never
+				// ran): counted apart, and cleared once the schema is in place.
+				if (track) this.writes.recordFailure(storageErrorCategory(err), SCHEMA_WRITE);
+				if (track) this.onWriteStateChange?.();
+				throw Object.assign(err as object, { [SCHEMA_RECORDED]: true });
+			}
 			const settings: ClickHouseSettings = { ...(params.clickhouse_settings ?? INSERT_SETTINGS) };
 			if (dedupToken && this.dedupTokens) {
 				settings.insert_deduplication_token = `${dedupToken}:${params.table}`;
@@ -460,13 +485,14 @@ export class ClickHouseStore {
 					}
 				}
 			}
-			this.writes.recordOk();
-			if (wasFailing) this.onWriteStateChange?.();
+			if (track) this.writes.recordOk(params.table);
+			if (track && wasFailing) this.onWriteStateChange?.();
 		} catch (err) {
+			if ((err as Record<symbol, unknown>)?.[SCHEMA_RECORDED]) throw err;
 			const category = storageErrorCategory(err);
-			this.writes.recordFailure(category);
+			if (track) this.writes.recordFailure(category, params.table);
 			if (category === "schema") this.resetSchema();
-			this.onWriteStateChange?.();
+			if (track) this.onWriteStateChange?.();
 			throw err;
 		}
 	}
@@ -550,7 +576,7 @@ export class ClickHouseStore {
 				instance_id: row.instanceId,
 				file: row.file,
 			})),
-		});
+		}, undefined, false);
 	}
 
 	/**
@@ -618,7 +644,7 @@ export class ClickHouseStore {
 				last_seen: row.seenAt.toISOString(),
 				via: row.via,
 			})),
-		});
+		}, undefined, false);
 	}
 
 	/** Rejection and drop counts (ingest-drops.ts); rows carry their own tenant. */
@@ -640,7 +666,7 @@ export class ClickHouseStore {
 				requests: row.requests,
 				records: row.records,
 			})),
-		});
+		}, undefined, false);
 	}
 
 	/** Record this ingester's version and schema level (global, not tenant data). */
@@ -656,7 +682,7 @@ export class ClickHouseStore {
 				report: JSON.stringify(info.report),
 				reported_at: new Date().toISOString(),
 			}],
-		});
+		}, undefined, false);
 	}
 
 	async ping(): Promise<boolean> {
@@ -884,9 +910,21 @@ export class ClickHouseStore {
 				session_count: Math.max(0, Math.round(p.sessionCount)),
 			})),
 		}, dedupToken);
-		// Their percentiles: the view folds these into runtime_route_latency_1m.
-		const latency = points.filter((p) => p.latency && p.latency.valuesMs.length > 0);
-		if (latency.length === 0) return;
+	}
+
+	/**
+	 * The points' latency samples, into runtime_route_latency_input (a Null
+	 * table: its view folds them into runtime_route_latency_1m). A write of
+	 * its own, so a request retried after one of the two failed does not add
+	 * runtime_metrics_1m twice (each has its own receipt and token).
+	 */
+	async insertRouteLatency(
+		ctx: IngestContext,
+		points: RuntimeMetricPoint[],
+		dedupToken?: string,
+	): Promise<void> {
+		const latency = routeLatencyPoints(points);
+		if (latency.length === 0 || !this.configured) return;
 		await this.insertTracked({
 			table: this.table("runtime_route_latency_input"),
 			format: "JSONEachRow",

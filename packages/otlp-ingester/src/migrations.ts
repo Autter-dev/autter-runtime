@@ -33,6 +33,8 @@
  *   },
  */
 
+import { heartbeatTableDDL } from "./health.js";
+import { sinkDeadLettersTableDDL } from "./sink-dead-letters.js";
 import {
 	latencyTableDDL,
 	routeLatencyInputDDL,
@@ -301,6 +303,14 @@ export const MIGRATIONS: Migration[] = [
 	{
 		id: "0022-route-latency-1m",
 		statements: [routeLatencyInputDDL("{db}"), routeLatencyTableDDL("{db}"), routeLatencyViewDDL("{db}")],
+	},
+	// Honest readiness and a durable sink (1.12): the heartbeat row every
+	// /healthz probe writes (health.ts), and one row per sink batch the
+	// webhook gave up on, with the signal range to replay
+	// (sink-dead-letters.ts).
+	{
+		id: "0023-readiness-and-sink-dead-letters",
+		statements: [heartbeatTableDDL("{db}"), sinkDeadLettersTableDDL("{db}")],
 	},
 ];
 

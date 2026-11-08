@@ -420,6 +420,15 @@ export interface IngestDropCounterStats {
 	overflowRequests: number;
 }
 
+/** Process-lifetime count for one (route, reason). No tenant data. */
+export interface IngestDropTotal {
+	route: DropRoute;
+	reason: DropReason;
+	kind: DropKind;
+	requests: number;
+	records: number;
+}
+
 export class IngestDropCounter {
 	private rows = new Map<string, IngestDropRow>();
 	private keyHashes = new Set<string>();
@@ -431,6 +440,10 @@ export class IngestDropCounter {
 	private failedWrites = 0;
 	private discardedRows = 0;
 	private lastErrorLog = Number.NEGATIVE_INFINITY;
+	/** Process-lifetime totals per (route, reason): kept in memory so they
+	 * are readable on /healthz and /metrics even while ClickHouse — where
+	 * the per-minute rows go — is down. Bounded by routes × reasons. */
+	private readonly lifetime = new Map<string, IngestDropTotal>();
 	private readonly flushIntervalMs: number;
 	private readonly maxRows: number;
 	private readonly maxKeyHashes: number;
@@ -454,11 +467,25 @@ export class IngestDropCounter {
 
 	/** Count a drop. Synchronous and O(1); never throws. */
 	record(drop: IngestDrop): void {
-		if (!this.enabled) return;
 		try {
 			const requests = Math.max(0, Math.round(drop.requests ?? 1));
 			const records = Math.max(0, Math.round(drop.records ?? 0));
 			if (requests === 0 && records === 0) return;
+			const totalKey = `${drop.route}\u0000${drop.reason}`;
+			const total = this.lifetime.get(totalKey);
+			if (total) {
+				total.requests += requests;
+				total.records += records;
+			} else {
+				this.lifetime.set(totalKey, {
+					route: drop.route,
+					reason: drop.reason,
+					kind: DROP_REASONS[drop.reason].kind,
+					requests,
+					records,
+				});
+			}
+			if (!this.enabled) return;
 			const tenant = drop.tenant;
 			let keyHash = tenant ? "" : (drop.keyHash ?? "");
 			if (keyHash && !this.keyHashes.has(keyHash) && this.keyHashes.size >= this.maxKeyHashes) keyHash = "";
@@ -558,6 +585,11 @@ export class IngestDropCounter {
 				this.inFlight = null;
 			});
 		return this.inFlight;
+	}
+
+	/** Everything counted since the process started, per route and reason. */
+	totals(): IngestDropTotal[] {
+		return [...this.lifetime.values()].map((total) => ({ ...total }));
 	}
 
 	stats(): IngestDropCounterStats {

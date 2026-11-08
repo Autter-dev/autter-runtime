@@ -14,7 +14,7 @@ const ID = "0f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f";
 const MAP = { version: 3, sources: ["src/app.ts"], names: [], mappings: "AAAA" };
 
 /** Routes that need no key at all (they hold no tenant data). */
-const PUBLIC_ROUTES = ["GET /healthz", "GET /v1/compat"];
+const PUBLIC_ROUTES = ["GET /healthz", "GET /livez", "GET /metrics", "GET /v1/compat"];
 
 function config(): IngesterConfig {
 	return {
@@ -37,6 +37,7 @@ async function start() {
 		if (name.startsWith("insert")) stub[name] = async () => {};
 	}
 	stub.ensureSchema = async () => {};
+	stub.probe = async () => ({ state: "up", checkedAt: new Date().toISOString(), latencyMs: 0 });
 	stub.recentOccurrenceTraceIds = async () => [];
 	stub.ping = async () => true;
 	store.insertSourceMap = async (_ctx, sourceMap) => {

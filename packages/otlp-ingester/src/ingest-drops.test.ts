@@ -434,11 +434,15 @@ test("sink batches given up on are reported with their tenant and occurrence cou
 	};
 	sink.enqueue(ctx, [occurrence("a"), occurrence("b")]);
 	await waitFor(1);
-	assert.deepEqual(dropsSeen[0], { orgId: "o", repositoryId: "r", reason: "sink_rejected", occurrences: 2 });
+	const core = (d: (typeof dropsSeen)[number] | undefined) => d && { orgId: d.orgId, repositoryId: d.repositoryId, reason: d.reason, occurrences: d.occurrences };
+	assert.deepEqual(core(dropsSeen[0]), { orgId: "o", repositoryId: "r", reason: "sink_rejected", occurrences: 2 });
 	status = 503;
 	sink.enqueue(ctx, [occurrence("c")]);
 	await waitFor(2);
-	assert.deepEqual(dropsSeen[1], { orgId: "o", repositoryId: "r", reason: "sink_gave_up", occurrences: 1 });
+	assert.deepEqual(core(dropsSeen[1]), { orgId: "o", repositoryId: "r", reason: "sink_gave_up", occurrences: 1 });
+	// 1.12: each drop carries what a consumer needs to replay it.
+	assert.ok(dropsSeen[1]!.attempts >= 1);
+	assert.ok(dropsSeen[1]!.batchId && dropsSeen[1]!.signalsFrom && dropsSeen[1]!.enqueuedAt);
 	// A hook that throws never affects delivery.
 	sink.onDrop = () => {
 		throw new Error("boom");

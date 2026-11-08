@@ -125,7 +125,13 @@ test("log ingestion authenticates, preserves tenant mapping and refuses malforme
 		assert.equal(inserts.length, 2);
 		assert.equal(inserts[1]!.message, "ok");
 		fail = true;
-		assert.equal((await post("server", payload)).status, 503);
+		// A byte-identical re-send is a retry of a request already stored
+		// (1.12, insert-receipts.ts): it is not written again. A new export
+		// whose write fails answers 503.
+		assert.equal((await post("server", payload)).status, 200);
+		assert.equal(inserts.length, 2);
+		const fresh = JSON.parse(JSON.stringify(payload).replace("checkout started", "checkout retried"));
+		assert.equal((await post("server", fresh)).status, 503);
 	} finally {
 		await close(app);
 		await close(ch);

@@ -54,6 +54,7 @@ async function start(overrides: Partial<IngesterConfig> = {}) {
 		if (name.startsWith("insert")) stub[name] = async () => {};
 	}
 	stub.ensureSchema = async () => {};
+	stub.probe = async () => ({ state: "up", checkedAt: new Date().toISOString(), latencyMs: 0 });
 	stub.recentOccurrenceTraceIds = async () => new Set();
 	stub.lookupSourceMap = async () => null;
 	stub.sourceMapsPresent = async () => [];

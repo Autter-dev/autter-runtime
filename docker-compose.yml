@@ -25,8 +25,24 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_PASSWORD: dev
       AUTTER_INGEST_KEYS: ${AUTTER_INGEST_KEYS:-}
+      AUTTER_SINK_URL: ${AUTTER_SINK_URL:-}
+      AUTTER_SINK_TOKEN: ${AUTTER_SINK_TOKEN:-}
       # Exposed directly (no proxy): don't trust X-Forwarded-For.
       TRUST_PROXY: 0
+    volumes:
+      # Undelivered sink batches: kept across restarts and re-sent.
+      - sink_outbox:/var/lib/autter/sink-outbox
     depends_on:
       clickhouse:
         condition: service_healthy
+    healthcheck:
+      # Readiness: 200 only when the ingester can write to ClickHouse with
+      # its credentials (a wrong password or a dropped table is unhealthy).
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4318/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  sink_outbox:

@@ -81,6 +81,18 @@ Then create the DNS CNAME the script prints, and verify:
 curl https://otlp.autter.dev/healthz   # {"ok":true,…}
 ```
 
+`/healthz` is readiness (1.12): 200 only when the ingester can write to
+ClickHouse, so the target group stops routing to a task that cannot store
+anything. The container health check uses `/livez` (liveness) instead, so a
+ClickHouse outage does not make ECS replace tasks in a loop.
+
+Fargate tasks have no persistent disk, so the sink outbox
+(`SINK_OUTBOX_DIR`) survives a process crash inside a running task but not a
+task replacement; on SIGTERM the ingester spends up to 4 s delivering its
+queue first. Anything left undelivered is dead-lettered or lost with the
+task, and the platform's sink reconciler replays it from ClickHouse. Each
+task needs its own outbox directory, so a shared EFS mount is not a fix.
+
 ## 2. Every subsequent deploy
 
 Push to `main` (with `AWS_AUTODEPLOY_ENABLED=true`) or run the

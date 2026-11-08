@@ -27,25 +27,27 @@ if (store.configured) {
 
 async function shutdown(signal: string) {
 	console.log(`${signal} received, shutting down`);
-	if (sink) {
-		const pending = sink.pendingCount();
-		sink.stop();
-		if (pending > 0) {
-			// The retry buffer is memory-only; everything in it is already in
-			// ClickHouse, so the consumer's reconciliation replays it.
-			console.warn(
-				`${pending} sink batch(es) undelivered at shutdown — recoverable via ClickHouse replay`,
-			);
-		}
-	}
 	server.close(() => {
 		// Store every loop-collapse window's sample (the minute in progress
-		// too), so a deploy loses no folded count; the sink is stopped, so
-		// the consumer picks them up from ClickHouse. Then write the
-		// rejection/drop counts still buffered (best effort: a failed write
-		// is logged, never retried).
+		// too), so a deploy loses no folded count, and queue it for the sink.
+		// Then give the sink a few seconds to deliver what is queued; what is
+		// left stays in the outbox for the next start (or, without one, in
+		// ClickHouse for a replay). Then write the rejection/drop counts still
+		// buffered (best effort: a failed write is logged, never retried).
 		void collapse
 			.stop()
+			.then(async () => {
+				if (!sink) return;
+				const pending = await sink.drain(4_000);
+				sink.stop();
+				if (pending > 0) {
+					console.warn(
+						sink.durable
+							? `${pending} sink batch(es) undelivered at shutdown — kept in the outbox, sent on the next start`
+							: `${pending} sink batch(es) undelivered at shutdown and lost (no SINK_OUTBOX_DIR) — replay from ClickHouse`,
+					);
+				}
+			})
 			.finally(() => drops.stop())
 			.finally(() => store.close())
 			.finally(() => limits.close())
@@ -70,7 +72,10 @@ export {
 	type LimitStore,
 } from "./limits.js";
 export * from "./compat.js";
-export { SinkForwarder, type SinkDrop, type SinkStats, type SinkTuning } from "./sink.js";
+export { batchIdFor, SINK_BATCH_LIMITS, SinkForwarder, type SinkDrop, type SinkStats, type SinkTuning } from "./sink.js";
+export { SinkOutbox, type OutboxRecord, type DeadLetterRecord } from "./sink-outbox.js";
+export type { SinkDeadLetterRow } from "./sink-dead-letters.js";
+export type { StorageState } from "./health.js";
 export {
 	collapseIdentity,
 	LoopCollapser,

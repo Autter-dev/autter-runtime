@@ -16,7 +16,9 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 | `POST /v1/browser` | Browser payload `version: 1` | Errors/rejections → occurrences; session pings → rollups |
 | `POST /v1/logs` | OTLP logs, server key | Structured logs and operation summaries → `runtime_logs` |
 | `GET /v1/compat` | — | Version, schema level and supported features (public) |
-| `GET /healthz` | — | Liveness + ClickHouse reachability |
+| `GET /healthz` | — | Readiness: 200 only when the ingester can write to ClickHouse (see below) |
+| `GET /livez` | — | Liveness: 200 while the process serves requests, whatever storage does |
+| `GET /metrics` | — | Prometheus text: readiness, write outcomes, drop counters, sink delivery |
 
 Auth on every ingest route: `Authorization: Bearer <ingest key>`,
 `x-autter-key`, or `?key=` (query param — for sendBeacon, which cannot set
@@ -134,11 +136,15 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` (optional `scope`, `allowedOrigins`, `suppression`) |
 | `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId, scope?, allowedOrigins?, suppression?}`, or 404 for an unknown or revoked key (60 s cache; see [Validator outages](#validator-outages)) |
 | `AUTTER_KEY_VALIDATOR_TOKEN` | — | Bearer token sent to the validator |
-| `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once (`docs/ARCHITECTURE.md`) |
+| `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once, across restarts with an outbox (`docs/ARCHITECTURE.md`) |
 | `AUTTER_SINK_TOKEN` | — | Bearer token sent to the sink |
-| `SINK_MAX_ATTEMPTS` | `12` | Delivery attempts per batch (1–60 s backoff) |
-| `SINK_MAX_BUFFERED_BATCHES` | `1000` | Retry buffer cap; oldest drops are logged |
-| `SINK_MAX_BUFFERED_MB` | `64` | Sink retry buffer cap (memory) |
+| `SINK_OUTBOX_DIR` | `/var/lib/autter/sink-outbox` in the image; `<os tmpdir>/autter-sink-outbox-<port>` otherwise | Undelivered sink batches are written here before the ingest request is answered and re-sent after a restart; `dead/` keeps the batches given up on. One directory per ingester process; mount a volume to survive container replacement. `off` = memory only (lost on restart) |
+| `SINK_OUTBOX_FSYNC` | off | `1` fsyncs every outbox write (survives a host crash, not just a process crash) |
+| `SINK_MAX_AGE_HOURS` | `72` | A batch still undelivered after this long is dead-lettered |
+| `SINK_MAX_ATTEMPTS` | unlimited with an outbox, `12` without | Delivery attempts per batch before it is dead-lettered (1–60 s backoff); `0` = no limit |
+| `SINK_MAX_BUFFERED_BATCHES` | `1000` | Sink queue cap in memory; past it the oldest batch of the heaviest tenant is dead-lettered |
+| `SINK_MAX_BUFFERED_MB` | `64` | Sink queue cap in memory (MiB) |
+| `SINK_DEAD_LETTER_MAX_MB` | `256` | Disk budget for dead letters; the oldest are deleted past it (counted, logged) |
 | `SOURCE_MAP_CACHE_MB` | `64` | Memory budget (decoded size, function scope tables included) for parsed source maps used to symbolicate browser, Node and edge frames at ingest; least recently used maps are evicted, and a map that needs more than half of it is used without being kept. The source contents of cached maps (context lines) are kept apart, one file per entry, under a budget of the same size, so they never change which maps are cached |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `LOOP_COLLAPSE_AFTER` | `10` | Identical occurrences stored per minute before the rest of the minute is collapsed into one sample with an exact count; `0` turns loop collapse off |
@@ -184,6 +190,43 @@ In the order a request meets them:
 Limits are shared across replicas through `AUTTER_REDIS_URL`. Without it,
 set `AUTTER_INGESTER_REPLICAS` so each process enforces its share. Loop
 collapse windows stay per process (see `docs/ARCHITECTURE.md`).
+
+## Health, readiness and drops (1.12)
+
+`GET /healthz` is a readiness check. It answers 200 only when the ingester
+can store what it is sent: a probe makes sure the schema exists and inserts
+one row into `runtime_ingester_heartbeat` with the configured credentials
+(cached for 5 s, shared by concurrent callers), and a failed ingest write in
+the last minute also makes it unready. Before 1.12 it answered ClickHouse's
+unauthenticated `/ping`, so a wrong password or a dropped table showed "up"
+while every ingest request got 503.
+
+```json
+{"ok":false,"status":"unready","clickhouse":"auth_failed","retryable":false,
+ "checkedAt":"…","probeLatencyMs":12,
+ "writes":{"lastOkAt":null,"lastErrorAt":"…","lastError":"auth","consecutiveFailures":3,"lagSeconds":0,…},
+ "drops":{"requests":42,"records":97,"byReason":[{"route":"traces","reason":"storage_unavailable","kind":"rejected","requests":3,"records":12}],…},
+ "sink":{"queued":0,"durable":true,"deadLettered":0,"oldestQueuedAgeSeconds":0,…}}
+```
+
+`clickhouse` is `up`, `down` (unreachable, timed out or failing: retry,
+`Retry-After: 5`), `auth_failed` (credentials or grants: fix the deployment),
+`schema_missing` (a table or the database is gone and could not be
+recreated) or `unconfigured` (no `CLICKHOUSE_URL`: every ingest request gets
+503, so this is 503 too). A table dropped under a running ingester is
+recreated on the next write. An ingest request with nothing to store (an
+empty export) gets 503 too while storage is not writable, instead of a 2xx.
+
+`writes.lagSeconds` is how long writes have been failing since the last one
+that succeeded. `drops` are the process-lifetime counts by route and reason
+(the per-minute rows in `runtime_ingest_drops` cannot be written while
+ClickHouse is down; these can always be read). `/metrics` has the same
+numbers for Prometheus. Use `/healthz` for load balancers and compose
+`depends_on`, and `/livez` for restart policies, so a storage outage does not
+restart the ingester in a loop.
+
+The tables live in the `CLICKHOUSE_DATABASE` database (`autter_runtime`),
+not `default`: `SHOW TABLES FROM autter_runtime`.
 
 ## Coded errors and request summaries (1.5.0)
 

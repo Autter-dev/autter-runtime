@@ -99,7 +99,7 @@ healthy.
 Verify:
 
 ```bash
-curl https://otlp.yourdomain.com/healthz   # {"ok":true,"clickhouse":"up"}
+curl https://otlp.yourdomain.com/healthz   # {"ok":true,"status":"ready","clickhouse":"up",…}
 ```
 
 ## 7. Point your apps at it

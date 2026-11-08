@@ -27,6 +27,14 @@ import {
 	type SdkVersionRow,
 } from "./sdk-versions.js";
 import { ingestDropsTableDDL, type IngestDropRow } from "./ingest-drops.js";
+import {
+	heartbeatTableDDL,
+	stateFor,
+	storageErrorCategory,
+	WriteHealth,
+	type ProbeResult,
+} from "./health.js";
+import { sinkDeadLettersTableDDL, type SinkDeadLetterRow } from "./sink-dead-letters.js";
 import { inAppFrameResolution } from "./symbolicate.js";
 import type { SchemaStatus } from "./compat.js";
 import {
@@ -60,6 +68,31 @@ const INSERT_SETTINGS: ClickHouseSettings = {
 	wait_for_async_insert: 1,
 };
 
+/** Tables whose fan-out inserts carry a dedup token (insert_deduplication_token):
+ * a request retried after a partial failure must not add its rows twice.
+ * A plain (non-replicated) MergeTree only keeps the hashes it dedupes
+ * against when non_replicated_deduplication_window > 0, set at boot by
+ * applyDedupWindow; Replicated and Shared engines keep them by default. */
+export const DEDUP_TABLES = [
+	"runtime_error_occurrences",
+	"runtime_spans",
+	"runtime_metrics_1m",
+	"runtime_llm_calls",
+	"runtime_logs",
+	"runtime_latency_histograms",
+	"runtime_memory_samples",
+] as const;
+
+/** Inserted blocks remembered per table for dedupe. Exporters retry within
+ * minutes; this covers far more inserts than a retry window holds. */
+export const DEDUP_WINDOW = 10_000;
+
+/** Errors a server can answer for dedupe settings it does not support
+ * (UNKNOWN_SETTING, BAD_ARGUMENTS, NOT_IMPLEMENTED, UNSUPPORTED_METHOD,
+ * SUPPORT_IS_DISABLED). Ingest then goes on without them: dedupe is a
+ * guard, never a reason to refuse telemetry. */
+const DEDUP_SETTING_REFUSED = new Set(["115", "36", "48", "1", "344"]);
+
 /** Source maps above this go in with a plain insert (below ClickHouse's
  * default async_insert_max_data_size of 10 MiB). */
 const ASYNC_INSERT_MAX_MAP_CHARS = 8 * 1024 * 1024;
@@ -88,6 +121,15 @@ export class ClickHouseStore {
 	private ensurePromise: Promise<void> | null = null;
 	private schemaState: Exclude<SchemaStatus, "unconfigured"> = "pending";
 	private appliedIds: string[] = [];
+	/** Outcome of real ingest writes, for readiness (health.ts). */
+	readonly writes = new WriteHealth();
+	/** False once the server refused async_insert_deduplicate. */
+	private asyncDedupSetting = true;
+	/** False once the server refused insert_deduplication_token. */
+	private dedupTokens = true;
+	/** Called when a write fails or succeeds after failing — lets the
+	 * readiness probe drop a stale cached answer. */
+	onWriteStateChange: (() => void) | null = null;
 
 	constructor(private readonly config: IngesterConfig) {}
 
@@ -139,6 +181,8 @@ export class ClickHouseStore {
 			sdkVersionTableDDL(db, metricsTtlDays),
 			ingesterInfoTableDDL(db),
 			ingestDropsTableDDL(db),
+			heartbeatTableDDL(db),
+			sinkDeadLettersTableDDL(db),
 			`CREATE TABLE IF NOT EXISTS ${db}.runtime_error_occurrences (
 				org_id             String,
 				repository_id      String,
@@ -285,6 +329,7 @@ export class ClickHouseStore {
 				console.log(`clickhouse migration applied: ${migration.id}`);
 			}
 			await this.applyLogTtl();
+			await this.applyDedupWindow();
 			this.appliedIds = migrations.map((migration) => migration.id);
 			this.schemaState = "ready";
 		})().catch((err) => {
@@ -337,6 +382,172 @@ export class ClickHouseStore {
 	}
 
 	/**
+	 * Turn on insert dedupe for the fan-out tables (DEDUP_TABLES) where the
+	 * engine needs it: a non-replicated MergeTree remembers no inserted
+	 * blocks unless non_replicated_deduplication_window > 0. Replicated and
+	 * Shared engines (ClickHouse Cloud) already do and are left alone.
+	 * Idempotent and best-effort like applyLogTtl: a failure is logged and
+	 * never blocks ingest (the in-process receipts in server.ts still cover
+	 * retries that reach this replica).
+	 */
+	async applyDedupWindow(): Promise<void> {
+		const db = this.config.clickhouseDatabase;
+		try {
+			const client = this.getClient();
+			const rows = await client.query({
+				query: `SELECT name, engine, engine_full FROM system.tables WHERE database = {db:String} AND has({names:Array(String)}, name)`,
+				query_params: { db, names: [...DEDUP_TABLES] },
+				format: "JSONEachRow",
+			});
+			const tables = await rows.json<{ name: string; engine: string; engine_full: string }>();
+			for (const table of tables) {
+				if (!/^(Summing|Replacing|Aggregating)?MergeTree$/.test(table.engine)) continue;
+				const current = /non_replicated_deduplication_window\s*=\s*(\d+)/.exec(table.engine_full);
+				if (current && Number(current[1]) >= DEDUP_WINDOW) continue;
+				await client.command({
+					query: `ALTER TABLE ${db}.${table.name} MODIFY SETTING non_replicated_deduplication_window = ${DEDUP_WINDOW}`,
+				});
+				console.log(`clickhouse: insert dedupe window on ${table.name} set to ${DEDUP_WINDOW}`);
+			}
+		} catch (err) {
+			console.warn(
+				"turning on insert dedupe failed (will retry next boot):",
+				err instanceof Error ? err.message : err,
+			);
+		}
+	}
+
+	/**
+	 * One insert, through the schema check, with its outcome recorded for
+	 * readiness. `dedupToken` (fan-out tables) makes a retried insert of the
+	 * same request a no-op in ClickHouse. A missing table or database
+	 * clears the schema memo, so the next request recreates it instead of
+	 * answering 503 until the process restarts.
+	 */
+	private async insertTracked(
+		params: { table: string; format: "JSONEachRow"; clickhouse_settings?: ClickHouseSettings; values: unknown[] },
+		dedupToken?: string,
+	): Promise<void> {
+		const wasFailing = this.writes.stats().consecutiveFailures > 0;
+		try {
+			await this.ensureSchema();
+			const settings: ClickHouseSettings = { ...(params.clickhouse_settings ?? INSERT_SETTINGS) };
+			if (dedupToken && this.dedupTokens) {
+				settings.insert_deduplication_token = `${dedupToken}:${params.table}`;
+				if (this.asyncDedupSetting && settings.async_insert === 1) settings.async_insert_deduplicate = 1;
+			}
+			// A refused dedupe setting: drop async_insert_deduplicate first,
+			// then the token, each for the rest of the process, and insert.
+			for (;;) {
+				try {
+					await this.getClient().insert({ ...params, clickhouse_settings: settings });
+					break;
+				} catch (err) {
+					const code = String((err as { code?: unknown })?.code ?? "");
+					if (!DEDUP_SETTING_REFUSED.has(code)) throw err;
+					if (settings.async_insert_deduplicate) {
+						this.asyncDedupSetting = false;
+						delete settings.async_insert_deduplicate;
+						console.warn(`clickhouse refused async_insert_deduplicate (code ${code}); inserting without it`);
+					} else if (settings.insert_deduplication_token) {
+						this.dedupTokens = false;
+						delete settings.insert_deduplication_token;
+						console.warn(`clickhouse refused insert_deduplication_token (code ${code}); inserting without insert dedupe tokens`);
+					} else {
+						throw err;
+					}
+				}
+			}
+			this.writes.recordOk();
+			if (wasFailing) this.onWriteStateChange?.();
+		} catch (err) {
+			const category = storageErrorCategory(err);
+			this.writes.recordFailure(category);
+			if (category === "schema") this.resetSchema();
+			this.onWriteStateChange?.();
+			throw err;
+		}
+	}
+
+	/** Forget that the schema is in place (a table or database vanished). */
+	private resetSchema(): void {
+		this.ensurePromise = null;
+		this.schemaState = "pending";
+	}
+
+	/**
+	 * Readiness probe: the schema check ingest runs, then a one-row insert
+	 * with the configured credentials (runtime_ingester_heartbeat). It
+	 * exercises the same path as ingest — authentication, grants, the
+	 * database and its tables — which ClickHouse's /ping does not.
+	 */
+	async probe(instanceId: string, version: string, timeoutMs = 3_000): Promise<ProbeResult> {
+		const started = Date.now();
+		const checkedAt = () => new Date().toISOString();
+		if (!this.configured) return { state: "unconfigured", checkedAt: checkedAt(), latencyMs: null };
+		let timer: NodeJS.Timeout | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => {
+				const err = new Error(`probe did not finish in ${timeoutMs} ms`);
+				err.name = "TimeoutError";
+				reject(err);
+			}, timeoutMs);
+			timer.unref();
+		});
+		try {
+			await Promise.race([
+				(async () => {
+					await this.ensureSchema();
+					await this.getClient().insert({
+						table: this.table("runtime_ingester_heartbeat"),
+						format: "JSONEachRow",
+						clickhouse_settings: INSERT_SETTINGS,
+						values: [{ instance_id: instanceId, version, checked_at: new Date().toISOString() }],
+					});
+				})(),
+				timeout,
+			]);
+			return { state: "up", checkedAt: checkedAt(), latencyMs: Date.now() - started };
+		} catch (err) {
+			const category = storageErrorCategory(err);
+			if (category === "schema") this.resetSchema();
+			console.warn(
+				`clickhouse readiness probe failed (${category}):`,
+				err instanceof Error ? err.message : err,
+			);
+			return { state: stateFor(category), checkedAt: checkedAt(), latencyMs: Date.now() - started };
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	/** Dead-lettered sink batches (sink-dead-letters.ts); rows carry their tenant. */
+	async insertSinkDeadLetters(rows: SinkDeadLetterRow[]): Promise<void> {
+		if (!rows.length || !this.configured) return;
+		await this.insertTracked({
+			table: this.table("runtime_sink_dead_letters"),
+			format: "JSONEachRow",
+			clickhouse_settings: INSERT_SETTINGS,
+			values: rows.map((row) => ({
+				org_id: row.orgId,
+				repository_id: row.repositoryId,
+				batch_id: row.batchId,
+				reason: row.reason,
+				occurrences: row.occurrences,
+				metric_points: row.metricPoints,
+				llm_calls: row.llmCalls,
+				signals_from: row.signalsFrom ?? row.enqueuedAt,
+				signals_to: row.signalsTo ?? row.enqueuedAt,
+				attempts: row.attempts,
+				enqueued_at: row.enqueuedAt,
+				dropped_at: row.droppedAt,
+				instance_id: row.instanceId,
+				file: row.file,
+			})),
+		});
+	}
+
+	/**
 	 * Trace ids (from `traceIds`) that already produced an occurrence for
 	 * this tenant in [from, to] — the cross-batch half of the log-promotion
 	 * dedupe. `excludeIds` are the candidate occurrences' own deterministic
@@ -385,8 +596,7 @@ export class ClickHouseStore {
 
 	async insertSdkVersions(ctx: IngestContext, rows: SdkVersionRow[]): Promise<void> {
 		if (!rows.length || !this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_sdk_versions"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -408,8 +618,7 @@ export class ClickHouseStore {
 	/** Rejection and drop counts (ingest-drops.ts); rows carry their own tenant. */
 	async insertIngestDrops(rows: IngestDropRow[]): Promise<void> {
 		if (!rows.length || !this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_ingest_drops"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -431,8 +640,7 @@ export class ClickHouseStore {
 	/** Record this ingester's version and schema level (global, not tenant data). */
 	async insertIngesterInfo(info: { version: string; schemaLevel: string; report: unknown }): Promise<void> {
 		if (!this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_ingester_info"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -454,10 +662,10 @@ export class ClickHouseStore {
 	async insertOccurrences(
 		ctx: IngestContext,
 		occurrences: RuntimeOccurrence[],
+		dedupToken?: string,
 	): Promise<void> {
 		if (occurrences.length === 0 || !this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_error_occurrences"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -498,13 +706,12 @@ export class ClickHouseStore {
 				// Migration 0021: only collapsed samples name the column.
 				...(o.collapsedCount ? { collapsed_count: Math.min(0xffff_ffff, Math.max(0, Math.round(o.collapsedCount))) } : {}),
 			})),
-		});
+		}, dedupToken);
 	}
 
-	async insertSpans(ctx: IngestContext, spans: RuntimeSpanRow[]): Promise<void> {
+	async insertSpans(ctx: IngestContext, spans: RuntimeSpanRow[], dedupToken?: string): Promise<void> {
 		if (spans.length === 0 || !this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_spans"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -526,28 +733,26 @@ export class ClickHouseStore {
 				attributes: JSON.stringify(s.attributes ?? {}),
 				started_at: s.startedAt.toISOString(),
 			})),
-		});
+		}, dedupToken);
 	}
 
-	async insertLogs(ctx: IngestContext, logs: RuntimeLogRecord[]): Promise<void> {
+	async insertLogs(ctx: IngestContext, logs: RuntimeLogRecord[], dedupToken?: string): Promise<void> {
 		if (!logs.length) return;
 		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
-		await this.ensureSchema();
-		await this.getClient().insert({ table: this.table("runtime_logs"), format: "JSONEachRow", clickhouse_settings: INSERT_SETTINGS,
+		await this.insertTracked({ table: this.table("runtime_logs"), format: "JSONEachRow", clickhouse_settings: INSERT_SETTINGS,
 			values: logs.map((row) => ({ org_id: ctx.orgId, repository_id: ctx.repositoryId, event_id: row.id,
 				service: row.service, environment: row.environment, release: row.release, trace_id: row.traceId,
 				span_id: row.spanId, operation_id: row.operationId, operation: row.operation, event_type: row.type,
 				severity: row.severity, message: row.message, outcome: row.outcome, duration_ms: row.durationMs,
 				attributes: JSON.stringify(row.attributes), occurred_at: row.occurredAt.toISOString(),
 				kind: row.kind, request_id: row.requestId, route: row.route, status_code: row.statusCode,
-				error_code: row.errorCode, ai_cost_usd: row.aiCostUsd, ai_calls: row.aiCalls })) });
+				error_code: row.errorCode, ai_cost_usd: row.aiCostUsd, ai_calls: row.aiCalls })) }, dedupToken);
 	}
 
 	async insertProfileSamples(ctx: IngestContext, samples: ProfileSample[]): Promise<void> {
 		if (!samples.length) return;
 		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_profile_samples"), format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
 			values: samples.map((sample) => ({
@@ -561,22 +766,20 @@ export class ClickHouseStore {
 		});
 	}
 
-	async insertMemorySamples(ctx: IngestContext, samples: MemorySample[]): Promise<void> {
+	async insertMemorySamples(ctx: IngestContext, samples: MemorySample[], dedupToken?: string): Promise<void> {
 		if (!samples.length) return;
 		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
-		await this.ensureSchema();
-		await this.getClient().insert({ table: this.table("runtime_memory_samples"), format: "JSONEachRow",
+		await this.insertTracked({ table: this.table("runtime_memory_samples"), format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
 			values: samples.map((s) => ({ org_id: ctx.orgId, repository_id: ctx.repositoryId,
 				service: s.service, environment: s.environment, release: s.release,
 				instance_id: s.instanceId, metric: s.metric, value: s.value, temporality: s.temporality,
-				observed_at: s.observedAt.toISOString() })) });
+				observed_at: s.observedAt.toISOString() })) }, dedupToken);
 	}
 
 	async insertPlatformEvent(ctx: IngestContext, event: PlatformEvent): Promise<void> {
 		if (!this.configured) throw new Error("CLICKHOUSE_URL is not configured");
-		await this.ensureSchema();
-		await this.getClient().insert({ table: this.table("runtime_platform_events"), format: "JSONEachRow",
+		await this.insertTracked({ table: this.table("runtime_platform_events"), format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
 			values: [{ org_id: ctx.orgId, repository_id: ctx.repositoryId, event_id: event.eventId,
 				service: event.service, environment: event.environment, release: event.release,
@@ -585,8 +788,7 @@ export class ClickHouseStore {
 	}
 
 	async insertSourceMap(ctx: IngestContext, sourceMap: ValidSourceMap): Promise<void> {
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_source_maps"), format: "JSONEachRow",
 			// One row of up to 32 MiB. Parallel parsing cuts input into
 			// 10 MiB chunks, refuses single JSON rows far past that, and gains
@@ -619,10 +821,10 @@ export class ClickHouseStore {
 	async insertLlmCalls(
 		ctx: IngestContext,
 		calls: RuntimeLlmCall[],
+		dedupToken?: string,
 	): Promise<void> {
 		if (calls.length === 0 || !this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_llm_calls"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -649,16 +851,16 @@ export class ClickHouseStore {
 				attributes: JSON.stringify(c.attributes ?? {}),
 				started_at: c.startedAt.toISOString(),
 			})),
-		});
+		}, dedupToken);
 	}
 
 	async insertMetricPoints(
 		ctx: IngestContext,
 		points: RuntimeMetricPoint[],
+		dedupToken?: string,
 	): Promise<void> {
 		if (points.length === 0 || !this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_metrics_1m"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -675,11 +877,11 @@ export class ClickHouseStore {
 				duration_sum_ms: p.durationSumMs,
 				session_count: Math.max(0, Math.round(p.sessionCount)),
 			})),
-		});
+		}, dedupToken);
 		// Their percentiles: the view folds these into runtime_route_latency_1m.
 		const latency = points.filter((p) => p.latency && p.latency.valuesMs.length > 0);
 		if (latency.length === 0) return;
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_route_latency_input"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -694,13 +896,12 @@ export class ClickHouseStore {
 				values_ms: p.latency!.valuesMs,
 				weights: p.latency!.weights.map((weight) => Math.max(0, Math.round(weight))),
 			})),
-		});
+		}, dedupToken);
 	}
 
-	async insertLatencyHistograms(ctx: IngestContext, points: LatencyHistogram[]): Promise<void> {
+	async insertLatencyHistograms(ctx: IngestContext, points: LatencyHistogram[], dedupToken?: string): Promise<void> {
 		if (points.length === 0 || !this.configured) return;
-		await this.ensureSchema();
-		await this.getClient().insert({
+		await this.insertTracked({
 			table: this.table("runtime_latency_histograms"),
 			format: "JSONEachRow",
 			clickhouse_settings: INSERT_SETTINGS,
@@ -711,7 +912,7 @@ export class ClickHouseStore {
 				request_count: point.requestCount, error_count: point.errorCount,
 				duration_sum_ms: point.durationSumMs, bounds_ms: point.boundsMs, counts: point.counts,
 			})),
-		});
+		}, dedupToken);
 	}
 
 	async close(): Promise<void> {

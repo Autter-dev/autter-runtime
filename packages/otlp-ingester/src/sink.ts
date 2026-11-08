@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { IngesterConfig } from "./config.js";
+import type { OutboxRecord, SinkOutbox } from "./sink-outbox.js";
 import type {
 	IngestContext,
 	RuntimeLlmCall,
@@ -11,19 +12,37 @@ import type {
  * At-least-once delivery to the sink webhook.
  *
  * The sink feeds the consumer's issue grouping and incident detection, so a
- * lost batch means silently missing error occurrences — a single
- * fire-and-forget POST is not enough (a routine consumer deploy is longer
- * than one request timeout). Batches therefore queue in memory and retry
- * with exponential backoff until delivered, permanently rejected, or the
- * bounded buffer overflows.
+ * lost batch means silently missing error occurrences. Batches queue and
+ * retry with exponential backoff until delivered, permanently rejected, too
+ * old (SINK_MAX_AGE_HOURS) or out of attempts (SINK_MAX_ATTEMPTS).
  *
- * Durability boundary: the queue is in-memory only. Everything forwarded
- * here was already written to ClickHouse (ingest 503s otherwise), so after
- * a process crash or an overflow/permanent drop the consumer recovers by
- * replaying the logged time range from ClickHouse — see
- * docs/ARCHITECTURE.md "Sink webhook". Every batch carries a unique
- * `batchId` so consumers can deduplicate retried deliveries.
+ * Durability (1.12): with an outbox (sink-outbox.ts, on by default) every
+ * batch is on disk before the ingest request is answered and is deleted
+ * only once the webhook accepts it, so a restart or crash resumes delivery
+ * instead of losing the queue. A batch given up on is dead-lettered: kept
+ * under `<outbox>/dead/`, counted in runtime_ingest_drops (route "sink")
+ * and recorded with its signal range in runtime_sink_dead_letters, so it
+ * can be re-sent or its range replayed from ClickHouse. Everything
+ * forwarded here was already written to ClickHouse (ingest 503s
+ * otherwise). Without an outbox (SINK_OUTBOX_DIR=off) the queue is in
+ * memory only, as before.
+ *
+ * `batchId` is derived from the ingest request (its body and tenant) when
+ * the caller gives a key, so a request the exporter retries after a lost
+ * response produces the same ids and the consumer's batch dedupe drops the
+ * repeat. Large batches are split (SINK_BATCH_LIMITS) to stay under the
+ * consumer's per-batch caps; each part has its own id.
  */
+
+/** Per-batch caps: the Autter platform's sink route takes at most 2000
+ * occurrences and 5000 metric points a batch and silently ignores the rest. */
+export const SINK_BATCH_LIMITS = { occurrences: 1000, metricPoints: 2000, llmCalls: 1000 } as const;
+
+/** A stable UUID-shaped id from a key (v4 layout, content-derived). */
+export function batchIdFor(key: string): string {
+	const hex = createHash("sha256").update(key).digest("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 /** Delivery timing/concurrency knobs; overridable for tests. */
 export interface SinkTuning {
@@ -42,7 +61,8 @@ const DEFAULT_TUNING: SinkTuning = {
 	healthyConcurrency: 4,
 };
 
-/** A batch the sink gave up on (counted in runtime_ingest_drops, route "sink"). */
+/** A batch the sink gave up on (counted in runtime_ingest_drops, route "sink";
+ * recorded in runtime_sink_dead_letters). */
 export interface SinkDrop {
 	orgId: string;
 	repositoryId: string;
@@ -52,6 +72,16 @@ export interface SinkDrop {
 	reason: "sink_overflow" | "sink_rejected" | "sink_gave_up";
 	/** Occurrences in the batch. */
 	occurrences: number;
+	batchId: string;
+	metricPoints: number;
+	llmCalls: number;
+	signalsFrom: string | null;
+	signalsTo: string | null;
+	attempts: number;
+	enqueuedAt: string;
+	droppedAt: string;
+	/** Dead-letter file under `<outbox>/dead/`; null without an outbox. */
+	file: string | null;
 }
 
 interface QueuedBatch {
@@ -61,6 +91,8 @@ interface QueuedBatch {
 	repositoryId: string;
 	/** Occurrences inside (for drop counts). */
 	occurrences: number;
+	metricPoints: number;
+	llmCalls: number;
 	body: string;
 	bytes: number;
 	/** Enqueue order; the queue stays sorted by this so "oldest" is queue[0]. */
@@ -92,6 +124,18 @@ export interface SinkStats {
 	lastFailureAt: string | null;
 	lastFailureReason: string | null;
 	oldestQueuedSince: string | null;
+	/** Seconds the oldest undelivered batch has waited: delivery lag. */
+	oldestQueuedAgeSeconds: number;
+	/** True when batches survive a restart (an outbox is in use). */
+	durable: boolean;
+	/** Batches loaded from the outbox at startup and sent again. */
+	restored: number;
+	/** Batches given up on and dead-lettered (all reasons). */
+	deadLettered: number;
+	/** Dead letters kept on disk now. */
+	deadLetterFiles: number;
+	/** Batches that could not be written to the outbox (memory only). */
+	outboxWriteFailures: number;
 }
 
 /** Fixed failure category — safe for the unauthenticated health response. */
@@ -133,49 +177,133 @@ export class SinkForwarder {
 	private lastFailureReason: string | null = null;
 
 	private readonly tuning: SinkTuning;
+	private readonly outbox: SinkOutbox | null;
+	private restored = 0;
+	private deadLettered = 0;
 
 	/** Called for every batch given up on; must not throw (errors are swallowed). */
 	onDrop: ((drop: SinkDrop) => void) | null = null;
 
+	/**
+	 * `outbox`: an opened SinkOutbox whose pending batches are loaded here
+	 * and sent again (oldest first); null keeps the queue in memory only.
+	 */
 	constructor(
 		private readonly config: IngesterConfig,
 		private readonly fetchImpl: typeof fetch = fetch,
 		tuning: Partial<SinkTuning> = {},
+		outbox: { outbox: SinkOutbox; pending: OutboxRecord[] } | null = null,
 	) {
 		this.tuning = { ...DEFAULT_TUNING, ...tuning };
+		this.outbox = outbox?.outbox ?? null;
+		if (outbox) this.restore(outbox.pending);
 	}
 
-	/** Queue a batch for delivery. No-op when there is nothing to send. */
+	/** Attempts before giving up; 0 = no limit (the age limit still applies).
+	 * Default: unlimited with an outbox, 12 (~8 min) without. */
+	private maxAttempts(): number {
+		return this.config.sinkMaxAttempts ?? (this.outbox ? 0 : 12);
+	}
+
+	private maxAgeMs(): number {
+		return (this.config.sinkMaxAgeHours ?? 72) * 3_600_000;
+	}
+
+	/** Queue the batches a previous process left in the outbox. */
+	private restore(records: OutboxRecord[]): void {
+		for (const record of records) {
+			const batch: QueuedBatch = {
+				batchId: record.batchId,
+				orgId: record.orgId,
+				repositoryId: record.repositoryId,
+				occurrences: record.occurrences,
+				metricPoints: record.metricPoints ?? 0,
+				llmCalls: record.llmCalls ?? 0,
+				body: record.body,
+				bytes: Buffer.byteLength(record.body),
+				seq: record.seq,
+				attempts: 0,
+				nextAttemptAt: Date.now(),
+				signalsFrom: record.signalsFrom,
+				signalsTo: record.signalsTo,
+				enqueuedAt: record.enqueuedAt,
+			};
+			this.seqCounter = Math.max(this.seqCounter, record.seq);
+			this.queue.push(batch);
+			this.track(batch);
+			this.restored += 1;
+		}
+		this.queue.sort((a, b) => a.seq - b.seq);
+		if (records.length > 0) {
+			console.log(`sink outbox: ${records.length} undelivered batch(es) from the last run queued for delivery`);
+			this.enforceBounds();
+			this.pump();
+		}
+	}
+
+	/**
+	 * Queue signals for delivery (split into parts under SINK_BATCH_LIMITS).
+	 * No-op when there is nothing to send. `batchKey`: what identifies the
+	 * ingest request (tenant + body digest), so a retried request yields
+	 * the same batch ids; random ids without it.
+	 */
 	enqueue(
 		ctx: IngestContext,
 		occurrences: RuntimeOccurrence[],
 		metricPoints: RuntimeMetricPoint[] = [],
 		llmCalls: RuntimeLlmCall[] = [],
+		batchKey?: string,
 	): void {
 		if (!this.config.sinkUrl || this.stopped) return;
-		if (
-			occurrences.length === 0 &&
-			metricPoints.length === 0 &&
-			llmCalls.length === 0
-		) {
-			return;
-		}
-		const batch = this.buildBatch(ctx, occurrences, metricPoints, llmCalls);
-		// A batch bigger than the whole buffer could never be admitted without
-		// evicting everyone else — and the consumer's body cap would reject it
-		// anyway. Drop it alone instead of letting it flush the queue.
-		if (batch.bytes > this.maxBufferedBytes()) {
-			this.droppedOverflow += 1;
-			console.warn(
-				`sink batch ${batch.batchId} (org ${batch.orgId}) exceeds the buffer cap (${batch.bytes} bytes) — dropped; replay signals ${batch.signalsFrom ?? "?"} .. ${batch.signalsTo ?? "?"} from ClickHouse`,
+		const parts = Math.max(
+			Math.ceil(occurrences.length / SINK_BATCH_LIMITS.occurrences),
+			Math.ceil(metricPoints.length / SINK_BATCH_LIMITS.metricPoints),
+			Math.ceil(llmCalls.length / SINK_BATCH_LIMITS.llmCalls),
+		);
+		for (let part = 0; part < parts; part++) {
+			const batch = this.buildBatch(
+				ctx,
+				occurrences.slice(part * SINK_BATCH_LIMITS.occurrences, (part + 1) * SINK_BATCH_LIMITS.occurrences),
+				metricPoints.slice(part * SINK_BATCH_LIMITS.metricPoints, (part + 1) * SINK_BATCH_LIMITS.metricPoints),
+				llmCalls.slice(part * SINK_BATCH_LIMITS.llmCalls, (part + 1) * SINK_BATCH_LIMITS.llmCalls),
+				batchKey ? batchIdFor(`${batchKey}:${part}`) : randomUUID(),
 			);
-			this.noteDrop(batch, "sink_overflow");
-			return;
+			// A batch bigger than the whole buffer could never be admitted
+			// without evicting everyone else — and the consumer's body cap
+			// would reject it anyway. Dead-letter it alone instead of letting
+			// it flush the queue.
+			if (batch.bytes > this.maxBufferedBytes()) {
+				this.droppedOverflow += 1;
+				console.warn(
+					`sink batch ${batch.batchId} (org ${batch.orgId}) exceeds the buffer cap (${batch.bytes} bytes) — dead-lettered; signals ${batch.signalsFrom ?? "?"} .. ${batch.signalsTo ?? "?"}`,
+				);
+				this.noteDrop(batch, "sink_overflow");
+				continue;
+			}
+			this.outbox?.write(this.record(batch));
+			this.queue.push(batch);
+			this.track(batch);
 		}
-		this.queue.push(batch);
-		this.track(batch);
+		if (parts === 0) return;
 		this.enforceBounds();
 		this.pump();
+	}
+
+	private record(batch: QueuedBatch): OutboxRecord {
+		return {
+			v: 1,
+			seq: batch.seq,
+			batchId: batch.batchId,
+			orgId: batch.orgId,
+			repositoryId: batch.repositoryId,
+			occurrences: batch.occurrences,
+			metricPoints: batch.metricPoints,
+			llmCalls: batch.llmCalls,
+			signalsFrom: batch.signalsFrom,
+			signalsTo: batch.signalsTo,
+			enqueuedAt: batch.enqueuedAt,
+			body: batch.body,
+		};
 	}
 
 	stats(): SinkStats {
@@ -192,12 +320,42 @@ export class SinkForwarder {
 			lastFailureAt: this.lastFailureAt,
 			lastFailureReason: this.lastFailureReason,
 			oldestQueuedSince: oldest ? new Date(oldest).toISOString() : null,
+			oldestQueuedAgeSeconds: oldest ? Math.max(0, Math.round((Date.now() - oldest) / 1000)) : 0,
+			durable: this.outbox !== null,
+			restored: this.restored,
+			deadLettered: this.deadLettered,
+			deadLetterFiles: this.outbox?.stats().deadFiles ?? 0,
+			outboxWriteFailures: this.outbox?.stats().writeFailures ?? 0,
 		};
 	}
 
+	/** Give up on a batch: dead-letter it (kept on disk with an outbox) and
+	 * report it through onDrop for the counters and the dead-letter table. */
 	private noteDrop(batch: QueuedBatch, reason: SinkDrop["reason"]): void {
+		this.deadLettered += 1;
+		const droppedAt = Date.now();
+		let file: string | null = null;
 		try {
-			this.onDrop?.({ orgId: batch.orgId, repositoryId: batch.repositoryId, reason, occurrences: batch.occurrences });
+			file = this.outbox?.deadLetter(this.record(batch), reason, batch.attempts, droppedAt) ?? null;
+		} catch {
+			// deadLetter never throws by contract; belt and braces.
+		}
+		try {
+			this.onDrop?.({
+				orgId: batch.orgId,
+				repositoryId: batch.repositoryId,
+				reason,
+				occurrences: batch.occurrences,
+				batchId: batch.batchId,
+				metricPoints: batch.metricPoints,
+				llmCalls: batch.llmCalls,
+				signalsFrom: batch.signalsFrom,
+				signalsTo: batch.signalsTo,
+				attempts: batch.attempts,
+				enqueuedAt: new Date(batch.enqueuedAt).toISOString(),
+				droppedAt: new Date(droppedAt).toISOString(),
+				file,
+			});
 		} catch {
 			// Drop accounting must never affect delivery.
 		}
@@ -207,14 +365,39 @@ export class SinkForwarder {
 		return this.queue.length + this.inFlight;
 	}
 
-	/** Stop scheduling new deliveries (shutdown). Queued batches are logged
-	 * by the caller — they are recoverable from ClickHouse, not from here. */
+	/**
+	 * Try to deliver everything queued before shutdown, for up to
+	 * `timeoutMs`: waiting backoffs are cut short. Resolves with what is
+	 * still undelivered (kept in the outbox when there is one).
+	 */
+	async drain(timeoutMs: number): Promise<number> {
+		if (this.stopped || !this.config.sinkUrl) return this.pendingCount();
+		const until = Date.now() + timeoutMs;
+		while (this.pendingCount() > 0 && Date.now() < until) {
+			const now = Date.now();
+			for (const batch of this.queue) batch.nextAttemptAt = Math.min(batch.nextAttemptAt, now);
+			this.pump();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			// A webhook that keeps failing will not recover in the seconds left.
+			if (this.consecutiveFailures >= 3) break;
+		}
+		return this.pendingCount();
+	}
+
+	/** True when queued batches survive a restart. */
+	get durable(): boolean {
+		return this.outbox !== null;
+	}
+
+	/** Stop scheduling new deliveries (shutdown). With an outbox, queued and
+	 * in-flight batches stay on disk and are sent by the next process. */
 	stop(): void {
 		this.stopped = true;
 		if (this.timer) {
 			clearTimeout(this.timer);
 			this.timer = null;
 		}
+		this.outbox?.close();
 	}
 
 	/** Serialize one delivery payload; `seq` pins its age for ordering. */
@@ -223,8 +406,8 @@ export class SinkForwarder {
 		occurrences: RuntimeOccurrence[],
 		metricPoints: RuntimeMetricPoint[],
 		llmCalls: RuntimeLlmCall[],
+		batchId: string,
 	): QueuedBatch {
-		const batchId = randomUUID();
 		const body = JSON.stringify({
 			version: 1,
 			batchId,
@@ -247,6 +430,8 @@ export class SinkForwarder {
 			orgId: ctx.orgId,
 			repositoryId: ctx.repositoryId,
 			occurrences: occurrences.length,
+			metricPoints: metricPoints.length,
+			llmCalls: llmCalls.length,
 			body,
 			bytes: Buffer.byteLength(body),
 			seq: ++this.seqCounter,
@@ -300,7 +485,7 @@ export class SinkForwarder {
 			if (!dropped) break;
 			this.droppedOverflow += 1;
 			console.warn(
-				`sink buffer overflow: dropped batch ${dropped.batchId} (org ${dropped.orgId}, signals ${dropped.signalsFrom ?? "?"} .. ${dropped.signalsTo ?? "?"}) — replay this range from ClickHouse`,
+				`sink buffer overflow: dead-lettered batch ${dropped.batchId} (org ${dropped.orgId}, signals ${dropped.signalsFrom ?? "?"} .. ${dropped.signalsTo ?? "?"})`,
 			);
 			this.noteDrop(dropped, "sink_overflow");
 		}
@@ -393,6 +578,7 @@ export class SinkForwarder {
 			await res.text().catch(() => {});
 			if (res.ok) {
 				this.delivered += 1;
+				this.outbox?.remove(batch);
 				if (epochAtStart === this.failureEpoch) {
 					this.consecutiveFailures = 0;
 				}
@@ -413,10 +599,14 @@ export class SinkForwarder {
 		this.lastFailureAt = new Date().toISOString();
 		this.lastFailureReason = reason;
 
-		if (permanent || batch.attempts >= this.config.sinkMaxAttempts) {
+		const maxAttempts = this.maxAttempts();
+		const exhausted =
+			(maxAttempts > 0 && batch.attempts >= maxAttempts) ||
+			Date.now() - batch.enqueuedAt >= this.maxAgeMs();
+		if (permanent || exhausted) {
 			this.droppedPermanent += 1;
 			console.error(
-				`sink delivery gave up after ${batch.attempts} attempt(s) (${detail}): batch ${batch.batchId} (signals ${batch.signalsFrom ?? "?"} .. ${batch.signalsTo ?? "?"}) — replay this range from ClickHouse`,
+				`sink delivery gave up after ${batch.attempts} attempt(s) (${detail}): batch ${batch.batchId} (signals ${batch.signalsFrom ?? "?"} .. ${batch.signalsTo ?? "?"}) — dead-lettered`,
 			);
 			this.noteDrop(batch, permanent ? "sink_rejected" : "sink_gave_up");
 			return;
@@ -433,7 +623,7 @@ export class SinkForwarder {
 		this.track(batch);
 		if (batch.attempts === 1 || batch.attempts % 5 === 0) {
 			console.warn(
-				`sink delivery failed (attempt ${batch.attempts}/${this.config.sinkMaxAttempts}, will retry): ${detail}`,
+				`sink delivery failed (attempt ${batch.attempts}${maxAttempts > 0 ? `/${maxAttempts}` : ""}, will retry): ${detail}`,
 			);
 		}
 		this.enforceBounds();

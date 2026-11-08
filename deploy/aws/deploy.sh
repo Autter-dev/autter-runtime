@@ -126,7 +126,7 @@ task_def=$(cat <<JSON
     "environment": ${env_json},
     "secrets": ${secrets_json},
     "healthCheck": {
-      "command": ["CMD-SHELL", "node -e \\"fetch('http://localhost:4318/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\\""],
+      "command": ["CMD-SHELL", "node -e \\"fetch('http://localhost:4318/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\\""],
       "interval": 30, "timeout": 5, "retries": 3, "startPeriod": 15
     },
     "logConfiguration": {

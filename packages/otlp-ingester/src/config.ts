@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { IngestKeyScope } from "./types.js";
 
 export const INGEST_KEY_SCOPES: readonly IngestKeyScope[] = ["server", "client", "upload"];
@@ -60,11 +62,32 @@ export interface IngesterConfig {
 	/** Optional webhook receiving fingerprinted occurrences for issue grouping. */
 	sinkUrl: string | null;
 	sinkToken: string | null;
-	/** Sink delivery attempts per batch before giving up (backoff-capped ~8 min). */
-	sinkMaxAttempts: number;
-	/** Bounds for the in-memory sink retry buffer; oldest batches drop first. */
+	/**
+	 * Sink delivery attempts per batch before it is dead-lettered
+	 * (SINK_MAX_ATTEMPTS; 0 = no limit). Default: no limit with an outbox
+	 * (the age limit applies), 12 (~8 min of backoff) without one.
+	 */
+	sinkMaxAttempts?: number;
+	/** A batch still undelivered after this many hours is dead-lettered
+	 * (SINK_MAX_AGE_HOURS, default 72). */
+	sinkMaxAgeHours?: number;
+	/** Bounds for the sink queue held in memory; past them the oldest batch
+	 * of the heaviest tenant is dead-lettered. */
 	sinkMaxBufferedBatches: number;
 	sinkMaxBufferedMb: number;
+	/**
+	 * Directory where undelivered sink batches are kept so a restart resumes
+	 * delivery (SINK_OUTBOX_DIR; `off` = memory only). loadConfig defaults
+	 * it to a per-port directory under the OS temp dir when a sink is set;
+	 * mount a volume there to survive container replacement. Unset (null or
+	 * undefined) = memory only.
+	 */
+	sinkOutboxDir?: string | null;
+	/** fsync each outbox write (SINK_OUTBOX_FSYNC=1): survives a host crash,
+	 * not just a process crash. */
+	sinkOutboxFsync?: boolean;
+	/** Budget for dead-lettered batches on disk (SINK_DEAD_LETTER_MAX_MB, default 256). */
+	sinkDeadLetterMaxMb?: number;
 	maxBodyBytes: number;
 	/** Requests per minute per tenant (repository) for server and upload keys; sliding window. */
 	rateLimitPerMinute: number;
@@ -161,6 +184,22 @@ function wholeEnv(name: string, fallback: number): number {
 	return Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
+/** SINK_MAX_ATTEMPTS: a whole number ≥ 0 (0 = no limit), or undefined for the default. */
+export function sinkMaxAttemptsEnv(raw: string | undefined): number | undefined {
+	if (raw === undefined || raw.trim() === "") return undefined;
+	const value = Number(raw);
+	return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** SINK_OUTBOX_DIR: `off`/`none`/`false`/`0` disables the outbox; unset
+ * defaults to a per-port directory under the OS temp dir when a sink is set. */
+export function sinkOutboxDirEnv(raw: string | undefined, sinkUrl: string | null, port: number): string | null {
+	if (!sinkUrl) return null;
+	const value = raw?.trim();
+	if (value && /^(off|none|false|0)$/i.test(value)) return null;
+	return value || join(tmpdir(), `autter-sink-outbox-${port}`);
+}
+
 function intEnv(name: string, fallback: number): number {
 	const raw = process.env[name];
 	if (!raw) return fallback;
@@ -222,7 +261,11 @@ export function loadConfig(): IngesterConfig {
 		sinkToken: process.env.AUTTER_SINK_TOKEN || null,
 		// 12 attempts with 1s..60s exponential backoff spans ~8 minutes — long
 		// enough to ride out a routine consumer deploy without unbounded memory.
-		sinkMaxAttempts: intEnv("SINK_MAX_ATTEMPTS", 12),
+		sinkMaxAttempts: sinkMaxAttemptsEnv(process.env.SINK_MAX_ATTEMPTS),
+		sinkMaxAgeHours: intEnv("SINK_MAX_AGE_HOURS", 72),
+		sinkOutboxDir: sinkOutboxDirEnv(process.env.SINK_OUTBOX_DIR, process.env.AUTTER_SINK_URL || null, intEnv("PORT", 4318)),
+		sinkOutboxFsync: /^(1|true|yes)$/i.test(process.env.SINK_OUTBOX_FSYNC ?? ""),
+		sinkDeadLetterMaxMb: intEnv("SINK_DEAD_LETTER_MAX_MB", 256),
 		sinkMaxBufferedBatches: intEnv("SINK_MAX_BUFFERED_BATCHES", 1000),
 		sinkMaxBufferedMb: intEnv("SINK_MAX_BUFFERED_MB", 64),
 		maxBodyBytes: intEnv("MAX_BODY_BYTES", 1024 * 1024),

@@ -47,6 +47,18 @@ services:
       # Caddy is the one proxy hop in front: trust its X-Forwarded-For for
       # the per-address limits. One ingester, so limits need no Redis.
       TRUST_PROXY: 1
+    volumes:
+      # Undelivered sink batches survive restarts and image upgrades and are
+      # re-sent on start (SINK_OUTBOX_DIR, set in the image).
+      - sink_outbox:/var/lib/autter/sink-outbox
+    healthcheck:
+      # Readiness, not just "the process is up": 200 only when the ingester
+      # can write to ClickHouse with its credentials. /livez is liveness.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4318/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     # Not published to the host — only Caddy reaches it, over the internal
     # compose network. TLS termination and the public port live on Caddy.
 
@@ -67,5 +79,6 @@ services:
 
 volumes:
   clickhouse_data:
+  sink_outbox:
   caddy_data:
   caddy_config:

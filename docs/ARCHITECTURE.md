@@ -71,6 +71,8 @@ name its own.
 | `runtime_source_maps` | ReplacingMergeTree (`debug_id`, `content_hash` since 0016) | `(org_id, repository_id, release, filename)` | 30 d |
 | `runtime_sdk_versions` | ReplacingMergeTree(`last_seen`) (`via` since 0019) | `(org_id, repository_id, service, environment, sdk_name, sdk_version)` | 90 d (`METRICS_TTL_DAYS`) |
 | `runtime_ingest_drops` | SummingMergeTree(`requests`, `records`) (0018) | `(org_id, repository_id, minute, route, reason, kind, status, key_hash)` | 30 d |
+| `runtime_sink_dead_letters` | ReplacingMergeTree(`dropped_at`) (0023) | `(org_id, repository_id, batch_id)` | 30 d |
+| `runtime_ingester_heartbeat` | ReplacingMergeTree(`checked_at`) (0023) | `(instance_id)` | 1 d |
 
 Profile uploads are server key authenticated, limited to 1 MiB, and decoded
 from symbolized pprof into at most 1,000 stack samples. Source map uploads
@@ -224,6 +226,14 @@ status answered), `key_hash`, `requests`, `records`. It is a
 SummingMergeTree: read it with `sum(requests)`, `sum(records)` and
 `GROUP BY`.
 
+Those rows are written to ClickHouse, so they cannot be written while
+ClickHouse is down — exactly when `storage_unavailable` rejections pile up.
+From 1.12 every ingester also keeps process-lifetime totals per route and
+reason in memory, readable at any time on `/healthz` (`drops`) and
+`/metrics` (`autter_ingester_dropped_requests_total`,
+`autter_ingester_dropped_records_total`), so "no telemetry" and "telemetry
+refused or dropped" never look the same.
+
 `kind` says what was lost:
 
 - `rejected`: the request got a non-2xx answer and nothing from it was
@@ -240,7 +250,9 @@ SummingMergeTree: read it with `sum(requests)`, `sum(records)` and
   not truncation.
 - `unforwarded`: stored in ClickHouse, but the sink webhook gave up on the
   batch (route `sink`, `records` = occurrences, `requests` = batches). The
-  consumer recovers it by replaying ClickHouse (see the sink below).
+  batch is dead-lettered: kept on disk and listed with its signal range in
+  `runtime_sink_dead_letters`, so it can be re-sent or replayed from
+  ClickHouse (see the sink below).
 - `collapsed` (1.9.0): occurrences of a looping error folded into the
   minute's sample; their count is on the sample (`collapsed_count`), their
   payloads were not stored. `records` = payloads not stored.
@@ -948,40 +960,87 @@ shapes as their ClickHouse rows, additive to the v1 payload.
 
 ### Delivery semantics
 
-Delivery is **at-least-once within a process lifetime**: batches queue in
-memory and retry with exponential backoff (1 s → 60 s, `SINK_MAX_ATTEMPTS`
-tries, ~8 min by default) on network errors, timeouts, 408/429, and 5xx.
-Other 4xx responses mean the consumer rejected the batch — those drop
-immediately and are logged. The retry buffer is bounded
-(`SINK_MAX_BUFFERED_BATCHES` / `SINK_MAX_BUFFERED_MB`); on overflow the
-oldest batch of the tenant holding the most buffered bytes drops first —
-one flooding org cannot evict everyone else — and every drop is logged
-with its signal time range. A single batch larger than the whole buffer
-is dropped alone rather than flushing the queue. Retrying batches keep
-their enqueue-age position, so eviction order stays oldest-first even
-under sustained failure.
+Delivery is **at-least-once, across restarts** (1.12). It is not
+fire-and-forget: each batch is written to an on-disk outbox
+(`SINK_OUTBOX_DIR`) before the ingest request is answered, and deleted only
+once the webhook answers 2xx. Failed deliveries retry with exponential
+backoff and jitter (1 s → 60 s) on network errors, timeouts, 408/429 and
+5xx. When the ingester restarts — a deploy, a crash, an OOM kill — the new
+process loads what the outbox holds and sends it, oldest first; on SIGTERM
+it first spends up to 4 s delivering what is queued. Without an outbox
+(`SINK_OUTBOX_DIR=off`) the queue is in memory only and a restart loses it,
+as before 1.12.
+
+A batch is given up on — **dead-lettered** — when the consumer answers
+another 4xx (it rejected the batch; retrying the same body cannot
+succeed), when it is older than `SINK_MAX_AGE_HOURS` (72 h), after
+`SINK_MAX_ATTEMPTS` attempts (no limit with an outbox, 12 without), or when
+the in-memory queue overflows (`SINK_MAX_BUFFERED_BATCHES` /
+`SINK_MAX_BUFFERED_MB`: the oldest batch of the tenant holding the most
+bytes goes first, so one flooding org cannot evict everyone else). A dead
+letter is never only a log line:
+
+- the batch stays on disk under `<SINK_OUTBOX_DIR>/dead/` with its reason
+  (bounded by `SINK_DEAD_LETTER_MAX_MB`, oldest deleted first). Move a file
+  back into `SINK_OUTBOX_DIR` and restart the ingester to send it again;
+- a row goes to `runtime_sink_dead_letters` (tenant, `batch_id`, reason,
+  counts, `signals_from` .. `signals_to`, attempts, the dead-letter file), so
+  a consumer knows exactly which range to replay from ClickHouse;
+- it is counted in `runtime_ingest_drops` (route `sink`, kind
+  `unforwarded`) and in the process-lifetime counters on `/healthz` and
+  `/metrics`.
+
+Batches are split to stay under the Autter platform's per-batch caps (at
+most 1000 occurrences, 2000 metric points and 1000 LLM calls each).
 
 Consequences for consumers:
 
-- **Deduplicate on `batchId`** (and per-occurrence on `occurrenceId`):
-  a batch can arrive more than once — e.g. the consumer processed it but
-  the 2xx response was lost, so the ingester retried.
+- **Deduplicate on `batchId`** (and per-occurrence on `occurrenceId`): a
+  batch can arrive more than once — the consumer processed it but the 2xx
+  was lost, or the ingester restarted mid-delivery. `batchId` is derived
+  from the ingest request (tenant + exact body + part), so an exporter that
+  re-sends the same request after a lost response produces the same batch
+  ids too.
 - **`occurrenceId` is content-derived, not random.** An OTLP exporter
   that retries an export (after a 503 from a partially-failed ClickHouse
   write, or a lost 2xx) reproduces the same ids, so per-occurrence dedupe
-  holds across transport retries too — and duplicated ClickHouse rows
-  share an id, so replays and row counts should use distinct ids.
+  holds across transport retries too.
 - **ClickHouse is the recovery source.** Every forwarded signal was
   written to ClickHouse before it was queued (ingest returns 503
-  otherwise), so a crashed ingester, an exhausted retry budget, or a
-  buffer overflow never loses data — the consumer reconciles by replaying
-  the affected time range from `runtime_error_occurrences` /
-  `runtime_metrics_1m`. Occurrence rows carry the same `occurrence_id`
-  the sink payload does, so replays deduplicate exactly.
+  otherwise). Dead letters name the range to replay; a consumer that
+  reconciles by comparing counts (the Autter platform's reconciler does)
+  finds it anyway. Occurrence rows carry the same `occurrence_id` the sink
+  payload does, so replays deduplicate exactly.
 - `/healthz` exposes delivery counters (`sink.queued`, `sink.delivered`,
   `sink.retried`, `sink.droppedOverflow`, `sink.droppedPermanent`,
-  `sink.lastFailureAt`, …) for missed-batch monitoring and alerting.
-  Failure detail is a fixed category (`sink.lastFailureReason`:
-  `timeout`, `connection_error`, `http_<status>`, `error`) — raw
-  transport errors stay in server logs, never in the unauthenticated
-  health response.
+  `sink.deadLettered`, `sink.restored`, `sink.durable`,
+  `sink.oldestQueuedAgeSeconds`, `sink.lastFailureAt`, …) for missed-batch
+  monitoring and alerting; `/metrics` has them for Prometheus. Failure
+  detail is a fixed category (`sink.lastFailureReason`: `timeout`,
+  `connection_error`, `http_<status>`, `error`) — raw transport errors stay
+  in server logs, never in the unauthenticated health response.
+
+### Idempotent ingest writes
+
+One ingest request fans out to several inserts (traces: occurrences,
+spans, metric points, LLM calls) and ClickHouse has no transaction across
+them. When one fails the request answers 503 and the exporter re-sends the
+whole body. Before 1.12 that re-added the rows that had committed: spans
+twice, and in `runtime_metrics_1m` (SummingMergeTree) request and error
+counts summed twice, which inflated error rates and regression counts.
+Now:
+
+- every fan-out insert carries `insert_deduplication_token` =
+  `<request digest>:<table>` (the digest covers tenant, route and the exact
+  body). ClickHouse drops a block whose token it has seen. Replicated and
+  Shared engines (ClickHouse Cloud) keep those tokens by default; for plain
+  MergeTree tables the ingester sets `non_replicated_deduplication_window`
+  at boot (best effort, logged). Async inserts are deduplicated by
+  ClickHouse 26.2+, or with `async_insert_deduplicate` on Replicated
+  tables. A server that refuses either setting gets the insert without it
+  (logged once), never a failed ingest;
+- independently of the server version, each process remembers for 15
+  minutes which tables a request digest already wrote and skips them on a
+  retry, so a re-sent request that reaches the same replica writes each
+  table exactly once. A byte-identical re-send of a request that fully
+  succeeded writes nothing.

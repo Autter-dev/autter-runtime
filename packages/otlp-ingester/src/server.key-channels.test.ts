@@ -62,6 +62,7 @@ async function start(cfg: IngesterConfig = config(KEYS)) {
 		if (name.startsWith("insert")) stub[name] = async () => void stored.push(name);
 	}
 	stub.ensureSchema = async () => {};
+	stub.probe = async () => ({ state: "up", checkedAt: new Date().toISOString(), latencyMs: 0 });
 	stub.recentOccurrenceTraceIds = async () => [];
 	stub.ping = async () => true;
 	// Runs after every route: what a request logger mounted late would see.

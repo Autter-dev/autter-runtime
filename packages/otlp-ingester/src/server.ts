@@ -63,7 +63,19 @@ import {
 	platformEventSchema,
 } from "./memory.js";
 import { SOURCE_MAP_MAX_BODY_BYTES, validateSourceMap, validateSourceMapCheck } from "./source-maps.js";
+import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { SinkForwarder } from "./sink.js";
+import { OutboxLockedError, SinkOutbox, type OutboxRecord } from "./sink-outbox.js";
+import {
+	CachedProbe,
+	retryable,
+	stateFor,
+	WRITE_FAILURE_WINDOW_MS,
+	type StorageState,
+} from "./health.js";
+import { InsertReceipts, requestDigest } from "./insert-receipts.js";
+import type { SinkDeadLetterRow } from "./sink-dead-letters.js";
 import { LoopCollapser } from "./loop-collapse.js";
 import { applySuppression } from "./suppression.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
@@ -189,8 +201,11 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	);
 	// Fingerprinted occurrences feed the consumer's issue grouping, metric
 	// points feed the request/error-rate rollups, LLM calls feed spend
-	// watching. Delivery is at-least-once with bounded retries — see sink.ts.
-	const sink = config.sinkUrl ? new SinkForwarder(config) : null;
+	// watching. Delivery is at-least-once, through an on-disk outbox that
+	// survives restarts when SINK_OUTBOX_DIR is set — see sink.ts.
+	const sink = config.sinkUrl ? new SinkForwarder(config, fetch, {}, openOutbox(config)) : null;
+	/** Names this process in runtime_ingester_heartbeat and dead letters. */
+	const instanceId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
 	const keys = new KeyResolver(config);
 	// Tenant request and record limits, the unknown-key budget and log
 	// promotion lookups (limits.ts): shared through Redis when configured,
@@ -223,14 +238,30 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	const drops = new IngestDropCounter((rows) => store.insertIngestDrops(rows), { enabled: store.configured });
 	drops.start();
 	if (sink) {
-		sink.onDrop = (drop) =>
+		sink.onDrop = (drop) => {
 			drops.record({
 				tenant: { orgId: drop.orgId, repositoryId: drop.repositoryId },
 				route: "sink",
 				reason: drop.reason,
 				records: drop.occurrences,
 			});
+			// The batch's range, so a consumer knows what to replay. Written
+			// right away (dead letters are rare); a failed write is logged and
+			// the batch is still on disk under the outbox's dead/ directory.
+			const row: SinkDeadLetterRow = { ...drop, instanceId, file: drop.file ?? "" };
+			store.insertSinkDeadLetters([row]).catch((err: unknown) => {
+				console.warn(
+					`sink dead letter ${drop.batchId} not recorded in ClickHouse:`,
+					err instanceof Error ? err.message : err,
+				);
+			});
+		};
 	}
+	// Readiness (health.ts): a cached probe that writes a heartbeat row the
+	// way ingest writes, plus the outcome of real ingest writes.
+	const readiness = new CachedProbe(() => store.probe(instanceId, version));
+	store.onWriteStateChange = () => readiness.invalidate();
+	const receipts = new InsertReceipts();
 	// Loop collapse (1.9.0, loop-collapse.ts): a looping error past its first
 	// LOOP_COLLAPSE_AFTER occurrences of the minute is stored as one sample a
 	// minute with an exact count. The minute's samples are written here, then
@@ -527,25 +558,107 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		next();
 	});
 
+	/**
+	 * Readiness (1.12): 200 only when this ingester can store what it is
+	 * sent. The probe makes sure the schema exists and inserts a heartbeat
+	 * row with the configured credentials (cached for a few seconds, shared
+	 * by concurrent callers), and a failed real ingest write in the last
+	 * minute also makes it unready — so a wrong password, a dropped table or
+	 * a missing grant answer 503 here, as ingest does. `clickhouse` says
+	 * which: `up`, `down` (retry), `auth_failed` or `schema_missing` (fix
+	 * the deployment), `unconfigured`. Counters only (no tenant data):
+	 * /healthz is public. Liveness without storage is /livez.
+	 */
 	app.get("/healthz", async (_req, res) => {
-		const sinkStats = {
+		const report = await readinessReport();
+		if (!report.ok && report.retryable) res.setHeader("retry-after", "5");
+		res.setHeader("cache-control", "no-store");
+		res.status(report.ok ? 200 : 503).json(report);
+	});
+
+	/** Liveness: the process is up and serving. For container restart
+	 * policies, which must not restart the ingester for a storage outage. */
+	app.get("/livez", (_req, res) => {
+		res.setHeader("cache-control", "no-store");
+		res.status(200).json({ ok: true, version });
+	});
+
+	/** Prometheus text: drop, sink and write counters (no tenant data). */
+	app.get("/metrics", async (_req, res) => {
+		const report = await readinessReport();
+		res.setHeader("cache-control", "no-store");
+		res.type("text/plain; version=0.0.4").send(prometheusText(report));
+	});
+
+	async function readinessReport() {
+		const probe = await readiness.get();
+		const writes = store.writes.stats();
+		let state: StorageState = probe.state;
+		// The probe passing does not clear real writes that keep failing (a
+		// table the probe does not touch, a grant on one table).
+		if (state === "up" && store.writes.failing(WRITE_FAILURE_WINDOW_MS)) {
+			state = stateFor(store.writes.lastCategoryOrNull() ?? "error");
+		}
+		const ok = state === "up";
+		const dropTotals = drops.totals();
+		return {
+			ok,
+			status: ok ? "ready" : "unready",
+			clickhouse: state,
+			/** Will this clear on its own (retry later), or does the deployment need a fix? */
+			retryable: !ok && retryable(state),
+			checkedAt: probe.checkedAt,
+			probeLatencyMs: probe.latencyMs,
+			writes,
+			drops: {
+				// Since this process started, kept in memory: readable while
+				// ClickHouse (where the per-minute rows go) is down.
+				requests: dropTotals.reduce((sum, t) => sum + t.requests, 0),
+				records: dropTotals.reduce((sum, t) => sum + t.records, 0),
+				byReason: dropTotals,
+				writer: drops.stats(),
+			},
 			...(sink ? { sink: sink.stats() } : {}),
-			// Counters only (no tenant data): /healthz is public.
 			...(collapse.enabled ? { collapse: collapse.stats() } : {}),
 		};
-		if (!store.configured) {
-			res.status(200).json({ ok: true, clickhouse: "unconfigured", ...sinkStats });
+	}
+
+	/**
+	 * Fan-out writes of one ingest request, idempotent across retries: each
+	 * insert carries `<request digest>:<table>` as its ClickHouse dedupe
+	 * token, and tables this process already wrote for the same request
+	 * are skipped (insert-receipts.ts). A request with nothing to write
+	 * still has to find storage writable — an empty export must not get a
+	 * 2xx from an ingester that cannot store anything. Throws on failure.
+	 */
+	async function writeAll(
+		digest: string,
+		writes: Array<{ table: string; rows: number; run: (token: string) => Promise<void> }>,
+	): Promise<void> {
+		const pending = writes.filter((write) => write.rows > 0);
+		if (pending.length === 0) {
+			await requireWritable();
 			return;
 		}
-		try {
-			const ok = await store.ping();
-			res
-				.status(ok ? 200 : 503)
-				.json({ ok, clickhouse: ok ? "up" : "down", ...sinkStats });
-		} catch {
-			res.status(503).json({ ok: false, clickhouse: "down", ...sinkStats });
+		const done = receipts.committed(digest);
+		await Promise.all(
+			pending
+				.filter((write) => !done.has(write.table))
+				.map(async (write) => {
+					await write.run(digest);
+					receipts.add(digest, write.table);
+				}),
+		);
+	}
+
+	/** Throw unless storage can take writes (cached readiness). */
+	async function requireWritable(): Promise<void> {
+		if (store.writes.failing(WRITE_FAILURE_WINDOW_MS)) {
+			throw new Error(`storage is failing writes (${store.writes.lastCategoryOrNull() ?? "error"})`);
 		}
-	});
+		const probe = await readiness.get();
+		if (probe.state !== "up") throw new Error(`storage not writable (${probe.state})`);
+	}
 
 	/**
 	 * Version compatibility (public, like /healthz; no tenant data): this
@@ -994,18 +1107,19 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		const admitted = admit(ctx, req, fingerprinted);
 		// ClickHouse has no cross-table transaction, so these four inserts can
 		// partially commit. Recovery boundary: any failure → 503 → the exporter
-		// retries the whole batch. Deterministic occurrence ids make the retry
-		// idempotent downstream (consumer dedupes per id; duplicate ClickHouse
-		// rows share an id, and the consumer's reconciler counts distinct ids),
-		// and nothing reaches the sink queue unless every insert succeeded —
-		// signals persisted by a partial write are picked up by the consumer's
-		// ClickHouse reconciliation instead.
+		// retries the whole batch, and writeAll makes that retry idempotent:
+		// tables that already committed are skipped (same process) or deduped
+		// by ClickHouse (insert_deduplication_token), so summed metrics and
+		// spans are not added twice. Nothing reaches the sink queue unless
+		// every insert succeeded, and the sink batch id comes from the same
+		// request digest, so a re-sent request is one batch to the consumer.
+		const digest = requestDigest(ctx, req.path, req.body);
 		try {
-			await Promise.all([
-				store.insertOccurrences(ctx, admitted.kept),
-				store.insertSpans(ctx, spans),
-				store.insertMetricPoints(ctx, metricPoints),
-				store.insertLlmCalls(ctx, llmCalls),
+			await writeAll(digest, [
+				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
+				{ table: "runtime_spans", rows: spans.length, run: (token) => store.insertSpans(ctx, spans, token) },
+				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_llm_calls", rows: llmCalls.length, run: (token) => store.insertLlmCalls(ctx, llmCalls, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();
@@ -1013,7 +1127,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			return;
 		}
 		admitted.commit();
-		sink?.enqueue(ctx, admitted.kept, metricPoints, llmCalls);
+		sink?.enqueue(ctx, admitted.kept, metricPoints, llmCalls, digest);
 		recordSdks(ctx, request, req);
 		// normalizeTraces stops at SPANS_PER_REQUEST; the rest were not read.
 		const overLimit = Math.max(0, totalSpans - normalized.spanCount);
@@ -1054,11 +1168,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		// Rollups count every promoted error, collapsed or suppressed ones too.
 		const metricPoints = logRollups(logs, promoted);
 		const admitted = admit(ctx, req, promoted);
+		const digest = requestDigest(ctx, req.path, req.body);
 		try {
-			await Promise.all([
-				store.insertLogs(ctx, logs),
-				store.insertOccurrences(ctx, admitted.kept),
-				store.insertMetricPoints(ctx, metricPoints),
+			await writeAll(digest, [
+				{ table: "runtime_logs", rows: logs.length, run: (token) => store.insertLogs(ctx, logs, token) },
+				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
+				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();
@@ -1066,7 +1181,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			return;
 		}
 		admitted.commit();
-		sink?.enqueue(ctx, admitted.kept, metricPoints);
+		sink?.enqueue(ctx, admitted.kept, metricPoints, [], digest);
 		recordSdks(ctx, logsRequest, req);
 		otlpSuccess(req, res, "logs", partialSuccess([
 			{ rejected: stats.overLimit, message: PARTIAL_MESSAGES.logRecords(stats.overLimit, MAX_LOG_RECORDS_PER_REQUEST) },
@@ -1112,15 +1227,18 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid OTLP metrics payload" }, dataPointsInRequest(request));
 			return;
 		}
+		const digest = requestDigest(ctx, req.path, req.body);
 		try {
-			await store.insertLatencyHistograms(ctx, latency);
-			await store.insertMetricPoints(ctx, metricPoints);
-			await store.insertMemorySamples(ctx, memorySamples);
+			await writeAll(digest, [
+				{ table: "runtime_latency_histograms", rows: latency.length, run: (token) => store.insertLatencyHistograms(ctx, latency, token) },
+				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_memory_samples", rows: memorySamples.length, run: (token) => store.insertMemorySamples(ctx, memorySamples, token) },
+			]);
 		} catch (err) {
 			storageError(req, res, ctx, err, dataPointsInRequest(request));
 			return;
 		}
-		sink?.enqueue(ctx, [], metricPoints);
+		sink?.enqueue(ctx, [], metricPoints, [], digest);
 		recordSdks(ctx, request, req);
 		// Metrics the ingester has no use for (anything but HTTP server
 		// duration histograms and the memory/GC instruments) are ignored,
@@ -1182,10 +1300,11 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		const { occurrences, metricPoints } = normalized;
 		const fingerprinted = await fingerprintAll(ctx, occurrences);
 		const admitted = admit(ctx, req, fingerprinted);
+		const digest = requestDigest(ctx, req.path, req.body);
 		try {
-			await Promise.all([
-				store.insertOccurrences(ctx, admitted.kept),
-				store.insertMetricPoints(ctx, metricPoints),
+			await writeAll(digest, [
+				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
+				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();
@@ -1193,7 +1312,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			return;
 		}
 		admitted.commit();
-		sink?.enqueue(ctx, admitted.kept, metricPoints);
+		sink?.enqueue(ctx, admitted.kept, metricPoints, [], digest);
 		if (payload.sdk) {
 			void sdkVersions.observe(ctx, [{
 				service: payload.service,
@@ -1254,4 +1373,80 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	);
 
 	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys };
+}
+
+/**
+ * Open the sink outbox (sink-outbox.ts) and read what the last run left.
+ * Never throws: an unusable directory (permissions, another live process
+ * holding it) falls back to memory-only delivery, loudly.
+ */
+function openOutbox(config: IngesterConfig): { outbox: SinkOutbox; pending: OutboxRecord[] } | null {
+	if (!config.sinkOutboxDir) {
+		if (config.sinkUrl) {
+			console.warn("sink outbox off (SINK_OUTBOX_DIR=off): undelivered sink batches are lost on restart");
+		}
+		return null;
+	}
+	const outbox = new SinkOutbox(config.sinkOutboxDir, {
+		fsync: config.sinkOutboxFsync,
+		deadLetterMaxBytes: (config.sinkDeadLetterMaxMb ?? 256) * 1024 * 1024,
+	});
+	try {
+		return { outbox, pending: outbox.open() };
+	} catch (err) {
+		console.error(
+			err instanceof OutboxLockedError
+				? `${err.message} — give each ingester process its own SINK_OUTBOX_DIR; delivering from memory only`
+				: `sink outbox ${config.sinkOutboxDir} unusable (${(err as Error).message}) — delivering from memory only`,
+		);
+		return null;
+	}
+}
+
+/** Prometheus exposition of the readiness report (counters and gauges). */
+function prometheusText(report: {
+	ok: boolean;
+	clickhouse: StorageState;
+	writes: { consecutiveFailures: number; lagSeconds: number; okWrites: number; failedWrites: number };
+	drops: { byReason: Array<{ route: string; reason: string; kind: string; requests: number; records: number }> };
+	sink?: ReturnType<SinkForwarder["stats"]>;
+}): string {
+	const lines: string[] = [];
+	const metric = (name: string, type: "counter" | "gauge", help: string, samples: Array<[Record<string, string>, number]>) => {
+		lines.push(`# HELP ${name} ${help}`, `# TYPE ${name} ${type}`);
+		for (const [labels, value] of samples) {
+			const rendered = Object.entries(labels)
+				.map(([key, val]) => `${key}="${val.replace(/["\\\n]/g, "_")}"`)
+				.join(",");
+			lines.push(`${name}${rendered ? `{${rendered}}` : ""} ${value}`);
+		}
+	};
+	metric("autter_ingester_ready", "gauge", "1 when the ingester can store what it is sent.", [[{}, report.ok ? 1 : 0]]);
+	metric("autter_ingester_storage_state", "gauge", "Storage state (1 for the current one).", (
+		["up", "down", "auth_failed", "schema_missing", "unconfigured"] as const
+	).map((state) => [{ state }, report.clickhouse === state ? 1 : 0]));
+	metric("autter_ingester_writes_total", "counter", "ClickHouse ingest writes by outcome.", [
+		[{ outcome: "ok" }, report.writes.okWrites],
+		[{ outcome: "failed" }, report.writes.failedWrites],
+	]);
+	metric("autter_ingester_write_lag_seconds", "gauge", "Seconds since the last successful write while writes fail.", [[{}, report.writes.lagSeconds]]);
+	metric("autter_ingester_dropped_requests_total", "counter", "Requests refused or with records not stored, by route and reason.",
+		report.drops.byReason.map((t) => [{ route: t.route, reason: t.reason, kind: t.kind }, t.requests]));
+	metric("autter_ingester_dropped_records_total", "counter", "Records not stored or not forwarded, by route and reason.",
+		report.drops.byReason.map((t) => [{ route: t.route, reason: t.reason, kind: t.kind }, t.records]));
+	if (report.sink) {
+		const sink = report.sink;
+		metric("autter_sink_queued_batches", "gauge", "Sink batches waiting for delivery.", [[{}, sink.queued + sink.inFlight]]);
+		metric("autter_sink_oldest_queued_age_seconds", "gauge", "Age of the oldest undelivered sink batch.", [[{}, sink.oldestQueuedAgeSeconds]]);
+		metric("autter_sink_batches_total", "counter", "Sink batches by outcome.", [
+			[{ outcome: "delivered" }, sink.delivered],
+			[{ outcome: "retried" }, sink.retried],
+			[{ outcome: "dead_lettered" }, sink.deadLettered],
+			[{ outcome: "restored" }, sink.restored],
+		]);
+		metric("autter_sink_dead_letter_files", "gauge", "Dead-lettered sink batches kept on disk.", [[{}, sink.deadLetterFiles]]);
+		metric("autter_sink_outbox_write_failures_total", "counter", "Sink batches that could not be written to the outbox.", [[{}, sink.outboxWriteFailures]]);
+		metric("autter_sink_durable", "gauge", "1 when undelivered sink batches survive a restart.", [[{}, sink.durable ? 1 : 0]]);
+	}
+	return `${lines.join("\n")}\n`;
 }

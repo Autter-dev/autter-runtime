@@ -79,6 +79,7 @@ async function start(v: Validator, overrides: Partial<IngesterConfig> = {}, shar
 		if (name.startsWith("insert")) stub[name] = async () => {};
 	}
 	stub.ensureSchema = async () => {};
+	stub.probe = async () => ({ state: "up", checkedAt: new Date().toISOString(), latencyMs: 0 });
 	stub.recentOccurrenceTraceIds = async () => new Set();
 	stub.lookupSourceMap = async () => null;
 	stub.ping = async () => true;

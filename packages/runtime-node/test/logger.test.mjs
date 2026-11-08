@@ -143,7 +143,10 @@ test("export retries retain buffered records, enforce limits and report undelive
 		for (let i = 0; i < 1001; i++) runtimeLogger.info(`record-${i}`);
 		assert.equal(runtimeLogStats().buffered, 1000);
 		assert.equal(runtimeLogStats().dropped, before + 1);
-		await assert.rejects(flushRuntimeLogs(), /Runtime log export failed/);
+		// Never rejects (the SDK must not crash its host): the failure comes back in the result.
+		const failedFlush = await flushRuntimeLogs();
+		assert.equal(failedFlush.ok, false);
+		assert.match(failedFlush.errors[0].error.message, /Runtime log export failed/);
 		assert.equal(attempts, 3);
 		assert.equal(runtimeLogStats().buffered, 1000);
 		fail = false;
@@ -163,7 +166,7 @@ test("export retries retain buffered records, enforce limits and report undelive
 		);
 		fail = true;
 		runtimeLogger.info("shutdown failure");
-		await assert.rejects(runtime.shutdown(), /Runtime log export failed/);
+		await runtime.shutdown(); // resolves; the failed export is reported, not thrown
 		assert.equal(runtimeLogStats().buffered, 0);
 		assert.equal(runtimeLogStats().dropped, before + 2);
 	} finally {

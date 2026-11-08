@@ -55,15 +55,31 @@ console.log(
 	`Check the connection: npx @autter/runtime-node doctor --endpoint ${endpoint}${apiKey === LOCAL_DEV_KEY ? ` --key ${LOCAL_DEV_KEY}` : ""}`,
 );
 
+// Last line of defence for the app's own code: log an unhandled rejection
+// instead of letting Node exit. (Autter never rejects into your app: export
+// failures are printed and passed to onExportError below.) With a listener
+// here, Autter records the rejection as an error and the process stays up.
+process.on("unhandledRejection", (reason) => {
+	console.error("[example] unhandled promise rejection:", reason);
+});
+
+/** The latest failed export, shown by GET /api/telemetry-status. */
+let lastExportError = null;
+
 // Must run before other imports create connections — in real apps put this
 // in a preloaded module (node --import ./instrument.js).
-initAutterServer({
+const runtime = initAutterServer({
 	apiKey,
 	endpoint,
 	service: "example-express",
 	environment: "development",
 	release: process.env.GIT_SHA ?? "dev",
 	traceSampleRate: 1, // sample everything in the example
+	// Failed exports (a wrong key, the ingester down) never throw into the
+	// app; they are printed once a minute per kind and passed here.
+	onExportError: (error) => {
+		lastExportError = { kind: error.kind, status: error.status, message: error.message, at: new Date().toISOString() };
+	},
 });
 
 // Coded errors: one code = one issue, whatever the message says. `expected`
@@ -96,6 +112,7 @@ app.get("/healthz", (_req, res) => res.send("ok"));
 app.post("/api/autter-runtime", createBrowserRelayHandler({ apiKey, endpoint }));
 
 app.get("/api/ok", (_req, res) => res.json({ ok: true }));
+app.get("/api/telemetry-status", (_req, res) => res.json({ lastExportError }));
 
 // Param route: shows up in runtime_metrics_1m as "/api/users/:id" — one
 // rollup row per route template, not one per user id.
@@ -121,25 +138,48 @@ app.get("/api/boom", () => {
 	throw new TypeError("cannot read properties of undefined (reading 'total')");
 });
 
+// Express 4 does not catch a rejected async handler: the rejection is
+// unhandled and, without a listener, Node exits. Route every async handler's
+// errors to next(err) so autterErrorHandler / autterErrorResponse see them.
+// (Express 5 does this itself.)
+const asyncRoute = (handler) => (req, res, next) => {
+	Promise.resolve()
+		.then(() => handler(req, res, next))
+		.catch(next);
+};
+
 // LLM tracing: withLlmCall records the call at 100% with tokens + cost.
 // Simulated here — swap the body for a real openai/anthropic call.
-app.get("/api/ai-summary", async (_req, res) => {
-	const out = await withLlmCall(
-		{ provider: "openai", model: "gpt-5-mini", userId: "u_demo" },
-		async (llm) => {
-			await new Promise((resolve) => setTimeout(resolve, 120));
-			llm.setUsage({ inputTokens: 42, outputTokens: 18 });
-			return { summary: "Everything is fine." };
-		},
-	);
-	res.json(out);
-});
+app.get(
+	"/api/ai-summary",
+	asyncRoute(async (_req, res) => {
+		const out = await withLlmCall(
+			{ provider: "openai", model: "gpt-5-mini", userId: "u_demo" },
+			async (llm) => {
+				await new Promise((resolve) => setTimeout(resolve, 120));
+				llm.setUsage({ inputTokens: 42, outputTokens: 18 });
+				return { summary: "Everything is fine." };
+			},
+		);
+		res.json(out);
+	}),
+);
 
 // Proves LLM traces reach the ingester without any model call: one fake
-// "autter-selftest" call, flushed immediately, trace id returned.
-app.get("/api/llm-selftest", async (_req, res) => {
-	res.json(await emitLlmSelftestTrace());
-});
+// "autter-selftest" call, flushed immediately, trace id returned. It never
+// rejects: `ok: false` with `errors` (e.g. kind "unauthorized" for a wrong
+// key) when the trace did not reach the ingester.
+app.get(
+	"/api/llm-selftest",
+	asyncRoute(async (_req, res) => {
+		const result = await emitLlmSelftestTrace();
+		res.status(result.ok ? 200 : 502).json({
+			ok: result.ok,
+			traceId: result.traceId,
+			errors: result.errors.map(({ kind, status, message }) => ({ kind, status, message })),
+		});
+	}),
+);
 
 // After the routes: records every 5xx/coded error, stack included, on the
 // request span, then calls next(err) unchanged. Keep your own error handler
@@ -152,6 +192,21 @@ app.use(autterErrorHandler());
 app.use(autterErrorResponse());
 
 const port = Number(process.env.PORT) || 3000;
-app.listen(port, () => {
+const server = app.listen(port, () => {
 	console.log(`example app on http://localhost:${port} (open it, then click the buttons)`);
 });
+
+// Graceful shutdown: stop taking requests, flush what Autter buffered, exit.
+// shutdown() never rejects (a failed final export is printed instead), and a
+// second signal exits at once.
+let stopping = false;
+for (const signal of ["SIGINT", "SIGTERM"]) {
+	process.on(signal, () => {
+		if (stopping) process.exit(1);
+		stopping = true;
+		server.close();
+		const force = setTimeout(() => process.exit(1), 10_000);
+		force.unref();
+		runtime.shutdown().finally(() => process.exit(0));
+	});
+}

@@ -277,7 +277,9 @@ up:
 
 ```ts
 import { emitLlmSelftestTrace } from "@autter/runtime-node";
-console.log(await emitLlmSelftestTrace()); // { traceId: "…" }
+console.log(await emitLlmSelftestTrace()); // { traceId: "…", ok: true, errors: [] }
+// Never rejects: ok: false with errors (e.g. kind "unauthorized", status 401
+// for a key the ingester does not accept) when the trace was not delivered.
 ```
 
 ## 4. Instrument your frontend

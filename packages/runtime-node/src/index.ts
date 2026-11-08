@@ -22,7 +22,16 @@ export {
 	type LlmUsage,
 	type TrackedLlmCall,
 	type SafeCapture,
+	type LlmSelftestResult,
+	type AutterExportError,
+	type AutterExportErrorHandler,
+	type AutterFlushResult,
 } from "./server.js";
+export type {
+	AutterExportErrorKind,
+	AutterExportOperation,
+	AutterExportSignal,
+} from "./export-errors.js";
 export {
 	installAutterAutoFlush,
 	type AutoFlushHandle,

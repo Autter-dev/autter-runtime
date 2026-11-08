@@ -119,6 +119,11 @@ for sending data without an Autter package.
 ```ts
 import { emitLlmSelftestTrace } from "@autter/runtime-node";
 
-const { traceId } = await emitLlmSelftestTrace();
+const { traceId, ok, errors } = await emitLlmSelftestTrace();
 console.log(traceId); // find the fake call in the Runtime LLM view
+// Never rejects (safe in an Express 4 route): when the trace was not
+// delivered, ok is false and errors says why, e.g. kind "unauthorized" (401)
+// for a wrong ingest key.
+if (!ok) console.warn(errors.map((error) => error.message).join("
+"));
 ```

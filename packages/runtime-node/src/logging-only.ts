@@ -18,6 +18,7 @@ import {
 	captureExceptionAsLog,
 	configureRuntimeLogger,
 	flushRuntimeLogs,
+	flushRuntimeLogsOrThrow,
 	noteOperationError,
 	notifyException,
 	runtimeLogger,
@@ -46,6 +47,15 @@ import {
 	structuredErrorAttributes,
 } from "./server.js";
 import { sharedSlot } from "./shared.js";
+import {
+	configureExportErrors,
+	exportErrorMark,
+	reportUnexplained,
+	resetExportErrors,
+	settleFlush,
+	type AutterExportErrorHandler,
+	type AutterFlushResult,
+} from "./export-errors.js";
 
 /**
  * Logger-only mode: requests, operations, coded errors, sinks and enrichers
@@ -92,11 +102,15 @@ export interface AutterLoggingOptions {
 	ignoreErrors?: IgnoreErrorPattern[];
 	/** Same semantics as initAutterServer: errors logged through console.error, pino, winston, bunyan or runtimeLogger.error are occurrences. Default true. */
 	captureLoggedErrors?: CaptureLoggedErrorsOption;
+	/** Same semantics as initAutterServer: called for every failed log export or flush. */
+	onExportError?: AutterExportErrorHandler;
 }
 
 export interface AutterLogging {
 	captureException(error: unknown, attributes?: Attributes): void;
-	flush(): Promise<void>;
+	/** Never rejects: `{ ok: false, errors }` when an export failed. */
+	flush(): Promise<AutterFlushResult>;
+	/** Never rejects: a failed final export is printed and passed to onExportError. */
 	shutdown(): Promise<void>;
 }
 
@@ -122,6 +136,7 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 	const redact = makeRedactor(options.redactAttributes ?? true);
 	const mode = options.exceptions ?? "auto";
 	debugLog(`initialising logger-only service=${options.service} endpoint=${endpoint}`);
+	configureExportErrors({ endpoint, onExportError: options.onExportError });
 
 	const errorFilter = createErrorFilter({ ignoreErrors: options.ignoreErrors, sampleRate: options.sampleRate });
 
@@ -238,7 +253,18 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 			);
 	}
 
-	registerFlushTarget("logging", { forceFlush: () => flushRuntimeLogs() });
+	registerFlushTarget("logging", {
+		// Auto-flush awaits this but cannot report why it failed: report here.
+		forceFlush: async () => {
+			const mark = exportErrorMark();
+			try {
+				await flushRuntimeLogsOrThrow();
+			} catch (error) {
+				reportUnexplained(error, "logs", "flush", mark);
+				throw error;
+			}
+		},
+	});
 	let autoFlushHandle: AutoFlushHandle | null =
 		options.autoFlush === false ? null : installAutterAutoFlush();
 
@@ -246,16 +272,20 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 		captureException,
 		flush: flushRuntimeLogs,
 		shutdown: async () => {
-			if (L.active === handle) stopLoggedErrorCapture();
-			process.off("uncaughtExceptionMonitor", onCrash);
-			uninstallRejections?.();
-			uninstallRejections = null;
-			setLoggerOnlyCapture(null);
-			autoFlushHandle?.dispose();
-			autoFlushHandle = null;
-			unregisterFlushTargets();
-			if (L.active === handle) L.active = null;
-			await shutdownRuntimeLogger();
+			const wasActive = L.active === handle;
+			await settleFlush("logs", "shutdown", async () => {
+				if (L.active === handle) stopLoggedErrorCapture();
+				process.off("uncaughtExceptionMonitor", onCrash);
+				uninstallRejections?.();
+				uninstallRejections = null;
+				setLoggerOnlyCapture(null);
+				autoFlushHandle?.dispose();
+				autoFlushHandle = null;
+				unregisterFlushTargets();
+				if (L.active === handle) L.active = null;
+				await shutdownRuntimeLogger();
+			});
+			if (wasActive) resetExportErrors();
 		},
 	};
 	L.active = handle;

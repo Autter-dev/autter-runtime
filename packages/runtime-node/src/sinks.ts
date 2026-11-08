@@ -15,6 +15,7 @@ import {
 } from "@autter/runtime-core";
 import { noteCompatFeature, observeIngesterResponse } from "./compat.js";
 import { sharedSlot } from "./shared.js";
+import { reportExportError } from "./export-errors.js";
 
 /**
  * Where runtime records go. The logger pipeline is
@@ -101,7 +102,8 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 			timer = setTimeout(
 				() => {
 					timer = undefined;
-					void flush().catch(() => {});
+					// Nobody awaits a timed flush: report its failure (rate-limited warning, onExportError).
+					void flush().catch((error) => reportExportError(error, "logs", "export"));
 				},
 				Math.max(nextFlushAfter, Math.min(30000, 2000 * 2 ** Math.min(failureStreak, 4))),
 			);
@@ -164,7 +166,9 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 						});
 						observeIngesterResponse({ status: response.status, headers: response.headers, route: "/v1/logs" });
 						if (!response.ok) {
-							failure = new Error(`Runtime log export failed (${response.status})`);
+							failure = Object.assign(new Error(`Runtime log export failed (${response.status})`), {
+								status: response.status,
+							});
 							// A refused key or payload won't change on the next attempt;
 							// 429 and 5xx (e.g. 503 while the ingester can't check the
 							// key) may, after the answer's Retry-After.

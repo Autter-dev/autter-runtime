@@ -37,6 +37,7 @@ import {
 } from "@autter/runtime-core";
 import { redactAttributes } from "./redact.js";
 import { sharedSlot } from "./shared.js";
+import { settleFlush, type AutterFlushResult } from "./export-errors.js";
 import { recordLogBreadcrumb, rememberThrownBreadcrumbs } from "./breadcrumbs.js";
 import { reportDegraded, reportLoggedError, setHandledTail } from "./caught-errors.js";
 import {
@@ -389,7 +390,17 @@ export function runtimeLogStats(): { buffered: number; dropped: number } {
 		dropped: sinkStats.dropped,
 	};
 }
-export async function flushRuntimeLogs(): Promise<void> {
+/**
+ * Push buffered log records and operation summaries out now. Never rejects:
+ * a failed export (a refused key, an unreachable ingester) resolves with
+ * `ok: false` and the failures, which are also printed (rate limited) and
+ * passed to `onExportError`.
+ */
+export function flushRuntimeLogs(): Promise<AutterFlushResult> {
+	return settleFlush("logs", "flush", flushRuntimeLogsOrThrow);
+}
+/** @internal flushRuntimeLogs that rejects on failure (flush targets, shutdown). */
+export async function flushRuntimeLogsOrThrow(): Promise<void> {
 	if (!shared.config) return;
 	const results = await Promise.allSettled(
 		shared.sinks.map((sink) => Promise.resolve().then(() => sink.flush?.())),
@@ -397,7 +408,7 @@ export async function flushRuntimeLogs(): Promise<void> {
 	const failed = results.find((result) => result.status === "rejected");
 	if (failed) throw (failed as PromiseRejectedResult).reason;
 }
-/** @internal */
+/** @internal Rejects when a sink fails to deliver; callers settle it. */
 export async function shutdownRuntimeLogger(): Promise<void> {
 	const active = shared.sinks;
 	const results = await Promise.allSettled(

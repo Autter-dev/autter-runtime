@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 /**
  * `npx @autter/runtime-node doctor` — see doctor.ts.
+ * `npx @autter/runtime-node verify` — see verify.ts.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { DOCTOR_USAGE, formatDoctorReport, parseDoctorArgs, runDoctor } from "./doctor.js";
+import { formatVerifyReport, parseVerifyArgs, runVerify, VERIFY_USAGE } from "./verify.js";
+
+const USAGE = `Usage: npx @autter/runtime-node <command> [options]
+
+Commands:
+  doctor    Versions, storage, features and the key, in one report
+  verify    Send a test event end to end and name the first failing step
+
+Run a command with --help for its options.`;
 
 /**
  * `autter-runtime sourcemaps …` belongs to @autter/runtime-cli, which ships a
@@ -31,8 +41,22 @@ async function main(argv: string[]): Promise<number> {
 		console.error("autter-runtime sourcemaps is part of @autter/runtime-cli: npm install -D @autter/runtime-cli");
 		return 64;
 	}
+	if (command === "verify") {
+		const parsed = parseVerifyArgs(rest);
+		if ("help" in parsed) {
+			console.log(VERIFY_USAGE);
+			return 0;
+		}
+		if ("error" in parsed) {
+			console.error(`${parsed.error}\n\n${VERIFY_USAGE}`);
+			return 64;
+		}
+		const report = await runVerify(parsed);
+		console.log(parsed.json ? JSON.stringify(report, null, 2) : formatVerifyReport(report));
+		return report.exitCode;
+	}
 	if (command !== "doctor") {
-		console.log(DOCTOR_USAGE);
+		console.log(USAGE);
 		return command === undefined || command === "--help" || command === "-h" ? 0 : 64;
 	}
 	const parsed = parseDoctorArgs(rest);
@@ -54,7 +78,7 @@ main(process.argv.slice(2)).then(
 		process.exitCode = code;
 	},
 	(err) => {
-		console.error("autter doctor failed:", err instanceof Error ? err.message : err);
+		console.error("autter-runtime failed:", err instanceof Error ? err.message : err);
 		process.exitCode = 2;
 	},
 );

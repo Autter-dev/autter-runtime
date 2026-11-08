@@ -10,7 +10,9 @@
  *   node scripts/examples-e2e.mjs
  *
  * Checks, in order:
- *   1. `doctor` passes against the local ingester with the local key;
+ *   1. `doctor` passes against the local ingester with the local key, and
+ *      `verify` (Node and Python) reads a test event back with every step
+ *      passing;
  *   2. examples/express-app: `npm start` (prestart copies the browser SDK),
  *      says it sends to http://localhost:4318, serves the SDK and every chunk
  *      it imports, and its server error, request summary and a browser error
@@ -134,6 +136,20 @@ async function doctor() {
 	const code = await exited;
 	check(code === 0, "doctor exits 0 against the local ingester", output());
 	check(/^\s*key\s+accepted$/m.test(output()), "doctor says the local key is accepted", output());
+	check(/^\s*storage\s+ready: ClickHouse accepts writes$/m.test(output()), "doctor says storage is ready", output());
+
+	console.log("verify");
+	const node = run(process.execPath, [cli, "verify", "--endpoint", INGESTER, "--key", LOCAL_DEV_KEY, "--service", `quickstart-${RUN}`, "--release", RUN], { env: cleanEnv() });
+	const nodeCode = await node.exited;
+	check(nodeCode === 0, "verify exits 0 against the local ingester", node.output());
+	for (const name of ["key", "network", "storage", "auth", "ingest", "stored", "trace", "release", "logs"]) {
+		check(new RegExp(`^\\s*ok\\s+${name}\\b`, "m").test(node.output()), `verify: ${name} ok`, node.output());
+	}
+	const python = run("python3", [join(ROOT, "adapters", "python", "compat.py"), "verify", "--endpoint", INGESTER, "--service", `quickstart-py-${RUN}`, "--release", RUN], { env: cleanEnv({ AUTTER_RUNTIME_KEY: LOCAL_DEV_KEY }) });
+	const pythonCode = await python.exited;
+	check(pythonCode === 0 && /Delivered: a test event/.test(python.output()), "compat.py verify exits 0 against the local ingester", python.output());
+	const wrong = run(process.execPath, [cli, "verify", "--endpoint", INGESTER, "--key", "autter_rt_not_a_real_key_0000000000"], { env: cleanEnv() });
+	check((await wrong.exited) === 1 && /First failing step: auth\./.test(wrong.output()), "verify with a wrong key names auth as the first failing step", wrong.output());
 }
 
 async function expressApp() {

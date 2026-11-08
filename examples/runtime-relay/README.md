@@ -9,6 +9,17 @@ can be silently dropped by tracker/ad-blockers. A same-origin relay
 (`your-domain/api/autter-runtime` → ingester) looks like your own API traffic
 and avoids that loss — no Express/Node backend required.
 
+## Prerequisites
+
+- A Cloudflare account (option A) or a Vercel project (option B), and
+  Node.js 20 or later for `npx wrangler` / `vercel`.
+- A key: a **server** key (`autter_rt_…`, recommended: the browser never
+  sees it) set as the `AUTTER_RUNTIME_KEY` secret, or a publishable client
+  key (`autter_rtc_…`) whose allowed origins list your site's exact origin.
+- Locally: the repo's `docker compose up` ingester on port 4318.
+- Check the endpoint and key before deploying: `npx @autter/runtime-node
+  verify --endpoint <ingester URL> --key <server key>`.
+
 ## Option A — Cloudflare Worker (1-click)
 
 1. From this folder: `npx wrangler deploy`

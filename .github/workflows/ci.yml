@@ -28,8 +28,9 @@ jobs:
   clickhouse-e2e:
     # The built ingester against a real ClickHouse, the version production
     # runs: migrations, /healthz readiness (a wrong password, a dropped
-    # table), and retried OTLP exports after a lost response, a partial
-    # fan-out failure and a restart — stored exactly once
+    # table), retried OTLP exports after a lost response, a partial
+    # fan-out failure and a restart — stored exactly once — and `verify`
+    # reading a test event back from the real tables
     # (packages/otlp-ingester/scripts/clickhouse-e2e.mjs).
     runs-on: blacksmith-4vcpu-ubuntu-2404
     services:
@@ -52,7 +53,9 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npm run build -w @autter/otlp-ingester
+      # runtime-node too: the script runs `verify` (Node and Python) against
+      # the real tables.
+      - run: npm run build -w @autter/otlp-ingester -w @autter/runtime-node
       - run: npm run e2e:clickhouse -w @autter/otlp-ingester
         env:
           CLICKHOUSE_URL: http://127.0.0.1:8123
@@ -62,7 +65,7 @@ jobs:
   examples-e2e:
     # The quickstart as a new user runs it: `docker compose up` with no .env
     # and no key step (ClickHouse 24.8 + the ingester with its built-in local
-    # key), `doctor`, then every example with its own defaults, and the rows
+    # key), `doctor` and `verify`, then every example with its own defaults, and the rows
     # each one sent read back from ClickHouse (scripts/examples-e2e.mjs and
     # examples/python/testing/compose_e2e.py).
     runs-on: blacksmith-4vcpu-ubuntu-2404

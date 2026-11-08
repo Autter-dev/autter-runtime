@@ -22,12 +22,16 @@
  *   3. a partial failure, the ingester killed, restarted, and the retry;
  *   4. a dropped table the ingester may not recreate, and a wrong
  *      password: /healthz unready (and ready again once the table is back);
+ *   6. `verify` (Node CLI and Python compat.py): a tagged test event read
+ *      back through GET /v1/verify from the real tables, with no rollup row;
+ *      against the wrong-password ingester it stops at "storage".
+ *      Needs `npm run build -w @autter/runtime-node` too, and python3.
  * and reports (without asserting) whether the server itself deduplicates a
  * retried async insert by its token when the ingester's receipts are off.
  * Exits non-zero on the first failed assertion.
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +45,9 @@ const USER = `autter_e2e_${process.pid}`;
 const PASSWORD = "e2e-ingester-pass";
 const KEY = "autter_rt_e2e_key";
 const ENTRY = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const VERIFY_CLI = join(REPO, "packages", "runtime-node", "dist", "cli.js");
+const PY_COMPAT = join(REPO, "adapters", "python", "compat.py");
 const STATE = mkdtempSync(join(tmpdir(), "autter-ch-e2e-"));
 const RUN = Date.now().toString(36);
 
@@ -171,6 +178,45 @@ function exportFor(name) {
 	};
 }
 
+/** Run a verify CLI (`node cli.js verify …` or `python3 compat.py verify …`) with --json. */
+function runVerify(command, args) {
+	return new Promise((resolve) => {
+		const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(AUTTER_|OTEL_)/.test(k)));
+		const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+		let out = "";
+		let err = "";
+		child.stdout.on("data", (d) => (out += d));
+		child.stderr.on("data", (d) => (err += d));
+		child.on("exit", (code) => {
+			let report = null;
+			try {
+				report = JSON.parse(out);
+			} catch {
+				// not JSON: reported below
+			}
+			resolve({ code, report, out: out + err });
+		});
+	});
+}
+
+async function verifyEndToEnd(ingester, label, command, args) {
+	const service = `e2e-${RUN}-verify-${label}`;
+	const release = `rel-${RUN}`;
+	const { code, report, out } = await runVerify(command, [...args, "verify", "--endpoint", ingester.url, "--key", KEY, "--service", service, "--release", release, "--json"]);
+	check(code === 0 && report?.firstFailure === null, `${label} verify: every step passes against ClickHouse ${CH}`, report?.firstFailure ?? out);
+	for (const name of ["key", "network", "storage", "auth", "ingest", "stored", "trace", "release", "logs"]) {
+		const step = report.steps.find((s) => s.step === name);
+		check(step?.status === "pass", `${label} verify: ${name}`, step);
+	}
+	const traceId = report.traceId;
+	const [occ] = await sql(`SELECT count() AS n, any(release) AS release, any(environment) AS env FROM ${DB}.runtime_error_occurrences WHERE trace_id = '${traceId}'`);
+	check(Number(occ.n) === 1 && occ.release === release && occ.env === "verify", `${label} verify: one test error in runtime_error_occurrences, release and environment kept`, occ);
+	const [logs] = await sql(`SELECT count() AS n FROM ${DB}.runtime_logs WHERE trace_id = '${traceId}'`);
+	check(Number(logs.n) === 1, `${label} verify: one test log record in runtime_logs`, logs);
+	const [rollup] = await sql(`SELECT count() AS n FROM ${DB}.runtime_metrics_1m WHERE service = '${service}'`);
+	check(Number(rollup.n) === 0, `${label} verify: no runtime_metrics_1m row (a test event moves no dashboard)`, rollup);
+}
+
 async function send(ingester, exp) {
 	const res = await fetch(`${ingester.url}/v1/traces`, {
 		method: "POST",
@@ -267,6 +313,13 @@ async function main() {
 	check((await send(ingester, e1)) === 200, "export 1 re-sent after the restart");
 	await checkOneCopy(e1, one, "export 1 after the restart");
 
+	console.log("\n— 6. verify: a test event end to end, read back from the real tables");
+	check(existsSync(VERIFY_CLI), "runtime-node is built (npm run build -w @autter/runtime-node)", VERIFY_CLI);
+	await verifyEndToEnd(ingester, "node", process.execPath, [VERIFY_CLI]);
+	await verifyEndToEnd(ingester, "python", "python3", [PY_COMPAT]);
+	const [delivery] = [await (await fetch(`${ingester.url}/v1/verify`, { headers: { authorization: `Bearer ${KEY}` } })).json()];
+	check(delivery.delivery?.accepted >= 2 && delivery.storage === "up", "GET /v1/verify: this key's delivery record and storage", delivery);
+
 	console.log("\n— 4. a dropped table that cannot be recreated makes /healthz unready; once it can, the ingester heals");
 	// Without CREATE TABLE the ingester cannot put the table back (with it,
 	// the next readiness probe or write recreates it at once).
@@ -292,6 +345,8 @@ async function main() {
 	check(h.status === 503 && h.body.clickhouse === "auth_failed" && h.body.retryable === false, "/healthz: auth_failed", h.body);
 	check((await send(wrong, exportFor("wrong-password"))) === 503, "ingest answers 503 too");
 	check(((await fetch(`${wrong.url}/livez`)).status) === 200, "/livez stays 200");
+	const stopped = await runVerify(process.execPath, [VERIFY_CLI, "verify", "--endpoint", wrong.url, "--key", KEY, "--json"]);
+	check(stopped.code === 1 && stopped.report?.firstFailure?.step === "storage", "verify names storage as the first failing step", stopped.report?.firstFailure ?? stopped.out);
 	await wrong.stop();
 
 	console.log("\n— informational: does the server dedupe a retried async insert by its token alone?");

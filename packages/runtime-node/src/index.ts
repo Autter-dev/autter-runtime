@@ -2,6 +2,8 @@ export {
 	createBrowserRelayHandler,
 	createBrowserRelayFetchHandler,
 	sanitizeBrowserPayload,
+	checkBrowserPayload,
+	type RelayPayloadIssue,
 	type RelayOptions,
 } from "./relay.js";
 export {
@@ -114,6 +116,7 @@ export {
 	type SdkIdentity,
 } from "./compat.js";
 export { runDoctor, type DoctorOptions, type DoctorReport } from "./doctor.js";
+export { runVerify, type VerifyOptions, type VerifyReport, type VerifyStep } from "./verify.js";
 export { addBreadcrumb } from "./breadcrumbs.js";
 export type {
 	Breadcrumb,

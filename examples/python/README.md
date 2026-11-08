@@ -11,6 +11,27 @@ Plain OpenTelemetry for Python services, with errors kept from every trace
 | [`flask`](flask) | `gunicorn -w 2 app:app`, with and without `--preload` | `FlaskInstrumentor`; Flask's 500, a handled exception, `abort(404)` not recorded; `AUTTER_COUNT_REQUESTS=true` counting every request once at sampling ratio 0 |
 | [`celery`](celery) | `celery -A tasks worker` (prefork, `worker_process_init`), and a solo worker thread on the memory broker | `CeleryInstrumentor`; failing tasks grouped per task, a handled exception in a task |
 
+## Prerequisites
+
+- Python 3.10 or later for Flask and Celery, 3.11 for FastAPI, 3.12 for
+  Django (each `requirements.txt` says which; all are tested on 3.14), in a
+  virtualenv per recipe.
+- An ingester: the repo's `docker compose up` (Docker with Compose v2) on
+  port 4318 with the local key `autter_rt_local_dev_only`, or your own with
+  a **server** key.
+- `adapters/python` on `PYTHONPATH` (the commands below set it). Celery's
+  recipe needs no broker: it uses kombu's filesystem and memory transports.
+
+Check the endpoint and key first, from `examples/python` (stdlib only, no install):
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+OTEL_EXPORTER_OTLP_HEADERS=x-autter-key=autter_rt_local_dev_only \
+  python3 ../../adapters/python/compat.py verify --service shop
+```
+
+## Run a recipe
+
 Each app imports `autter_tracing` (and through it `redact`) from
 [`adapters/python`](../../adapters/python); in your project, copy the two
 files next to your code. Run a recipe or its test:

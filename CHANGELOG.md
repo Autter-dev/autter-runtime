@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## [1.13.0] - 2026-11-08
+
+Packages: `otlp-ingester` 1.13.0, `runtime-node` 1.10.0, `runtime-cli` 1.3.2, `runtime-edge` 1.4.2. `runtime-browser` (1.8.1) and `runtime-next` (1.9.0) are unchanged; `runtime-next` picks up the new `runtime-node` and `runtime-edge` through its existing ranges. Upgrade the ingester first: `verify` reads the new `GET /v1/verify`.
 
 ### Features
 

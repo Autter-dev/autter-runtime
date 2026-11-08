@@ -48,7 +48,7 @@ skills — they inventory your repo and wire up Autter Runtime for whatever
 language/framework each service uses, npm packages or not:
 
 ```bash
-npx skills add Autter-dev/autter-skills --all
+npx @autter/skills
 ```
 
 See [Autter-dev/autter-skills](https://github.com/Autter-dev/autter-skills).

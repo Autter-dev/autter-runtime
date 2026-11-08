@@ -177,7 +177,7 @@ doesn't need Node at all). The skills include Python, Go, Rust, and a
 generic any-OTel-language guide:
 
 ```bash
-npx skills add Autter-dev/autter-skills --all
+npx @autter/skills
 ```
 
 Then tell your coding agent: *"install Autter Runtime in this project"* —

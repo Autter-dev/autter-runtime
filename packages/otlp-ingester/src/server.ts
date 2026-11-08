@@ -30,7 +30,7 @@ import {
 	type DropReason,
 	type PartialSuccess,
 } from "./ingest-drops.js";
-import { ClickHouseStore } from "./clickhouse.js";
+import { ClickHouseStore, routeLatencyPoints } from "./clickhouse.js";
 import { normalizeLatencyHistograms } from "./latency.js";
 import { UPLOAD_KEY_PREFIX, type IngesterConfig } from "./config.js";
 import { deriveFields, occurrenceIdFor } from "./fingerprint.js";
@@ -1135,6 +1135,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_spans", rows: spans.length, run: (token) => store.insertSpans(ctx, spans, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 				{ table: "runtime_llm_calls", rows: llmCalls.length, run: (token) => store.insertLlmCalls(ctx, llmCalls, token) },
 			]);
 		} catch (err) {
@@ -1190,6 +1191,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				{ table: "runtime_logs", rows: logs.length, run: (token) => store.insertLogs(ctx, logs, token) },
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();
@@ -1248,6 +1250,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			await writeAll(digest, [
 				{ table: "runtime_latency_histograms", rows: latency.length, run: (token) => store.insertLatencyHistograms(ctx, latency, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 				{ table: "runtime_memory_samples", rows: memorySamples.length, run: (token) => store.insertMemorySamples(ctx, memorySamples, token) },
 			]);
 		} catch (err) {
@@ -1321,6 +1324,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			await writeAll(digest, [
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
+				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();

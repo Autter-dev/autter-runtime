@@ -174,6 +174,14 @@ export class WriteHealth {
 		return cleared;
 	}
 
+	/** Forget a table's failures. True when it was failing. */
+	clearTable(table: string): boolean {
+		const health = this.tables.get(table);
+		if (!health || health.consecutive === 0) return false;
+		health.consecutive = 0;
+		return true;
+	}
+
 	/** Tables whose latest write failed within `windowMs`. */
 	private failingTables(windowMs: number): Array<[string, TableHealth]> {
 		const now = this.now();

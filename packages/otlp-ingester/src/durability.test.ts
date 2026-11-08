@@ -672,3 +672,21 @@ test("a 503 waits for sibling inserts still in flight, so an immediate retry wri
 	assert.equal(ch.inserts("runtime_spans").length, 1, "the retry did not write spans again");
 	assert.equal(ch.inserts("runtime_metrics_1m").filter((c) => c.rows > 0).length, 2);
 });
+
+test("a retry after the route-latency write failed does not add runtime_metrics_1m twice", async (t) => {
+	let failLatency = true;
+	const ch = await clickhouse((call) => (call.table === "runtime_route_latency_input" && failLatency ? "fail" : "ok"));
+	t.after(() => close(ch.server));
+	const app = await startApp(config({ clickhouseUrl: ch.url }));
+	t.after(() => app.stop());
+	const body = traceBody();
+	assert.equal((await app.post("/v1/traces", body)).status, 503);
+	assert.equal(ch.inserts("runtime_route_latency_input").length, 1, "the server span carries a latency sample");
+	assert.equal(ch.inserts("runtime_metrics_1m").length, 1, "metrics committed on the first attempt");
+	failLatency = false;
+	assert.equal((await app.post("/v1/traces", body)).status, 200);
+	assert.equal(ch.inserts("runtime_metrics_1m").length, 1, "metrics not written again");
+	assert.equal(ch.inserts("runtime_route_latency_input").length, 2, "only the failed table is retried");
+	const health = await fetch(`${app.url}/healthz`);
+	assert.equal(health.status, 200);
+});

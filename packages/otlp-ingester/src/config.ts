@@ -62,12 +62,52 @@ export interface IngesterConfig {
 	sinkMaxBufferedBatches: number;
 	sinkMaxBufferedMb: number;
 	maxBodyBytes: number;
-	/** Per-key requests per minute (server keys). */
+	/** Requests per minute per tenant (repository) for server and upload keys; sliding window. */
 	rateLimitPerMinute: number;
-	/** Per-key requests per minute for publishable client keys. */
+	/** Requests per minute per tenant for publishable client keys; sliding window. */
 	clientRateLimitPerMinute: number;
+	/**
+	 * Records (spans, log records, data points, browser events, profile
+	 * samples) per minute per tenant, server and upload keys
+	 * (RECORD_LIMIT_PER_MINUTE, default 600,000). Checked with the request
+	 * limit; a request is let in while budget is left and charged in full.
+	 */
+	recordLimitPerMinute?: number;
+	/** Records per minute per tenant for client keys (CLIENT_RECORD_LIMIT_PER_MINUTE, default 6,000). */
+	clientRecordLimitPerMinute?: number;
 	/** ClickHouse dedupe lookups per tenant per minute for /v1/logs promotion. */
 	promotionLookupsPerMinute?: number;
+	/**
+	 * POST requests per minute per client address (IPv6 per /64), checked
+	 * before the body is read or a key is looked at (IP_RATE_LIMIT_PER_MINUTE,
+	 * default 6,000; 0 turns it off). Always per process.
+	 */
+	ipRateLimitPerMinute?: number;
+	/**
+	 * Validator lookups per minute per client address for keys in neither
+	 * key cache (IP_UNKNOWN_KEY_LOOKUPS_PER_MINUTE, default 30). Past it, such
+	 * keys get 429 without the validator being asked.
+	 */
+	ipUnknownKeyLookupsPerMinute?: number;
+	/** The same budget for the whole ingester (UNKNOWN_KEY_LOOKUPS_PER_MINUTE, default 600). */
+	unknownKeyLookupsPerMinute?: number;
+	/**
+	 * Redis for limits shared by every replica (AUTTER_REDIS_URL, e.g.
+	 * redis://host:6379 or rediss://…). Unset: each process counts alone.
+	 */
+	redisUrl?: string | null;
+	/**
+	 * Replicas behind the load balancer (AUTTER_INGESTER_REPLICAS, default 1).
+	 * Without Redis, each process enforces limit / replicas, and more than one
+	 * replica without Redis is warned about at startup.
+	 */
+	replicas?: number;
+	/**
+	 * Proxy hops in front of the ingester whose X-Forwarded-For is trusted
+	 * for the client address (TRUST_PROXY, default 1: a load balancer or
+	 * Caddy; 0 when the ingester is exposed directly).
+	 */
+	trustProxy?: number;
 	/** Retention, overridable per deployment. */
 	occurrenceTtlDays: number;
 	spanTtlDays: number;
@@ -107,6 +147,14 @@ export function loopCollapseAfterEnv(raw: string | undefined): number {
 	if (raw === undefined || raw.trim() === "") return 10;
 	const value = Number(raw);
 	return Number.isInteger(value) && value >= 0 ? value : 10;
+}
+
+/** A whole number ≥ 0 (0 allowed: "off" or "no proxy"); anything else is the fallback. */
+function wholeEnv(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (raw === undefined || raw.trim() === "") return fallback;
+	const value = Number(raw);
+	return Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -176,7 +224,15 @@ export function loadConfig(): IngesterConfig {
 		maxBodyBytes: intEnv("MAX_BODY_BYTES", 1024 * 1024),
 		rateLimitPerMinute: intEnv("RATE_LIMIT_PER_MINUTE", 300),
 		clientRateLimitPerMinute: intEnv("CLIENT_RATE_LIMIT_PER_MINUTE", 120),
+		recordLimitPerMinute: intEnv("RECORD_LIMIT_PER_MINUTE", 600_000),
+		clientRecordLimitPerMinute: intEnv("CLIENT_RECORD_LIMIT_PER_MINUTE", 6_000),
 		promotionLookupsPerMinute: intEnv("PROMOTION_LOOKUPS_PER_MINUTE", 30),
+		ipRateLimitPerMinute: wholeEnv("IP_RATE_LIMIT_PER_MINUTE", 6_000),
+		ipUnknownKeyLookupsPerMinute: intEnv("IP_UNKNOWN_KEY_LOOKUPS_PER_MINUTE", 30),
+		unknownKeyLookupsPerMinute: intEnv("UNKNOWN_KEY_LOOKUPS_PER_MINUTE", 600),
+		redisUrl: process.env.AUTTER_REDIS_URL || null,
+		replicas: intEnv("AUTTER_INGESTER_REPLICAS", 1),
+		trustProxy: wholeEnv("TRUST_PROXY", 1),
 		occurrenceTtlDays: intEnv("OCCURRENCE_TTL_DAYS", 14),
 		spanTtlDays: intEnv("SPAN_TTL_DAYS", 7),
 		metricsTtlDays: intEnv("METRICS_TTL_DAYS", 90),
@@ -200,4 +256,18 @@ export function loadConfig(): IngesterConfig {
 		);
 	}
 	return config;
+}
+
+/**
+ * The startup warning for limits that are not shared: more than one replica
+ * and no Redis. Null when there is nothing to warn about.
+ */
+export function limitsWarning(config: Pick<IngesterConfig, "redisUrl" | "replicas">): string | null {
+	const replicas = config.replicas ?? 1;
+	if (config.redisUrl || replicas <= 1) return null;
+	return (
+		`AUTTER_INGESTER_REPLICAS=${replicas} but AUTTER_REDIS_URL is not set: rate limits, the unknown-key budget ` +
+		`and log promotion lookups are counted in each process, each enforcing 1/${replicas} of every limit. ` +
+		`That holds only while the load balancer spreads each tenant evenly; set AUTTER_REDIS_URL to share them.`
+	);
 }

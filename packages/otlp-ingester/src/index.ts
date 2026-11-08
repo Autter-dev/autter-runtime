@@ -1,14 +1,17 @@
-import { loadConfig } from "./config.js";
+import { limitsWarning, loadConfig } from "./config.js";
 import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
 
 const config = loadConfig();
-const { app, store, sink, reportIngesterInfo, drops, collapse } = createIngesterApp(config);
+const { app, store, sink, reportIngesterInfo, drops, collapse, limits } = createIngesterApp(config);
+const sharingWarning = limitsWarning(config);
+if (sharingWarning) console.warn(`WARNING: ${sharingWarning}`);
 
 const server = app.listen(config.port, () => {
 	console.log(
 		`autter otlp-ingester ${ingesterVersion()} listening on :${config.port} ` +
-			`(clickhouse: ${config.clickhouseUrl ? "configured" : "NOT configured"})`,
+			`(clickhouse: ${config.clickhouseUrl ? "configured" : "NOT configured"}; ` +
+			`rate limits: ${limits.mode === "redis" ? "shared (redis)" : `per process, 1/${config.replicas ?? 1} each`})`,
 	);
 });
 
@@ -45,6 +48,7 @@ async function shutdown(signal: string) {
 			.stop()
 			.finally(() => drops.stop())
 			.finally(() => store.close())
+			.finally(() => limits.close())
 			.finally(() => process.exit(0));
 	});
 	setTimeout(() => process.exit(1), 10_000).unref();
@@ -54,7 +58,17 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
 export { createIngesterApp } from "./server.js";
-export { loadConfig } from "./config.js";
+export { limitsWarning, loadConfig } from "./config.js";
+export {
+	addressGroup,
+	LruMap,
+	MemoryLimitStore,
+	RateLimits,
+	RedisLimitStore,
+	type LimitCheck,
+	type LimitDecision,
+	type LimitStore,
+} from "./limits.js";
 export * from "./compat.js";
 export { SinkForwarder, type SinkDrop, type SinkStats, type SinkTuning } from "./sink.js";
 export {

@@ -44,6 +44,9 @@ services:
       AUTTER_KEY_VALIDATOR_TOKEN: ${AUTTER_KEY_VALIDATOR_TOKEN:-}
       AUTTER_SINK_URL: ${AUTTER_SINK_URL:-}
       AUTTER_SINK_TOKEN: ${AUTTER_SINK_TOKEN:-}
+      # Caddy is the one proxy hop in front: trust its X-Forwarded-For for
+      # the per-address limits. One ingester, so limits need no Redis.
+      TRUST_PROXY: 1
     # Not published to the host — only Caddy reaches it, over the internal
     # compose network. TLS termination and the public port live on Caddy.
 

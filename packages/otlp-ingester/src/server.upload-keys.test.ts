@@ -55,10 +55,17 @@ async function start() {
 	}
 	const call = (route: string, key: string, body: unknown = {}) => {
 		const [method, path] = route.split(" ") as [string, string];
+		// /v1/profiles checks its content type before the key (1.12.0): send
+		// what it takes, so the key check is what answers.
+		const pprof = path === "/v1/profiles";
 		return fetch(`${base}${path}`, {
 			method,
-			headers: { "content-type": "application/json", authorization: `Bearer ${key}`, origin: "https://app.test" },
-			body: method === "GET" ? undefined : JSON.stringify(body),
+			headers: {
+				"content-type": pprof ? "application/x-pprof" : "application/json",
+				authorization: `Bearer ${key}`,
+				origin: "https://app.test",
+			},
+			body: method === "GET" ? undefined : pprof ? new Uint8Array([0]) : JSON.stringify(body),
 		});
 	};
 	return {

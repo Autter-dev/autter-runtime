@@ -25,6 +25,8 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_PASSWORD: dev
       AUTTER_INGEST_KEYS: ${AUTTER_INGEST_KEYS:-}
+      # Exposed directly (no proxy): don't trust X-Forwarded-For.
+      TRUST_PROXY: 0
     depends_on:
       clickhouse:
         condition: service_healthy

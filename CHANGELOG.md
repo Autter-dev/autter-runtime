@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- Ingester rate limits and key lookups can no longer be abused (`otlp-ingester`). Reported by Ishaan and Shoib Ahmad. Tenant limits are sliding windows (no burst at the minute boundary) on requests and on records (`RECORD_LIMIT_PER_MINUTE`, default 600,000; `CLIENT_RECORD_LIMIT_PER_MINUTE`, default 6,000), per repository and key type rather than per key, and answer `429` with `Retry-After`. They are shared by every replica through Redis when `AUTTER_REDIS_URL` is set; otherwise each process enforces 1/`AUTTER_INGESTER_REPLICAS` of each limit and more than one replica without Redis is warned about at startup. A Redis failure falls back to the process's own count. Limiter maps evict the least recently used entry instead of clearing at 50,000 keys, and only resolved tenants enter them, so a flood of distinct keys can't reset a throttled tenant. Key lookups: accepted and refused keys are cached apart, so junk keys can't evict working ones; concurrent requests for one key share one validator call; a key the ingester has no answer for spends an unknown-key budget (`IP_UNKNOWN_KEY_LOOKUPS_PER_MINUTE`, default 30 per address, and `UNKNOWN_KEY_LOOKUPS_PER_MINUTE`, default 600 overall) before the validator is asked, and gets `429` past it. 404s, unparseable bodies and wrong content types are refused before any key lookup, and their drop counts use the key caches only. A per-address limit (`IP_RATE_LIMIT_PER_MINUTE`, default 6,000) runs before the body is read; the address comes from `X-Forwarded-For` through `TRUST_PROXY` hops (default 1, right for the AWS and single-server deployments; set `0` when the ingester is exposed directly). Loop collapse stays per process (why: `docs/ARCHITECTURE.md`).
+
 ## [1.11.0] - 2026-10-26
 
 Packages: `otlp-ingester` 1.11.0, `runtime-node` 1.9.0, `runtime-edge` 1.4.0, `runtime-next` 1.9.0 (now requires `runtime-node` ^1.9.0, `runtime-edge` ^1.4.0, `runtime-browser` ^1.8.0), `runtime-browser` 1.8.0, `runtime-cli` 1.3.0. Compat features `caught_errors`, `route_percentiles` (migration `0022-route-latency-1m`), `server_source_maps` and `cause_fingerprint`. Upgrade the ingester first.

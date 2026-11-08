@@ -124,14 +124,48 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `SOURCE_MAP_CACHE_MB` | `64` | Memory budget (decoded size, function scope tables included) for parsed source maps used to symbolicate browser, Node and edge frames at ingest; least recently used maps are evicted, and a map that needs more than half of it is used without being kept. The source contents of cached maps (context lines) are kept apart, one file per entry, under a budget of the same size, so they never change which maps are cached |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap |
 | `LOOP_COLLAPSE_AFTER` | `10` | Identical occurrences stored per minute before the rest of the minute is collapsed into one sample with an exact count; `0` turns loop collapse off |
-| `RATE_LIMIT_PER_MINUTE` | `300` | Per-key fixed window (server keys) |
-| `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Per-key fixed window (client keys) |
+| `RATE_LIMIT_PER_MINUTE` | `300` | Requests per minute per tenant (repository), server keys; upload keys get their own window of the same size. Sliding window |
+| `CLIENT_RATE_LIMIT_PER_MINUTE` | `120` | Requests per minute per tenant, client keys. Sliding window |
+| `RECORD_LIMIT_PER_MINUTE` | `600000` | Records (spans, log records, data points, events, profile samples) per minute per tenant, server keys. A request is let in while budget is left and charged in full |
+| `CLIENT_RECORD_LIMIT_PER_MINUTE` | `6000` | The same for client keys |
 | `PROMOTION_LOOKUPS_PER_MINUTE` | `30` | Per-tenant ClickHouse dedupe lookups for `/v1/logs` error promotion; over budget, records are promoted with in-batch dedupe only |
+| `IP_RATE_LIMIT_PER_MINUTE` | `6000` | POST requests per minute per client address (IPv6 per /64), before the body is read or the key looked at; always per process; `0` turns it off |
+| `IP_UNKNOWN_KEY_LOOKUPS_PER_MINUTE` | `30` | Validator calls per minute per client address for keys the ingester has no cached answer for; past it such keys get `429` with `Retry-After` |
+| `UNKNOWN_KEY_LOOKUPS_PER_MINUTE` | `600` | The same budget for the whole ingester |
+| `AUTTER_REDIS_URL` | — | Redis (≥ 6) shared by all replicas for the tenant limits, the unknown-key budgets and promotion lookups (`redis://…` or `rediss://…`). If Redis fails, checks fall back to the process's own count until it is back |
+| `AUTTER_INGESTER_REPLICAS` | `1` | Replicas behind the load balancer. Without Redis each process enforces 1/N of every shared limit, and N > 1 logs a warning at startup |
+| `TRUST_PROXY` | `1` | Proxy hops whose `X-Forwarded-For` is trusted for the client address (`1` behind an ALB or Caddy; `0` when exposed directly) |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 | `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
 | `LOG_TTL_DAYS` | `14` | Retention for `runtime_logs` (request summaries are always kept, never sampled, so this is the main volume knob). Unlike the other TTLs it is also applied to **existing** tables: at boot the ingester compares it with the table's TTL and runs `ALTER TABLE … MODIFY TTL` only when they differ; a failure is logged and retried next boot |
 | `AUTTER_REDACT_VALUE_PATTERNS` | — | JSON array of extra regex sources masked in stored/forwarded text and attribute values (built-in secret/PII patterns always apply) |
 | `AUTTER_REDACT_KEY_PATTERNS` | — | JSON array of extra regex sources for attribute keys whose values are masked wholesale |
+
+## Rate limits and key lookups (1.12.0)
+
+In the order a request meets them:
+
+1. **Per address.** `IP_RATE_LIMIT_PER_MINUTE` POSTs per client address
+   (from `X-Forwarded-For` through `TRUST_PROXY` hops; IPv6 grouped by
+   /64), before the body is read. Always counted in the process.
+2. **Route and body.** Unknown routes (404), bodies that don't parse (400,
+   413) and content types a route doesn't take (415) are refused before the
+   key is resolved. They are attributed from the key caches only, never by
+   asking the validator. Protobuf is decoded, and source maps are read, only
+   after the key is checked.
+3. **Key lookup.** Accepted and refused keys are cached apart (10,000 and
+   50,000 entries, least recently used evicted, 60 s), so junk keys can't
+   evict a working one. Concurrent requests for one key share one validator
+   call. A key in neither cache spends the unknown-key budget (per address,
+   then overall) before the validator is asked; past it the request gets
+   `429` with `Retry-After`, never a `401`. Keys over 512 characters or with
+   spaces or control characters are refused without a call.
+4. **Per tenant.** Requests and records per minute, sliding windows, per
+   repository and key type (server, client, upload).
+
+Limits are shared across replicas through `AUTTER_REDIS_URL`. Without it,
+set `AUTTER_INGESTER_REPLICAS` so each process enforces its share. Loop
+collapse windows stay per process (see `docs/ARCHITECTURE.md`).
 
 ## Coded errors and request summaries (1.5.0)
 

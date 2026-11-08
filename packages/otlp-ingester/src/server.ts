@@ -4,7 +4,17 @@ import express, {
 	type Request,
 	type Response,
 } from "express";
-import { KeyResolver, RateLimiter } from "./auth.js";
+import { KeyResolver } from "./auth.js";
+import {
+	clientAddress,
+	connectRedis,
+	type LimitStore,
+	MemoryLimitStore,
+	RateLimits,
+	RedisLimitStore,
+	retryAfterSeconds,
+	WINDOW_MS,
+} from "./limits.js";
 import { countTruncations } from "./context.js";
 import {
 	autterKeyHash,
@@ -90,6 +100,17 @@ export interface IngesterApp {
 	drops: IngestDropCounter;
 	/** Loop collapse (1.9.0): `stop()` stores every window's sample (call it before `drops.stop()`). */
 	collapse: LoopCollapser;
+	/** Tenant limits and the unknown-key budget (1.12.0); `close()` disconnects Redis. */
+	limits: RateLimits;
+	keys: KeyResolver;
+}
+
+export interface IngesterDeps {
+	/**
+	 * The shared limit store. Default: Redis at `config.redisUrl` when set,
+	 * else none (each process counts alone). Tests pass their own.
+	 */
+	sharedLimits?: LimitStore | null;
 }
 
 /** The only routes an upload key (`autter_rtu_…`, scope "upload") may call. */
@@ -126,7 +147,7 @@ const SPANS_PER_REQUEST = 5000;
  * its TTL for long-running ingesters). */
 const INGESTER_INFO_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-export function createIngesterApp(config: IngesterConfig): IngesterApp {
+export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {}): IngesterApp {
 	configureRedaction(config);
 	const store = new ClickHouseStore(config);
 	// Browser, Node and edge JS frames are resolved through uploaded source
@@ -141,11 +162,29 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	// watching. Delivery is at-least-once with bounded retries — see sink.ts.
 	const sink = config.sinkUrl ? new SinkForwarder(config) : null;
 	const keys = new KeyResolver(config);
-	const serverRateLimiter = new RateLimiter(config.rateLimitPerMinute);
-	const clientRateLimiter = new RateLimiter(config.clientRateLimitPerMinute);
+	// Tenant request and record limits, the unknown-key budget and log
+	// promotion lookups (limits.ts): shared through Redis when configured,
+	// else per process with each limit divided by AUTTER_INGESTER_REPLICAS.
+	const limits = new RateLimits({
+		shared:
+			deps.sharedLimits !== undefined
+				? deps.sharedLimits
+				: config.redisUrl
+					? new RedisLimitStore(connectRedis(config.redisUrl))
+					: null,
+		replicas: config.replicas ?? 1,
+	});
+	// The per-IP request limit: always this process's own count (it runs on
+	// every POST before the body is read and must never wait on Redis).
+	const addressLimiter = new MemoryLimitStore(100_000);
+	const ipRateLimit = config.ipRateLimitPerMinute ?? 6_000;
+	const ipUnknownKeyLookups = config.ipUnknownKeyLookupsPerMinute ?? 30;
+	const unknownKeyLookups = config.unknownKeyLookupsPerMinute ?? 600;
+	const recordLimit = config.recordLimitPerMinute ?? 600_000;
+	const clientRecordLimit = config.clientRecordLimitPerMinute ?? 6_000;
 	// ClickHouse dedupe lookups made by /v1/logs promotion, per tenant. Far
 	// tighter than the request limit: each lookup is a query, not an insert.
-	const promotionLookupLimiter = new RateLimiter(config.promotionLookupsPerMinute ?? 30);
+	const promotionLookupLimit = config.promotionLookupsPerMinute ?? 30;
 	const version = ingesterVersion();
 	const sdkVersions = new SdkVersionTracker((ctx, rows) => store.insertSdkVersions(ctx, rows));
 	// What was refused or not stored, per tenant and minute (EI-27). Written
@@ -268,41 +307,105 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	}
 
 	/**
-	 * Count a refusal made before any route ran (body-parser errors, unknown
-	 * routes): resolve the key in the background to find the tenant. Never
-	 * delays the response, never throws.
+	 * Who sent a request, from what is already known about its key (static
+	 * or cached; see KeyResolver.peek): never a validator call. Refusals made
+	 * before a key is resolved (unknown routes, unparseable bodies, the wrong
+	 * content type) are attributed with it, so they cost the validator nothing.
 	 */
+	function knownSender(req: Request): IngestContext | { keyHash: string } | null {
+		const key = keys.extractKey(req);
+		if (!key) return null;
+		return keys.peek(key) ?? { keyHash: autterKeyHash(key) };
+	}
+
+	/** Count a refusal made before any route ran (body-parser errors, unknown routes). Never throws. */
 	function countUnrouted(req: Request, reason: DropReason, status: number): void {
 		if (!store.configured) return;
 		const route = dropRoute(req.path);
 		const records = recordsInBody(route, req.body, Boolean(req.is("application/x-protobuf")));
-		const key = keys.extractKey(req);
-		if (!key) {
-			drops.record({ tenant: null, route, reason, status, records });
-			return;
-		}
-		keys
-			.resolveDetailed(key)
-			.then((resolution) =>
-				drops.record({
-					tenant: resolution.ctx,
-					...(resolution.ctx ? {} : { keyHash: autterKeyHash(key) }),
-					route,
-					reason,
-					status,
-					records,
-				}),
-			)
-			.catch(() => {});
+		const who = knownSender(req);
+		drops.record({
+			tenant: who && "orgId" in who ? who : null,
+			...(who && "keyHash" in who ? { keyHash: who.keyHash } : {}),
+			route,
+			reason,
+			status,
+			records,
+		});
+	}
+
+	/**
+	 * The unknown-key budget, spent only when a key in neither key cache is
+	 * about to go to the validator: per client address, then for the whole
+	 * ingester (both shared when Redis is configured). A refused key gets 429.
+	 */
+	function unknownKeyGate(req: Request, retry: { ms: number }): () => Promise<boolean> {
+		return async () => {
+			const perAddress = await limits.take([
+				{ key: `{addr:${clientAddress(req)}}:unknown-keys`, cost: 1, limit: ipUnknownKeyLookups },
+			]);
+			if (!perAddress.allowed) {
+				retry.ms = perAddress.retryAfterMs;
+				return false;
+			}
+			const overall = await limits.take([{ key: "{all}:unknown-keys", cost: 1, limit: unknownKeyLookups }]);
+			if (!overall.allowed) {
+				retry.ms = overall.retryAfterMs;
+				return false;
+			}
+			return true;
+		};
+	}
+
+	/**
+	 * The tenant's request and record limits (sliding windows, limits.ts).
+	 * Client keys have their own, tighter pair; upload keys count apart from
+	 * telemetry with the server limits, so a CI upload can't starve ingest.
+	 */
+	async function withinTenantLimits(req: Request, res: Response, ctx: IngestContext): Promise<boolean> {
+		const client = ctx.scope === "client";
+		const tenant = `{${ctx.scope}:${ctx.orgId}:${ctx.repositoryId}}`;
+		const records = Math.max(1, recordsInBody(dropRoute(req.path), req.body, Boolean(req.is("application/x-protobuf"))));
+		const decision = await limits.take([
+			{ key: `${tenant}:requests`, cost: 1, limit: client ? config.clientRateLimitPerMinute : config.rateLimitPerMinute },
+			{ key: `${tenant}:records`, cost: records, limit: client ? clientRecordLimit : recordLimit },
+		]);
+		if (decision.allowed) return true;
+		res.setHeader("retry-after", retryAfterSeconds(decision.retryAfterMs));
+		refuse(req, res, ctx, "rate_limited", 429, { error: "rate limit exceeded" }, records);
+		return false;
 	}
 
 	const app = express();
 	app.disable("x-powered-by");
+	// The client address per-IP limits count against: X-Forwarded-For from
+	// this many trusted proxy hops (TRUST_PROXY, default 1).
+	app.set("trust proxy", config.trustProxy ?? 1);
 	// Every response names the ingester version, so SDKs (and the browser
 	// relay) learn it for free from responses they already receive.
 	app.use((_req, res, next) => {
 		res.setHeader(INGESTER_VERSION_HEADER, version);
 		next();
+	});
+	// Per-address request limit (1.12.0), before any body is read or key
+	// looked at: one address can't make the ingester parse, resolve keys or
+	// count drops faster than this, whatever keys and paths it sends.
+	app.use((req, res, next) => {
+		if (req.method !== "POST" || ipRateLimit <= 0) {
+			next();
+			return;
+		}
+		const decision = addressLimiter.takeSync([{ key: clientAddress(req), cost: 1, limit: ipRateLimit }]);
+		if (decision.allowed) {
+			next();
+			return;
+		}
+		res.setHeader("retry-after", retryAfterSeconds(decision.retryAfterMs));
+		res.status(429).json({ error: "too many requests from this address" });
+		if (store.configured) {
+			// The body is not read: nothing to count but the request.
+			drops.record({ tenant: null, route: dropRoute(req.path), reason: "rate_limited", status: 429, records: 0 });
+		}
 	});
 	app.use(express.raw({ limit: "1mb", type: ["application/x-pprof"] }));
 	// A check names at most 500 maps: well under 1 MB, whatever MAX_BODY_BYTES is.
@@ -461,11 +564,18 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 			refuse(req, res, null, "missing_key", 401, { error: "missing ingest key" });
 			return null;
 		}
-		const resolution = await keys.resolveDetailed(key);
+		const retry = { ms: WINDOW_MS };
+		const resolution = await keys.resolveDetailed(key, unknownKeyGate(req, retry));
 		const ctx = resolution.ctx;
 		if (!ctx) {
 			// No tenant: counted against the null tenant, with the key's hash
 			// when it is an Autter key (ingest-drops.ts autterKeyHash).
+			if (resolution.failure === "lookup_limited") {
+				// Not verified, not refused: the exporter retries after this.
+				res.setHeader("retry-after", retryAfterSeconds(retry.ms));
+				refuse(req, res, { keyHash: autterKeyHash(key) }, "rate_limited", 429, { error: "too many unrecognised keys, retry later" });
+				return null;
+			}
 			refuse(req, res, { keyHash: autterKeyHash(key) }, resolution.failure, 401, { error: "invalid ingest key" });
 			return null;
 		}
@@ -496,22 +606,14 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 				refuse(req, res, ctx, "origin_not_allowed", 403, { error: "origin not allowed for this key" });
 				return null;
 			}
-			if (!clientRateLimiter.allow(key)) {
-				refuse(req, res, ctx, "rate_limited", 429, { error: "rate limit exceeded" });
-				return null;
-			}
-			return ctx;
+			return (await withinTenantLimits(req, res, ctx)) ? ctx : null;
 		} else if (ctx.scope !== "server") {
 			// KeyResolver never yields another scope; refuse rather than
 			// treat an unknown one as a server key.
 			refuse(req, res, ctx, "key_scope_not_allowed", 403, { error: "key scope not allowed" });
 			return null;
 		}
-		if (!serverRateLimiter.allow(key)) {
-			refuse(req, res, ctx, "rate_limited", 429, { error: "rate limit exceeded" });
-			return null;
-		}
-		return ctx;
+		return (await withinTenantLimits(req, res, ctx)) ? ctx : null;
 	}
 
 	/** A stack's frames, innermost first; none when it does not parse. */
@@ -645,7 +747,10 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		const seen = new Set<string>();
 		const ownIds = fingerprinted.map((o) => o.occurrenceId);
 		for (const lookup of promotionLookups(candidates)) {
-			if (!promotionLookupLimiter.allow(`${ctx.orgId}:${ctx.repositoryId}`)) break;
+			const budget = await limits.take([
+				{ key: `{server:${ctx.orgId}:${ctx.repositoryId}}:promotion-lookups`, cost: 1, limit: promotionLookupLimit },
+			]);
+			if (!budget.allowed) break;
 			try {
 				const found = await store.recentOccurrenceTraceIds(
 					ctx,
@@ -714,12 +819,13 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	}
 
 	app.post("/v1/profiles", asyncRoute(async (req, res) => {
-		const ctx = await authenticate(req, res, "otlp");
-		if (!ctx) return;
+		// Checked before the key: a request that can't be stored never costs a lookup.
 		if (!req.is("application/x-pprof") || !Buffer.isBuffer(req.body)) {
-			refuse(req, res, ctx, "unsupported_media_type", 415, { error: "expected application/x-pprof" });
+			refuse(req, res, knownSender(req), "unsupported_media_type", 415, { error: "expected application/x-pprof" });
 			return;
 		}
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
 		const service = req.header("x-autter-service")?.trim() ?? "";
 		const environment = req.header("x-autter-environment")?.trim() || "production";
 		const release = req.header("x-autter-release")?.trim() ?? "";
@@ -792,12 +898,13 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	}));
 
 	app.post("/v1/traces", asyncRoute(async (req, res) => {
-		const ctx = await authenticate(req, res, "otlp");
-		if (!ctx) return;
+		// Checked before the key: a request that can't be stored never costs a lookup.
 		if (unsupportedOtlpBody(req)) {
-			refuse(req, res, ctx, "unsupported_media_type", 415, UNSUPPORTED_OTLP);
+			refuse(req, res, knownSender(req), "unsupported_media_type", 415, UNSUPPORTED_OTLP);
 			return;
 		}
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
 		let request: OtlpTraceRequest;
 		if (req.is("application/x-protobuf")) {
 			try {
@@ -860,12 +967,13 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	}));
 
 	app.post("/v1/logs", asyncRoute(async (req, res) => {
-		const ctx = await authenticate(req, res, "otlp");
-		if (!ctx) return;
+		// Checked before the key: a request that can't be stored never costs a lookup.
 		if (unsupportedOtlpBody(req)) {
-			refuse(req, res, ctx, "unsupported_media_type", 415, UNSUPPORTED_OTLP);
+			refuse(req, res, knownSender(req), "unsupported_media_type", 415, UNSUPPORTED_OTLP);
 			return;
 		}
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
 		let logs: ReturnType<typeof normalizeLogs>;
 		let logsRequest: OtlpLogsRequest;
 		let truncated: number;
@@ -911,12 +1019,13 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	}));
 
 	app.post("/v1/metrics", asyncRoute(async (req, res) => {
-		const ctx = await authenticate(req, res, "otlp");
-		if (!ctx) return;
+		// Checked before the key: a request that can't be stored never costs a lookup.
 		if (unsupportedOtlpBody(req)) {
-			refuse(req, res, ctx, "unsupported_media_type", 415, UNSUPPORTED_OTLP);
+			refuse(req, res, knownSender(req), "unsupported_media_type", 415, UNSUPPORTED_OTLP);
 			return;
 		}
+		const ctx = await authenticate(req, res, "otlp");
+		if (!ctx) return;
 		let request: OtlpMetricsRequest;
 		if (req.is("application/x-protobuf")) {
 			try {
@@ -971,18 +1080,20 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 	}));
 
 	app.post("/v1/browser", asyncRoute(async (req, res) => {
-		const ctx = await authenticate(req, res, "browser");
-		if (!ctx) return;
 		let body: unknown = req.body;
 		if (typeof body === "string") {
 			// text/plain from a cross-origin sendBeacon — see CORS note above.
+			// Parsed before the key (like JSON bodies, which body-parser reads
+			// before any route): unparseable beacons never cost a lookup.
 			try {
 				body = JSON.parse(body);
 			} catch {
-				refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid json" }, 0);
+				refuse(req, res, knownSender(req), "invalid_payload", 400, { error: "invalid json" }, 0);
 				return;
 			}
 		}
+		const ctx = await authenticate(req, res, "browser");
+		if (!ctx) return;
 		// The envelope must be valid; each event is validated on its own and
 		// an invalid one is dropped and counted (1.8.0), not the whole beacon.
 		const parsed = parseBrowserPayload(body);
@@ -1044,15 +1155,15 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 
 	// A POST to a path nobody serves (a collector endpoint with /v1/traces
 	// twice, an exporter on the wrong base path): counted, then Express's
-	// usual 404.
+	// usual 404. Its key is never resolved (knownSender: cache only).
 	app.use((req: Request, _res: Response, next: NextFunction) => {
 		if (req.method === "POST") countUnrouted(req, "unknown_route", 404);
 		next();
 	});
 
 	// Body-parser errors (oversized/malformed JSON) → clean 4xx, not a stack.
-	// They happen before any route ran, so the tenant is resolved in the
-	// background to count them.
+	// They happen before any route ran: the tenant comes from the key caches
+	// only (knownSender), never from a validator call.
 	app.use(
 		(
 			err: Error & { type?: string; status?: number },
@@ -1081,5 +1192,5 @@ export function createIngesterApp(config: IngesterConfig): IngesterApp {
 		},
 	);
 
-	return { app, store, sink, reportIngesterInfo, drops, collapse };
+	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys };
 }

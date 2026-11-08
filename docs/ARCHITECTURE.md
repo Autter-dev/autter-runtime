@@ -406,7 +406,17 @@ migration `0021-occurrence-collapsed-count`.
   `folded`, `samplesFlushed`, `overflow`, `failedFlushes`).
 - Windows are per ingester process: N replicas behind a load balancer store
   up to N samples (and N × `LOOP_COLLAPSE_AFTER` occurrences) a minute per
-  identity; the count stays exact.
+  identity; the count stays exact. They stay per process even with
+  `AUTTER_REDIS_URL` set (1.12.0), on purpose: a window holds the sample
+  occurrence itself and the folds of requests whose ClickHouse writes have
+  not finished (`commit` / `rollback`), so sharing it would mean a Redis
+  round trip per occurrence, sample payloads in Redis, and one replica
+  owning each window's flush. What sharing would save is bounded and small
+  (at most N − 1 extra samples and (N − 1) × `LOOP_COLLAPSE_AFTER` rows a
+  minute per identity), and nothing is miscounted without it. Trace dedupe
+  needs nothing shared: it runs on one export batch. The ClickHouse lookups
+  `/v1/logs` promotion makes to dedupe against recent traces are budgeted
+  per tenant through the shared limiter like every other limit.
 
 Reading an exact count from ClickHouse: per distinct `occurrence_id` (an
 exporter retry can store a row twice), `1 + collapsed_count`:

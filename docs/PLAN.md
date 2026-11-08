@@ -46,7 +46,8 @@ limiting, source maps (symbolication is a backend concern).
    (`otlp-proto.ts`), verified against the OTel proto exporter; unlocks Go,
    Rust, Python, Java, .NET SDKs with default settings.
 2. ~~gzip request bodies~~ **shipped** (body-parser inflation on all parsers).
-3. Redis-backed rate limiting (multi-replica deployments).
+3. ~~Redis-backed rate limiting (multi-replica deployments)~~ **shipped**
+   (1.12.0): sliding windows on requests and records, `AUTTER_REDIS_URL`.
 4. `/healthz` deep check (ClickHouse ping) + Prometheus `/metrics` self-telemetry.
 5. Backpressure: buffered ClickHouse inserts with bounded queue + drop policy.
 6. Container image published to GHCR on tag (`ghcr.io/autter-dev/otlp-ingester`).

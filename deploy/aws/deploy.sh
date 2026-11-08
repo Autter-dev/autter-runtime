@@ -17,6 +17,8 @@
 #   AUTTER_KEY_VALIDATOR_TOKEN_SECRET_ARN   (with KEY_VALIDATOR_URL set)
 #   AUTTER_SINK_TOKEN_SECRET_ARN            (with SINK_URL set)
 #   AUTTER_INGEST_KEYS_SECRET_ARN           (static keys JSON, if no validator)
+#   AUTTER_REDIS_URL_SECRET_ARN             (redis://… shared by all tasks for rate
+#                                            limits; strongly recommended with >1 task)
 # Optional env:
 #   CLUSTER               default autter-prod
 #   SERVICE               default autter-otlp-ingester
@@ -28,6 +30,10 @@
 #   CLICKHOUSE_USER       default "default"
 #   CLICKHOUSE_DATABASE   default autter_runtime
 #   IMAGE_TAG             default <git sha>
+#   INGESTER_REPLICAS     tasks behind the ALB (default: the service's current
+#                         desired count, else 1). Without Redis each task
+#                         enforces 1/N of every rate limit.
+#   TRUST_PROXY           default 1 (the ALB appends the client address)
 #   SKIP_BUILD=1          reuse an already-pushed IMAGE_TAG
 set -euo pipefail
 
@@ -73,13 +79,26 @@ secrets_json="[
   {\"name\":\"AUTTER_SINK_TOKEN\",\"valueFrom\":\"${AUTTER_SINK_TOKEN_SECRET_ARN}\"}"
 [[ -n "${AUTTER_INGEST_KEYS_SECRET_ARN:-}" ]] && secrets_json+=",
   {\"name\":\"AUTTER_INGEST_KEYS\",\"valueFrom\":\"${AUTTER_INGEST_KEYS_SECRET_ARN}\"}"
+[[ -n "${AUTTER_REDIS_URL_SECRET_ARN:-}" ]] && secrets_json+=",
+  {\"name\":\"AUTTER_REDIS_URL\",\"valueFrom\":\"${AUTTER_REDIS_URL_SECRET_ARN}\"}"
 secrets_json+="]"
+
+if [[ -z "${INGESTER_REPLICAS:-}" ]]; then
+  INGESTER_REPLICAS=$(aws ecs describe-services --cluster "${CLUSTER}" --services "${SERVICE}" --region "$AWS_REGION" \
+    --query 'services[0].desiredCount' --output text 2>/dev/null || true)
+  [[ "$INGESTER_REPLICAS" =~ ^[0-9]+$ && "$INGESTER_REPLICAS" -ge 1 ]] || INGESTER_REPLICAS=1
+fi
+if [[ "$INGESTER_REPLICAS" -gt 1 && -z "${AUTTER_REDIS_URL_SECRET_ARN:-}" ]]; then
+  echo "!! ${INGESTER_REPLICAS} tasks and no AUTTER_REDIS_URL_SECRET_ARN: rate limits are per task (1/${INGESTER_REPLICAS} each)."
+fi
 
 env_json="[
   {\"name\":\"PORT\",\"value\":\"4318\"},
   {\"name\":\"NODE_ENV\",\"value\":\"production\"},
   {\"name\":\"CLICKHOUSE_USER\",\"value\":\"${CLICKHOUSE_USER:-default}\"},
-  {\"name\":\"CLICKHOUSE_DATABASE\",\"value\":\"${CLICKHOUSE_DATABASE:-autter_runtime}\"}"
+  {\"name\":\"CLICKHOUSE_DATABASE\",\"value\":\"${CLICKHOUSE_DATABASE:-autter_runtime}\"},
+  {\"name\":\"AUTTER_INGESTER_REPLICAS\",\"value\":\"${INGESTER_REPLICAS}\"},
+  {\"name\":\"TRUST_PROXY\",\"value\":\"${TRUST_PROXY:-1}\"}"
 [[ -n "${KEY_VALIDATOR_URL:-}" ]] && env_json+=",
   {\"name\":\"AUTTER_KEY_VALIDATOR_URL\",\"value\":\"${KEY_VALIDATOR_URL}\"}"
 [[ -n "${SINK_URL:-}" ]] && env_json+=",

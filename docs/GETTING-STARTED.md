@@ -13,13 +13,13 @@ backend with two small packages and one ingest endpoint. This guide takes
 you from zero to seeing data in ClickHouse.
 
 - [1. Concepts (2 minutes)](#1-concepts)
-- [2. Run the ingester](#2-run-the-ingester)
+- [2. Run the ingester](#2-run-the-ingester), then [check it in one command](#check-it-before-you-instrument-anything)
 - [3. Instrument your backend](#3-instrument-your-backend)
 - [LLM instrumentation guide](LLM-INSTRUMENTATION.md)
 - [4. Instrument your frontend](#4-instrument-your-frontend)
 - [5. Next.js: both in one package](#5-nextjs-both-in-one-package)
 - [6. Other languages (Go, Rust, Python, …)](#6-other-languages)
-- [7. Verify data is flowing](#7-verify-data-is-flowing)
+- [7. See your own events](#7-see-your-own-events)
 - [8. Production checklist](#8-production-checklist)
 
 ## 1. Concepts
@@ -94,6 +94,23 @@ both keys then work:
 export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
 (umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
 ```
+
+### Check it before you instrument anything
+
+From any directory with Node 20+ (no install needed), with the two values
+above exported:
+
+```bash
+npx @autter/runtime-node doctor    # versions, storage, key: sends nothing
+npx @autter/runtime-node verify    # sends a test event and reads it back
+```
+
+`verify` goes through key, network, ingester, storage, auth, ingest,
+stored, trace, release and logs, and stops at the first step that fails with
+what to do. Its test event never opens an issue. Run it again whenever
+events don't show up: it is the first thing to check. Python services:
+`python3 adapters/python/compat.py verify`. Details, sampling and arrival
+times: [Is my data arriving?](DELIVERY.md).
 
 > **That's all the clone is for.** It runs the ingester — you never add
 > code to this checkout. Every step from here on (installing packages,
@@ -196,6 +213,33 @@ try {
   throw err;
 }
 ```
+
+A run that returns normally but did not do its job (a declined payment, an
+empty import) is not an exception. Declare it, so it becomes an issue:
+
+```js
+const { reportOutcome } = require("@autter/runtime-node");
+
+if (!payment.confirmed) reportOutcome("checkout", "payment was not confirmed");
+```
+
+Inside `withRuntimeOperation(name, fn)`, `operation.outcome("failed", message)`
+does the same with the operation's steps and context attached
+([Operation logging](OPERATION-LOGGING.md)).
+
+Test it without an ingester: `@autter/runtime-node/testing` keeps every
+record in memory, so a unit test can assert what would be sent:
+
+```js
+const { captureRuntime, expectOperation } = require("@autter/runtime-node/testing");
+
+const runtime = captureRuntime();
+await request(app).post("/checkout").expect(402);
+expectOperation(runtime, "POST /checkout").toHaveOutcome("degraded");
+runtime.stop();
+```
+
+Then check the real path: `npx @autter/runtime-node verify --service payments-api`.
 
 ESM-only app? Use `--import` plus OTel's loader hook (see the
 [package README](../packages/runtime-node)). Express route timings can be
@@ -413,20 +457,22 @@ exempt GenAI spans in a custom sampler or route them through an always-on
 tracer provider. See
 [INTEGRATIONS.md § LLM / GenAI calls](INTEGRATIONS.md#llm--genai-calls-any-language).
 
-## 7. Verify data is flowing
+## 7. See your own events
 
-First, check the connection from your app's directory. `doctor` reaches the
-ingester, checks versions, and checks the key:
+`verify` (step 2) proves the path works. From your app's directory it also
+compares your installed SDK versions with the ingester's:
 
 ```bash
-npx @autter/runtime-node doctor --endpoint http://localhost:4318 --key autter_rt_local_dev_only
+npx @autter/runtime-node verify --endpoint http://localhost:4318 --key autter_rt_local_dev_only --service payments-api
 ```
 
-It should end with `key        accepted` and exit 0. Against another
-ingester, pass its URL and leave out `--key` (it reads
-`AUTTER_RUNTIME_KEY`).
+Every line should say `ok` (or `warn` for no release) and it exits 0.
+Against another ingester, pass its URL and leave out `--key` (it reads
+`AUTTER_RUNTIME_KEY`). If a step fails, it says which and what to do; your
+app also prints one line the first time the ingester refuses its key or a
+route ([what the SDKs tell you](DELIVERY.md#what-the-sdks-tell-you)).
 
-Then see your event. Trigger an error in your app (a route that throws, or
+Then see your app's own event. Trigger an error in your app (a route that throws, or
 `captureException(new Error("hello from my app"))`), wait a few seconds for
 the batch to flush, and read it back from the local ClickHouse:
 
@@ -438,8 +484,11 @@ docker compose exec clickhouse clickhouse-client --password dev --query "
 ```
 
 Run it in the `autter-runtime` checkout from step 2. A row with your
-service name means the whole path works. No row: re-run `doctor`, and check
-your app's logs for the endpoint it sends to.
+service name means your app's path works. No row while `verify` passes:
+your app sends somewhere else or with another key. Check its logs for the
+endpoint it prints and for an `[autter-runtime]` warning. Server errors take
+up to 2 s, sampled traces 5 s and request counts up to 60 s to arrive
+([arrival times](DELIVERY.md#when-it-arrives)).
 
 More queries:
 

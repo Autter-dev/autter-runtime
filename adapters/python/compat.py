@@ -562,7 +562,7 @@ _NOT_A_KEY = ("", "undefined", "null", "none")
 
 def key_from_env(env: Optional[dict] = None) -> Optional[str]:
     """The ingest key a Python service sends: ``AUTTER_RUNTIME_KEY``, else
-    the bearer token in ``OTEL_EXPORTER_OTLP_[TRACES_]HEADERS``."""
+    the bearer token or ``x-autter-key`` in ``OTEL_EXPORTER_OTLP_[TRACES_]HEADERS``."""
     env = os.environ if env is None else env
     direct = (env.get("AUTTER_RUNTIME_KEY") or "").strip()
     if direct.lower() not in _NOT_A_KEY:
@@ -573,10 +573,11 @@ def key_from_env(env: Optional[dict] = None) -> Optional[str]:
                 continue
             header, value = pair.split("=", 1)
             value = urllib.parse.unquote(value).strip()
-            if header.strip().lower() == "authorization" and value.lower().startswith("bearer "):
-                token = value[7:].strip()
-                if token.lower() not in _NOT_A_KEY:
-                    return token
+            header = header.strip().lower()
+            token = value[7:].strip() if header == "authorization" and value.lower().startswith("bearer ") else (
+                value if header == "x-autter-key" else "")
+            if token.lower() not in _NOT_A_KEY:
+                return token
     return None
 
 

@@ -107,6 +107,8 @@ class KeyFromEnv(unittest.TestCase):
         self.assertIsNone(compat.key_from_env({"AUTTER_RUNTIME_KEY": "undefined"}))
         self.assertEqual(compat.key_from_env({"OTEL_EXPORTER_OTLP_HEADERS": "x-a=b,Authorization=Bearer%20k2"}), "k2")
         self.assertEqual(compat.key_from_env({"OTEL_EXPORTER_OTLP_TRACES_HEADERS": "authorization=Bearer k3"}), "k3")
+        self.assertEqual(compat.key_from_env({"OTEL_EXPORTER_OTLP_HEADERS": "x-autter-key=autter_rt_local_dev_only"}), "autter_rt_local_dev_only")
+        self.assertIsNone(compat.key_from_env({"OTEL_EXPORTER_OTLP_HEADERS": "x-other=1"}))
         self.assertIsNone(compat.key_from_env({}))
 
 

@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [1.12.1] - 2026-11-08
+
+Packages: `otlp-ingester` 1.12.1. The SDKs are unchanged from 1.12.0.
 
 `otlp-ingester`: closes what 1.12.0 left open in the durable sink. The AWS deploy needs `deploy/aws/setup.sh` re-run once (it creates the outbox EFS) and the deploy role allowed `elasticfilesystem:DescribeFileSystems` and `DescribeAccessPoints`.
 

@@ -62,6 +62,18 @@ import type {
  * anything from the payload.
  */
 
+export interface VerifyTableRows {
+	rows: number;
+	services: string[];
+	releases: string[];
+}
+
+export interface VerifyLookup {
+	spans: VerifyTableRows;
+	occurrences: VerifyTableRows;
+	logs: VerifyTableRows | null;
+}
+
 const INSERT_SETTINGS: ClickHouseSettings = {
 	date_time_input_format: "best_effort",
 	async_insert: 1,
@@ -617,6 +629,44 @@ export class ClickHouseStore {
 		return new Set(
 			(await rows.json<{ trace_id: string }>()).map((row) => row.trace_id),
 		);
+	}
+
+	/**
+	 * What this tenant stored for one trace id in the last day: rows per
+	 * table and the services and releases they carry. Backs `GET
+	 * /v1/verify/:traceId`, which `autter-runtime verify` polls to prove a
+	 * test event was persisted. `logs` is null when the logs table (0011)
+	 * does not exist. Throws on failure; the caller decides.
+	 */
+	async verifyLookup(ctx: IngestContext, traceId: string): Promise<VerifyLookup> {
+		await this.ensureSchema();
+		const client = this.getClient();
+		const params = { org: ctx.orgId, repo: ctx.repositoryId, trace: traceId };
+		const one = async (table: string, timeColumn: string): Promise<VerifyTableRows> => {
+			const rows = await client.query({
+				query: `SELECT count() AS rows, groupUniqArray(10)(service) AS services, groupUniqArray(10)(release) AS releases
+					FROM ${this.table(table)}
+					WHERE org_id = {org:String} AND repository_id = {repo:String}
+						AND ${timeColumn} >= now() - INTERVAL 1 DAY AND trace_id = {trace:String}`,
+				query_params: params,
+				format: "JSONEachRow",
+			});
+			const [row] = await rows.json<{ rows: string | number; services: string[]; releases: string[] }>();
+			return {
+				rows: Number(row?.rows ?? 0),
+				services: row?.services ?? [],
+				releases: (row?.releases ?? []).filter(Boolean),
+			};
+		};
+		const [spans, occurrences, logs] = await Promise.all([
+			one("runtime_spans", "started_at"),
+			one("runtime_error_occurrences", "occurred_at"),
+			one("runtime_logs", "occurred_at").catch((err: unknown) => {
+				if (/UNKNOWN_TABLE|doesn't exist|does not exist/i.test(String((err as Error)?.message ?? err))) return null;
+				throw err;
+			}),
+		]);
+		return { spans, occurrences, logs };
 	}
 
 	/** Schema state as of the last ensureSchema attempt — never triggers DDL

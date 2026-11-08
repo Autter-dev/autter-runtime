@@ -64,9 +64,24 @@ import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporte
 import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
 import {
+	configureExportErrors,
+	exportErrorMark,
+	reportUnexplained,
+	GuardedMetricExporter,
+	GuardedSpanExporter,
+	reportExportError,
+	reportSdkProblem,
+	resetExportErrors,
+	settleFlush,
+	type AutterExportError,
+	type AutterExportErrorHandler,
+	type AutterExportSignal,
+	type AutterFlushResult,
+} from "./export-errors.js";
+import {
 	configureRuntimeLogger,
 	currentOperation,
-	flushRuntimeLogs,
+	flushRuntimeLogsOrThrow,
 	noteOperationError,
 	notifyException,
 	recordOperationAiUsage,
@@ -262,6 +277,15 @@ export interface AutterServerOptions {
 	 */
 	autoFlush?: boolean;
 	/**
+	 * Called for every telemetry export or flush that fails: a refused key
+	 * (`kind: "unauthorized"`, status 401), an unreachable ingester, a 5xx, …
+	 * Failures never throw or reject into your app; they are also printed with
+	 * `console.warn` (at most once a minute per kind) and returned by
+	 * `forceFlush()`, `flushRuntimeLogs()` and `emitLlmSelftestTrace()`.
+	 * Errors thrown by the callback are ignored.
+	 */
+	onExportError?: AutterExportErrorHandler;
+	/**
 	 * Mask secrets/PII before anything leaves the process — custom
 	 * attributes, exception messages and stack traces, span status
 	 * messages, URLs/query strings and attributes set by any
@@ -430,9 +454,26 @@ export interface AutterServer {
 	 * awkward (queues, callbacks, batch results). Fire-and-forget.
 	 */
 	trackLlmCall(call: TrackedLlmCall): void;
-	/** Flush and stop all exporters. Call on graceful shutdown. */
+	/**
+	 * Push everything buffered (spans, metrics, logs) out now. Never rejects:
+	 * resolves `{ ok: false, errors }` when an export failed (each error is
+	 * also printed and passed to `onExportError`).
+	 */
+	forceFlush(): Promise<AutterFlushResult>;
+	/**
+	 * Flush and stop all exporters. Call on graceful shutdown. Never rejects:
+	 * a failed final export is printed and passed to `onExportError`.
+	 */
 	shutdown(): Promise<void>;
 }
+
+/** Result of `emitLlmSelftestTrace()`. */
+export interface LlmSelftestResult extends AutterFlushResult {
+	/** Trace id of the fake call ("" when initAutterServer has not run). */
+	traceId: string;
+}
+
+export type { AutterExportError, AutterExportErrorHandler, AutterFlushResult };
 
 // Marks a span as an LLM/GenAI call: OTel GenAI semconv attributes, or the
 // span names the Vercel AI SDK and GenAI instrumentations use. Attributes
@@ -971,13 +1012,18 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// Every trace exporter scrubs spans on the way out, whoever created them
 	// (see redact-exporter.ts): secrets and PII, and URL query values.
 	const queryPolicy = makeUrlQueryPolicy(options.keepQueryParams);
+	// Outermost: a failed batch (a refused key, an unreachable ingester) is
+	// reported where it happens and never thrown (export-errors.ts).
 	const traceExporter = () =>
-		new CountingExporter(
-			new RedactingSpanExporter(
-				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
-				() => redactor,
-				queryPolicy,
+		new GuardedSpanExporter(
+			new CountingExporter(
+				new RedactingSpanExporter(
+					new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+					() => redactor,
+					queryPolicy,
+				),
 			),
+			"traces",
 		);
 	const environment = options.environment ?? process.env.NODE_ENV ?? "production";
 
@@ -986,6 +1032,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
 	debugLog(`initialising service=${options.service} endpoint=${endpoint}`);
 	S.redactor = redactor;
+	configureExportErrors({ endpoint, onExportError: options.onExportError });
 	const distro = options.distro ?? SDK_IDENTITY;
 	configureCompatCheck({ endpoint, enabled: options.compatCheck !== false, sdk: distro });
 
@@ -1050,17 +1097,20 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 
 	const mainSpanProcessor = new BatchSpanProcessor(traceExporter());
 	const metricReader = new PeriodicExportingMetricReader({
-		exporter: new RedactingMetricExporter(
-			new OTLPMetricExporter({
-				url: `${endpoint}/v1/metrics`,
-				headers,
-				// Deltas, not lifetime totals: the ingester SUMs data points
-				// into runtime_metrics_1m, and the default (cumulative)
-				// temporality would re-count every past request on each
-				// 60 s export.
-				temporalityPreference: AggregationTemporalityPreference.DELTA,
-			}),
-			() => redactor,
+		exporter: new GuardedMetricExporter(
+			new RedactingMetricExporter(
+				new OTLPMetricExporter({
+					url: `${endpoint}/v1/metrics`,
+					headers,
+					// Deltas, not lifetime totals: the ingester SUMs data points
+					// into runtime_metrics_1m, and the default (cumulative)
+					// temporality would re-count every past request on each
+					// 60 s export.
+					temporalityPreference: AggregationTemporalityPreference.DELTA,
+				}),
+				() => redactor,
+			),
+			"metrics",
 		),
 		exportIntervalMillis: options.metricIntervalMs ?? 60_000,
 	});
@@ -1086,7 +1136,13 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			...((options.instrumentations ?? []) as never[]),
 		],
 	});
-	sdk.start();
+	try {
+		sdk.start();
+	} catch (error) {
+		// Never take the host down at boot: errors, LLM calls and process
+		// spans still ride the always-on provider below.
+		reportExportError(error, "telemetry", "init");
+	}
 	patchLoadedHttpModules();
 	const stopMemoryMetrics = options.memoryMetrics === false ? null : startMemoryMetrics();
 	noteCompatFeature("endpoint_latency");
@@ -1346,23 +1402,30 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// (NodeSDK exposes no forceFlush(), but the processors we handed it do).
 	const flushTarget: FlushTarget = {
 		forceFlush: async () => {
-			const results = await Promise.allSettled([
-				flushRuntimeLogs(),
-				Promise.resolve().then(() => alwaysOnProvider.forceFlush()),
-				Promise.resolve().then(() => mainSpanProcessor.forceFlush()),
+			const parts: Array<[AutterExportSignal, () => unknown]> = [
+				["logs", () => flushRuntimeLogsOrThrow()],
+				["traces", () => alwaysOnProvider.forceFlush()],
+				["traces", () => mainSpanProcessor.forceFlush()],
 				...(errorTraceBuffer
-					? [Promise.resolve().then(() => errorTraceBuffer.forceFlush())]
+					? [["traces", () => errorTraceBuffer.forceFlush()] as [AutterExportSignal, () => unknown]]
 					: []),
-				Promise.resolve().then(() => metricReader.forceFlush()),
-			]);
-
-			const failed = results.find(
-				(result) => result.status === "rejected",
+				["metrics", () => metricReader.forceFlush()],
+			];
+			const mark = exportErrorMark();
+			const results = await Promise.allSettled(
+				parts.map(([, run]) => Promise.resolve().then(run)),
 			);
 
-			if (failed) {
-				throw failed.reason;
-			}
+			const reasons: unknown[] = [];
+			results.forEach((result, index) => {
+				if (result.status !== "rejected") return;
+				reasons.push(result.reason);
+				// Auto-flush and crash flushes are not awaited by anyone who
+				// could report this; what the exporters already reported is
+				// skipped (export-errors.ts).
+				reportUnexplained(result.reason, parts[index]![0], "flush", mark);
+			});
+			if (reasons.length) throw reasons;
 		},
 	};
 	registerFlushTarget("active-server", flushTarget);
@@ -1380,28 +1443,40 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			runWithSpan(processTracer, name, fn, redactor(attributes)),
 		withLlmCall: (info, fn) => runLlmSpan(llmTracer, info, fn),
 		trackLlmCall: (call) => recordLlmCall(llmTracer, call),
+		// Never rejects: failures are reported and returned (export-errors.ts).
+		forceFlush: () => settleFlush("telemetry", "flush", () => flushTarget.forceFlush()),
+		// Never rejects: an export that fails on the way out (a refused key,
+		// an unreachable ingester) is printed and passed to onExportError.
 		shutdown: async () => {
-			// Before the logger stops: counts the burst limit still holds are sent.
-			if (S.active === server) stopLoggedErrorCapture();
-			const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
-			if (onCrash) process.off("uncaughtExceptionMonitor", onCrash);
-			uninstallRejections?.();
-			stopMemoryMetrics?.();
-			// Clear the shared state, so every copy is back to "not started"
-			// (console output, captures on the global tracer).
-			if (S.active === server) {
-				S.active = null;
-				S.alwaysOnProvider = null;
-				S.handled = null;
-				S.hookRequests = false;
-				S.redactor = makeRedactor(true);
-			}
-			autoFlushHandle?.dispose();
-			autoFlushHandle = null;
-			unregisterFlushTargets();
-			telemetryStats.markAllFlushed();
-			await Promise.allSettled([alwaysOnProvider.shutdown(), sdk.shutdown()]);
-			if (logShutdown[0]?.status === "rejected") throw logShutdown[0].reason;
+			const wasActive = S.active === server;
+			await settleFlush("telemetry", "shutdown", async () => {
+				// Before the logger stops: counts the burst limit still holds are sent.
+				if (S.active === server) stopLoggedErrorCapture();
+				const logShutdown = await Promise.allSettled([shutdownRuntimeLogger()]);
+				if (onCrash) process.off("uncaughtExceptionMonitor", onCrash);
+				uninstallRejections?.();
+				stopMemoryMetrics?.();
+				// Clear the shared state, so every copy is back to "not started"
+				// (console output, captures on the global tracer).
+				if (S.active === server) {
+					S.active = null;
+					S.alwaysOnProvider = null;
+					S.handled = null;
+					S.hookRequests = false;
+					S.redactor = makeRedactor(true);
+				}
+				autoFlushHandle?.dispose();
+				autoFlushHandle = null;
+				unregisterFlushTargets();
+				telemetryStats.markAllFlushed();
+				const stopped = await Promise.allSettled([alwaysOnProvider.shutdown(), sdk.shutdown()]);
+				const failures = [...logShutdown, ...stopped]
+					.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+					.map((result) => result.reason);
+				if (failures.length) throw failures;
+			});
+			// After the shutdown's own failures reached the app's onExportError.
+			if (wasActive && S.active === null) resetExportErrors();
 		},
 	};
 	S.active = server;
@@ -1628,27 +1703,38 @@ export function autterLlmTracer(): Tracer {
  * 1 input + 1 output token, cost 0) and force-flush it, returning the
  * traceId — proves LLM traces reach the ingester without calling any real
  * model. For setup verification only; requires initAutterServer.
+ *
+ * Never rejects, so it is safe to await in an Express 4 route: `ok` says
+ * whether the trace was delivered, `errors` why not (a 401 is a wrong ingest
+ * key). Failures are also printed and passed to `onExportError`.
  */
-export async function emitLlmSelftestTrace(): Promise<{ traceId: string }> {
+export async function emitLlmSelftestTrace(): Promise<LlmSelftestResult> {
 	const provider = S.alwaysOnProvider;
 	if (!provider) {
-		throw new Error(
-			"emitLlmSelftestTrace() requires initAutterServer() to have been called",
+		const error = reportSdkProblem(
+			"not_initialized",
+			"selftest",
+			"emitLlmSelftestTrace() requires initAutterServer() to have been called — nothing was sent",
 		);
+		return { traceId: "", ok: false, errors: [error] };
 	}
 	let traceId = "";
-	await withLlmCall(
-		{
-			provider: "autter-selftest",
-			model: "autter-selftest",
-			attributes: { "autter.selftest": true },
-		},
-		(llm) => {
-			traceId = trace.getActiveSpan()?.spanContext().traceId ?? "";
-			llm.setUsage({ inputTokens: 1, outputTokens: 1 });
-			llm.setCost(0);
-		},
-	);
-	await provider.forceFlush();
-	return { traceId };
+	try {
+		await withLlmCall(
+			{
+				provider: "autter-selftest",
+				model: "autter-selftest",
+				attributes: { "autter.selftest": true },
+			},
+			(llm) => {
+				traceId = trace.getActiveSpan()?.spanContext().traceId ?? "";
+				llm.setUsage({ inputTokens: 1, outputTokens: 1 });
+				llm.setCost(0);
+			},
+		);
+	} catch (error) {
+		return { traceId, ok: false, errors: reportExportError(error, "traces", "selftest") };
+	}
+	const flushed = await settleFlush("traces", "selftest", () => provider.forceFlush());
+	return { traceId, ...flushed };
 }

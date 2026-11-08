@@ -204,34 +204,38 @@ export function installAutterAutoFlush(
 		const targets = options.targets ?? activeFlushTargets();
 		if (targets.length === 0) return true;
 		let timer: NodeJS.Timeout | undefined;
-		const timedOut = new Promise<false>((resolve) => {
-			timer = setTimeout(() => resolve(false), timeoutMs);
+		const timedOut = new Promise<"timeout">((resolve) => {
+			timer = setTimeout(() => resolve("timeout"), timeoutMs);
 		});
 		const drained = Promise.allSettled(
 			targets.map((target) =>
 				Promise.resolve().then(() => target.forceFlush()),
 			),
 		).then((results) =>
-			results.every((result) => result.status === "fulfilled"),
+			results.every((result) => result.status === "fulfilled") ? "ok" as const : "failed" as const,
 		);
 
-		let ok: boolean;
+		let outcome: "ok" | "failed" | "timeout";
 		try {
-				ok = await Promise.race([drained, timedOut]);
+			outcome = await Promise.race([drained, timedOut]);
 		} finally {
 			clearTimeout(timer);
 		}
-		if (ok) {
+		if (outcome === "ok") {
 			telemetryStats.markAllFlushed();
 			if (log) {
 				logger.log("[autter] telemetry flushed");
 			}
+		} else if (outcome === "failed") {
+			// Why it failed (a refused key, an unreachable ingester) was already
+			// printed by the export that hit it (export-errors.ts).
+			logger.error("[autter] flush failed — some telemetry was not delivered");
 		} else {
 			logger.error(
 				`[autter] flush did not finish within ${timeoutMs}ms — some telemetry may be lost`,
 			);
 		}
-		return ok;
+		return outcome === "ok";
 	};
 
 	const flush = (reason = "exit"): Promise<boolean> => {

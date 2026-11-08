@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+`runtime-node`: the SDK never crashes its host app over telemetry it could not deliver.
+
+### Fixes
+
+- Export and flush failures no longer reject into the app (`runtime-node`). With a key the ingester does not accept (the default `docker compose` ingester has no keys, so every export answers 401), `emitLlmSelftestTrace()` awaited `forceFlush()`, which rejected with an array of `OTLPExporterError`s; awaited in an Express 4 route, which does not catch a rejected async handler, that rejection was unhandled and Node 22 exited, losing what was still buffered. `emitLlmSelftestTrace()`, `shutdown()`, `flushRuntimeLogs()` and `initAutterLogging().flush()`/`shutdown()` now always resolve, and the exporters are wrapped so a failed batch, periodic ones included, is reported where it happens instead of only reaching OTel's silent diagnostics. Each failure is printed with `console.warn` at most once a minute per kind, with what to fix (`traces export failed (401 Unauthorized) — check your ingest key …`), and passed to the new `onExportError` option of `initAutterServer` and `initAutterLogging`. `emitLlmSelftestTrace()` resolves `{ traceId, ok, errors }` (also before `initAutterServer`, with `ok: false`, where it used to throw); the new `AutterServer.forceFlush()` and `flushRuntimeLogs()` resolve `{ ok, errors }`. On exit, auto-flush now says a flush failed rather than that it timed out.
+- The Express example handles async route errors on Express 4 (`next(err)`), answers the LLM self-test with 502 and the reason when the trace was not delivered, shuts down gracefully on SIGINT/SIGTERM (`shutdown()`, then exit), logs unhandled rejections instead of exiting, and warns at start when `AUTTER_RUNTIME_KEY` is unset instead of sending a made-up key. `docker-compose.yml` says that without `AUTTER_INGEST_KEYS` every export gets 401, and how to make a key.
+
 ## [1.12.1] - 2026-11-08
 
 Packages: `otlp-ingester` 1.12.1. The SDKs are unchanged from 1.12.0.

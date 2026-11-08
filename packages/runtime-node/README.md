@@ -195,7 +195,7 @@ await autter.withProcessSpan("invoice.rebuild", async () => {
   await rebuildInvoices();
 });
 
-// graceful shutdown flushes exporters:
+// graceful shutdown flushes exporters (never rejects):
 await autter.shutdown();
 ```
 
@@ -418,6 +418,42 @@ exported (e.g. a flush timed out), you get a one-line stderr warning — not
 silent loss. While wiring things up, set `debug: true` (or `AUTTER_DEBUG=1`)
 to see `[autter] exported N span(s)` lines on stderr as batches leave.
 
+### Export failures never crash your app
+
+A wrong ingest key (every export answers 401), an ingester that is down or
+answers 5xx, or a network error never throws or rejects into your code.
+`shutdown()`, `forceFlush()`, `flushRuntimeLogs()`, `emitLlmSelftestTrace()`
+and the background exports all resolve, so awaiting them in an Express 4
+route (which does not catch a rejected async handler) is safe. Each failure
+is instead:
+
+- printed once a minute per kind of failure, with what to fix:
+
+  ```text
+  [autter-runtime] traces export failed (401 Unauthorized) — check your ingest key: the ingester at http://localhost:4318 does not accept it. …
+  ```
+
+- passed to `onExportError`, every time (errors it throws are ignored);
+- returned by the flush that hit it as `{ ok: false, errors }`.
+
+```ts
+const autter = initAutterServer({
+  ...,
+  onExportError: (error) => metrics.increment("autter.export_failed", { kind: error.kind }),
+});
+
+const { ok, errors } = await autter.forceFlush();
+// errors[0]: { kind: "unauthorized", status: 401, signal: "traces", operation: "export", message, error }
+```
+
+`kind` is one of `unauthorized` (401: the key), `forbidden` (403: a client or
+upload key used for server telemetry), `not_found` (404: the endpoint),
+`payload_too_large`, `rate_limited`, `server_error`, `client_error`,
+`unreachable` (connection refused, DNS), `timeout`, `not_initialized` or
+`other`. The original error is on the non-enumerable `error` field, so a
+result can be passed to `res.json()` as it is. `initAutterLogging` takes the
+same option, and its `flush()` returns the same result.
+
 Note on usage rollups: requests are counted from the `http.server.duration`
 metric (100% accurate), under their route template: Express routes and,
 from 1.7.0, Next.js routes (`/blog/[slug]`, from the `next.route` Next puts
@@ -608,9 +644,11 @@ To verify the pipe end-to-end without calling a real model:
 ```ts
 import { emitLlmSelftestTrace } from "@autter/runtime-node";
 
-const { traceId } = await emitLlmSelftestTrace();
+const { traceId, ok, errors } = await emitLlmSelftestTrace();
 // one fake "autter-selftest" call is flushed to the ingester; look it up by
-// traceId in the dashboard's LLM tab (or runtime_llm_calls when self-hosting)
+// traceId in the dashboard's LLM tab (or runtime_llm_calls when self-hosting).
+// Never rejects: ok is false and errors says why when the trace was not
+// delivered (kind "unauthorized" / status 401 is a wrong ingest key).
 ```
 
 ## 4. Process spans (jobs, consumers, crons)

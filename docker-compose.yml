@@ -24,6 +24,13 @@ services:
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_PASSWORD: dev
+      # No key is committed, so by default this is empty and the ingester
+      # answers 401 to every export (it logs "No AUTTER_INGEST_KEYS … all
+      # ingest requests will be rejected with 401" at boot). Generate a key
+      # and its mapping in the git-ignored .env first (docs/GETTING-STARTED.md):
+      #   export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
+      #   printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env
+      # and give apps the same AUTTER_RUNTIME_KEY.
       AUTTER_INGEST_KEYS: ${AUTTER_INGEST_KEYS:-}
       AUTTER_SINK_URL: ${AUTTER_SINK_URL:-}
       AUTTER_SINK_TOKEN: ${AUTTER_SINK_TOKEN:-}

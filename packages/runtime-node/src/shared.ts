@@ -30,6 +30,8 @@ import { debugLog } from "./lifecycle.js";
  *   breadcrumbs trails outside operations
  *   compat      the ingester compatibility check
  *   sinks       the shared drop counter
+ *   exportErrors  failed-export reporting: the onExportError handler,
+ *               the warning rate limit and recent failures
  *
  * Versions: `v` is the layout of this object, not the package version.
  * Within layout 1, fields are only ever added. A copy fills in the slots and

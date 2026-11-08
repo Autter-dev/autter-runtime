@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -219,17 +219,113 @@ test("another replica retrying the same request sends the same dedup tokens", as
 	assert.equal(tokens("runtime_error_occurrences")[0], tokens("runtime_error_occurrences")[1]);
 });
 
-test("insert receipts are bounded and expire", () => {
+test("insert receipts are bounded and expire", async () => {
 	let now = 0;
-	const receipts = new InsertReceipts(2, 1_000, () => now);
-	receipts.add("a", "t1");
-	receipts.add("b", "t1");
-	receipts.add("c", "t1");
+	const receipts = new InsertReceipts({ maxEntries: 2, ttlMs: 1_000, now: () => now });
+	await receipts.add("a", "t1");
+	await receipts.add("b", "t1");
+	await receipts.add("c", "t1");
 	assert.equal(receipts.size, 2);
-	assert.equal(receipts.committed("a").size, 0, "oldest evicted");
-	assert.ok(receipts.committed("c").has("t1"));
+	assert.equal((await receipts.committed("a")).size, 0, "oldest evicted");
+	assert.ok((await receipts.committed("c")).has("t1"));
 	now = 2_000;
-	assert.equal(receipts.committed("c").size, 0, "expired");
+	assert.equal((await receipts.committed("c")).size, 0, "expired");
+});
+
+test("insert receipts survive a restart through their journal, and expired lines are dropped", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "autter-receipts-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const file = join(dir, "insert-receipts.log");
+	let now = 1_000_000;
+	const first = new InsertReceipts({ file, ttlMs: 60_000, now: () => now });
+	await first.add("old", "runtime_spans");
+	now += 50_000;
+	await first.add("d1", "runtime_spans");
+	await first.add("d1", "runtime_metrics_1m");
+	assert.equal(first.mode, "file");
+	now += 20_000; // "old" is now past the TTL; d1 is not
+	const second = new InsertReceipts({ file, ttlMs: 60_000, now: () => now });
+	assert.deepEqual([...(await second.committed("d1"))].sort(), ["runtime_metrics_1m", "runtime_spans"]);
+	assert.equal((await second.committed("old")).size, 0);
+	assert.equal(readFileSync(file, "utf8").trim().split("\n").length, 2, "compacted at load");
+});
+
+test("insert receipts in Redis are seen by another replica, and a Redis failure falls back", async () => {
+	const store = new Map<string, string>();
+	let down = false;
+	const redis = {
+		async eval(script: string, numKeys: number, ...args: Array<string | number>) {
+			if (down) throw new Error("Connection is closed.");
+			const keys = args.slice(0, numKeys).map(String);
+			if (script.includes("MGET")) return keys.map((key) => store.get(key) ?? null);
+			store.set(keys[0]!, "1");
+			assert.equal(args[numKeys], 900, "expires with the receipt TTL");
+			return "OK";
+		},
+	};
+	const logs: string[] = [];
+	const a = new InsertReceipts({ redis, log: (m) => logs.push(m) });
+	const b = new InsertReceipts({ redis, log: (m) => logs.push(m) });
+	await a.add("d1", "runtime_spans");
+	assert.ok((await b.committed("d1", ["runtime_spans", "runtime_logs"])).has("runtime_spans"));
+	assert.equal((await b.committed("d1", ["runtime_logs"])).has("runtime_logs"), false);
+	down = true;
+	assert.ok((await a.committed("d1", ["runtime_spans"])).has("runtime_spans"), "a still knows its own");
+	assert.equal((await b.committed("d2", ["runtime_spans"])).size, 0);
+	await a.add("d3", "runtime_spans");
+	await a.add("d4", "runtime_spans");
+	assert.equal(a.stats().redisFailures, 2);
+	assert.equal(b.stats().redisFailures, 1);
+	assert.equal(logs.length, 2, "each process logs once a minute at most");
+	assert.equal(a.mode, "redis");
+});
+
+test("a retry after a restart writes no committed table again (journal)", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "autter-receipts-app-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	let failMetrics = true;
+	const ch = await clickhouse((call) => (call.table === "runtime_metrics_1m" && failMetrics ? "fail" : "ok"));
+	t.after(() => close(ch.server));
+	const cfg = config({ clickhouseUrl: ch.url, insertReceiptsFile: join(dir, "insert-receipts.log") });
+	const body = traceBody();
+	const first = await startApp(cfg);
+	assert.equal((await first.post("/v1/traces", body)).status, 503);
+	await first.stop();
+	failMetrics = false;
+	const second = await startApp(cfg);
+	t.after(() => second.stop());
+	assert.equal((await second.post("/v1/traces", body)).status, 200);
+	assert.equal(ch.inserts("runtime_spans").length, 1, "spans from before the restart are not written again");
+	assert.equal(ch.inserts("runtime_error_occurrences").length, 1);
+	assert.equal(ch.inserts("runtime_metrics_1m").length, 2);
+	const health = (await (await fetch(`${second.url}/healthz`)).json()) as { insertReceipts: { mode: string } };
+	assert.equal(health.insertReceipts.mode, "file");
+});
+
+test("a re-send that overtakes a slow first attempt waits for it instead of writing twice", async (t) => {
+	let firstSpans = true;
+	const ch = await clickhouse();
+	t.after(() => close(ch.server));
+	// Hold the first spans insert for a while, as a slow ClickHouse would.
+	const slow = await listen((req, body, res) => {
+		const query = new URL(req.url ?? "/", "http://x").searchParams.get("query") ?? body;
+		if (firstSpans && /runtime_spans/.test(query) && /^INSERT/.test(query)) {
+			firstSpans = false;
+			setTimeout(() => {
+				void fetch(`${ch.url}${req.url}`, { method: "POST", body }).then(() => res.writeHead(200).end());
+			}, 300);
+			return;
+		}
+		void fetch(`${ch.url}${req.url}`, { method: "POST", body }).then((r) => res.writeHead(r.status).end());
+	});
+	t.after(() => close(slow.server));
+	const app = await startApp(config({ clickhouseUrl: slow.url }));
+	t.after(() => app.stop());
+	const body = traceBody();
+	const [a, b] = await Promise.all([app.post("/v1/traces", body), app.post("/v1/traces", body)]);
+	assert.deepEqual([a.status, b.status], [200, 200]);
+	assert.equal(ch.inserts("runtime_spans").length, 1);
+	assert.equal(ch.inserts("runtime_metrics_1m").length, 1);
 });
 
 test("sink batches survive the webhook being down across an ingester restart", async (t) => {
@@ -465,4 +561,55 @@ test("a server that refuses the dedupe settings still gets every insert (they ar
 	assert.equal(spans.at(-1)!.token, null, "retried without the token");
 	assert.equal((await app.post("/v1/traces", traceBody("next"))).status, 200);
 	assert.equal(ch.inserts("runtime_spans").at(-1)!.token, null, "and no longer sent");
+});
+
+test("shared outbox (EFS): a task adopts the batches of a task that is gone, never a live one's", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "autter-outbox-shared-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const ctx: IngestContext = { orgId: "o", repositoryId: "r", scope: "server", allowedOrigins: [] };
+	const point = (minute: number) => ({
+		service: "api", environment: "prod", release: null, route: "/x", bucketAt: new Date(minute * 60_000),
+		requestCount: 1, errorCount: 0, durationSumMs: 1, sessionCount: 0,
+	});
+	const down = (async () => new Response(null, { status: 503 })) as typeof fetch;
+	const sinkCfg = config({ sinkUrl: "http://sink.local/hook" });
+
+	// Task A (a deploy is about to replace it) and task C (crashed: no close).
+	const a = new SinkOutbox(root, { shared: true, instance: "task-a" });
+	const forwarderA = new SinkForwarder(sinkCfg, down, { retryBaseMs: 60_000 }, { outbox: a, pending: a.open() });
+	forwarderA.enqueue(ctx, [], [point(1)]);
+	const c = new SinkOutbox(root, { shared: true, instance: "task-c" });
+	const forwarderC = new SinkForwarder(sinkCfg, down, { retryBaseMs: 60_000 }, { outbox: c, pending: c.open() });
+	forwarderC.enqueue(ctx, [], [point(2)]);
+	// Task L stays alive.
+	const l = new SinkOutbox(root, { shared: true, instance: "task-l" });
+	const forwarderL = new SinkForwarder(sinkCfg, down, { retryBaseMs: 60_000 }, { outbox: l, pending: l.open() });
+	forwarderL.enqueue(ctx, [], [point(3)]);
+	await waitFor(() => forwarderA.stats().retried >= 1 && forwarderC.stats().retried >= 1);
+	forwarderA.stop(); // graceful: marks its directory closed
+	// C crashed: no close, its heartbeat just stops (simulated with a later clock below).
+
+	// Task B starts while C's heartbeat is still fresh: it takes A's batch only.
+	const delivered: Array<Record<string, any>> = [];
+	const up = (async (_url: string, init: RequestInit) => {
+		delivered.push(JSON.parse(String(init.body)));
+		return new Response(null, { status: 202 });
+	}) as typeof fetch;
+	const b = new SinkOutbox(root, { shared: true, instance: "task-b" });
+	const forwarderB = new SinkForwarder(sinkCfg, up, {}, { outbox: b, pending: b.open() });
+	await waitFor(() => delivered.length === 1);
+	assert.equal(delivered[0]!.metrics[0].bucketAt, new Date(60_000).toISOString());
+	assert.equal(existsSync(join(root, "task-a")), false, "A's directory is gone once adopted");
+
+	// Two minutes later C has missed its heartbeats: B adopts it; L is live.
+	const in130s = new Date(Date.now() + 130_000);
+	utimesSync(join(root, "task-l", ".heartbeat"), in130s, in130s); // L keeps beating
+	const later = new SinkOutbox(root, { shared: true, instance: "task-b", now: () => Date.now() + 130_000 });
+	const adopted = later.adoptOrphans();
+	assert.deepEqual(adopted.map((r) => JSON.parse(r.body).metrics[0].bucketAt), [new Date(120_000).toISOString()]);
+	assert.equal(existsSync(join(root, "task-c")), false);
+	assert.ok(readdirSync(join(root, "task-l")).some((n) => n.endsWith(".json")), "a live task's batches stay with it");
+	forwarderB.stop();
+	forwarderC.stop();
+	forwarderL.stop();
 });

@@ -180,6 +180,7 @@ export class SinkForwarder {
 	private readonly outbox: SinkOutbox | null;
 	private restored = 0;
 	private deadLettered = 0;
+	private adoptTimer: NodeJS.Timeout | null = null;
 
 	/** Called for every batch given up on; must not throw (errors are swallowed). */
 	onDrop: ((drop: SinkDrop) => void) | null = null;
@@ -197,6 +198,15 @@ export class SinkForwarder {
 		this.tuning = { ...DEFAULT_TUNING, ...tuning };
 		this.outbox = outbox?.outbox ?? null;
 		if (outbox) this.restore(outbox.pending);
+		// Shared outbox (EFS): keep taking over what gone tasks left behind,
+		// e.g. a task that drained, exited and left batches during a deploy.
+		if (this.outbox?.isShared) {
+			this.adoptTimer = setInterval(() => {
+				if (this.stopped || !this.outbox) return;
+				this.restore(this.outbox.adoptOrphans());
+			}, 60_000);
+			this.adoptTimer.unref();
+		}
 	}
 
 	/** Attempts before giving up; 0 = no limit (the age limit still applies).
@@ -235,7 +245,7 @@ export class SinkForwarder {
 		}
 		this.queue.sort((a, b) => a.seq - b.seq);
 		if (records.length > 0) {
-			console.log(`sink outbox: ${records.length} undelivered batch(es) from the last run queued for delivery`);
+			console.log(`sink outbox: ${records.length} undelivered batch(es) from an earlier run queued for delivery`);
 			this.enforceBounds();
 			this.pump();
 		}
@@ -396,6 +406,10 @@ export class SinkForwarder {
 		if (this.timer) {
 			clearTimeout(this.timer);
 			this.timer = null;
+		}
+		if (this.adoptTimer) {
+			clearInterval(this.adoptTimer);
+			this.adoptTimer = null;
 		}
 		this.outbox?.close();
 	}

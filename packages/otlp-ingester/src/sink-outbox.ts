@@ -1,6 +1,9 @@
 import {
 	closeSync,
 	existsSync,
+	readdirSync as listDir,
+	rmSync,
+	utimesSync,
 	fsyncSync,
 	mkdirSync,
 	openSync,
@@ -32,6 +35,15 @@ import { join } from "node:path";
  * One directory per ingester process: a `.lock` file holds the owner's
  * pid, and a second live process refusing to share it falls back to
  * memory-only delivery (logged), rather than double-sending.
+ *
+ * Shared mode (SINK_OUTBOX_SHARED=1, for a network volume such as EFS
+ * mounted into every task): each process keeps its batches in its own
+ * subdirectory, `<dir>/<instance>/`, and touches `.heartbeat` there every
+ * 10 s. A subdirectory whose heartbeat is older than two minutes — or that
+ * its owner closed on shutdown — belongs to a task that is gone (a deploy,
+ * a crash, scale-in): any live process adopts its batches (atomic renames,
+ * so two adopters never take the same file) and sends them. Pids say
+ * nothing across hosts, so shared mode uses no lock file.
  *
  * Writes are synchronous (tmp file + rename, so a crash never leaves a
  * half-written batch under its real name). They go to the page cache, which
@@ -74,6 +86,8 @@ export interface OutboxStats {
 	writeFailures: number;
 	/** Dead letters deleted to stay under the dead-letter budget. */
 	deadPruned: number;
+	/** Batches taken over from gone processes (shared mode). */
+	adopted: number;
 }
 
 export class OutboxLockedError extends Error {
@@ -95,9 +109,19 @@ function isAlive(pid: number): boolean {
 	}
 }
 
+/** A sibling whose heartbeat is older than this belongs to a gone process. */
+export const SHARED_STALE_MS = 120_000;
+const HEARTBEAT_MS = 10_000;
+
 export class SinkOutbox {
+	/** The directory this process keeps its batches in. */
+	readonly dir: string;
 	readonly deadDir: string;
 	private readonly lockFile: string;
+	private readonly root: string;
+	private readonly shared: boolean;
+	private heartbeat: NodeJS.Timeout | null = null;
+	private adopted = 0;
 	private files = new Map<string, number>();
 	private deadFiles = new Map<string, number>();
 	private writeFailures = 0;
@@ -105,11 +129,28 @@ export class SinkOutbox {
 	private locked = false;
 
 	constructor(
-		readonly dir: string,
-		private readonly options: { fsync?: boolean; deadLetterMaxBytes?: number } = {},
+		dir: string,
+		private readonly options: {
+			fsync?: boolean;
+			deadLetterMaxBytes?: number;
+			/** Shared mode: `dir` is the root every process shares. */
+			shared?: boolean;
+			/** Names this process's subdirectory in shared mode. */
+			instance?: string;
+			now?: () => number;
+		} = {},
 	) {
-		this.deadDir = join(dir, "dead");
-		this.lockFile = join(dir, ".lock");
+		this.root = dir;
+		this.shared = Boolean(options.shared);
+		this.dir = this.shared
+			? join(dir, (options.instance ?? `${process.pid}-${Date.now()}`).replace(/[^A-Za-z0-9._-]/g, "_"))
+			: dir;
+		this.deadDir = join(this.dir, "dead");
+		this.lockFile = join(this.dir, ".lock");
+	}
+
+	private now(): number {
+		return this.options.now?.() ?? Date.now();
 	}
 
 	/**
@@ -119,6 +160,12 @@ export class SinkOutbox {
 	 */
 	open(): OutboxRecord[] {
 		mkdirSync(this.deadDir, { recursive: true });
+		if (this.shared) {
+			this.beat();
+			this.heartbeat = setInterval(() => this.beat(), HEARTBEAT_MS);
+			this.heartbeat.unref();
+			return this.adoptOrphans();
+		}
 		if (existsSync(this.lockFile)) {
 			const owner = Number.parseInt(readFileSync(this.lockFile, "utf8"), 10);
 			if (Number.isInteger(owner) && owner > 0 && owner !== process.pid && isAlive(owner)) {
@@ -220,6 +267,10 @@ export class SinkOutbox {
 		return written;
 	}
 
+	get isShared(): boolean {
+		return this.shared;
+	}
+
 	stats(): OutboxStats {
 		let bytes = 0;
 		for (const size of this.files.values()) bytes += size;
@@ -232,11 +283,105 @@ export class SinkOutbox {
 			deadBytes,
 			writeFailures: this.writeFailures,
 			deadPruned: this.deadPruned,
+			adopted: this.adopted,
 		};
 	}
 
-	/** Release the lock (shutdown). Pending batches stay for the next start. */
+	/**
+	 * Shared mode: take over the pending batches (and dead letters) of every
+	 * sibling directory whose process is gone, oldest first. Each file moves
+	 * by rename, so a batch is adopted by exactly one process. Returns the
+	 * adopted batches for the caller to send. Never throws.
+	 */
+	adoptOrphans(staleMs = SHARED_STALE_MS): OutboxRecord[] {
+		if (!this.shared) return [];
+		const records: OutboxRecord[] = [];
+		let siblings: string[];
+		try {
+			siblings = listDir(this.root, { withFileTypes: true })
+				.filter((entry) => entry.isDirectory() && join(this.root, entry.name) !== this.dir)
+				.map((entry) => join(this.root, entry.name));
+		} catch {
+			return records;
+		}
+		for (const sibling of siblings) {
+			try {
+				if (!this.orphaned(sibling, staleMs)) continue;
+				for (const name of listDir(sibling).sort()) {
+					if (!RECORD_FILE.test(name)) continue;
+					const target = join(this.dir, name);
+					try {
+						renameSync(join(sibling, name), target);
+					} catch {
+						continue; // another process adopted it first
+					}
+					try {
+						const record = JSON.parse(readFileSync(target, "utf8")) as OutboxRecord;
+						if (record?.v !== 1 || typeof record.body !== "string") throw new Error("not an outbox record");
+						this.files.set(name, Buffer.byteLength(record.body));
+						records.push(record);
+					} catch {
+						renameSync(target, join(this.deadDir, `corrupt-${this.now()}-${name}`));
+					}
+				}
+				const siblingDead = join(sibling, "dead");
+				if (existsSync(siblingDead)) {
+					for (const name of listDir(siblingDead)) {
+						try {
+							renameSync(join(siblingDead, name), join(this.deadDir, name));
+							this.deadFiles.set(name, statSync(join(this.deadDir, name)).size);
+						} catch {
+							// adopted by another process
+						}
+					}
+				}
+				// Gone for good once empty of batches; a file that appears
+				// meanwhile keeps the directory for the next scan.
+				if (!listDir(sibling).some((name) => RECORD_FILE.test(name))) rmSync(sibling, { recursive: true, force: true });
+			} catch (err) {
+				console.warn(`sink outbox: could not adopt ${sibling} (${(err as Error).message})`);
+			}
+		}
+		if (records.length > 0) {
+			this.adopted += records.length;
+			console.log(`sink outbox: adopted ${records.length} undelivered batch(es) from ingester(s) that are gone`);
+		}
+		this.pruneDead();
+		return records.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+	}
+
+	/** Its owner closed it, or its heartbeat stopped long enough ago. */
+	private orphaned(dir: string, staleMs: number): boolean {
+		if (existsSync(join(dir, ".closed"))) return true;
+		const beat = join(dir, ".heartbeat");
+		const last = existsSync(beat) ? statSync(beat).mtimeMs : statSync(dir).mtimeMs;
+		return this.now() - last > staleMs;
+	}
+
+	private beat(): void {
+		const file = join(this.dir, ".heartbeat");
+		try {
+			const at = new Date(this.now());
+			if (existsSync(file)) utimesSync(file, at, at);
+			else writeFileSync(file, "");
+		} catch (err) {
+			console.warn(`sink outbox: heartbeat not written (${(err as Error).message})`);
+		}
+	}
+
+	/** Release the lock (shutdown). Pending batches stay for the next start;
+	 * in shared mode the directory is marked closed so a live process adopts
+	 * them on its next scan instead of waiting out the heartbeat. */
 	close(): void {
+		if (this.heartbeat) {
+			clearInterval(this.heartbeat);
+			this.heartbeat = null;
+			try {
+				writeFileSync(join(this.dir, ".closed"), "");
+			} catch {
+				// the heartbeat going stale covers it
+			}
+		}
 		if (!this.locked) return;
 		this.locked = false;
 		try {

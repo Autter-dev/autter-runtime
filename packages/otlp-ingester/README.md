@@ -140,6 +140,8 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `AUTTER_SINK_TOKEN` | — | Bearer token sent to the sink |
 | `SINK_OUTBOX_DIR` | `/var/lib/autter/sink-outbox` in the image; `<os tmpdir>/autter-sink-outbox-<port>` otherwise | Undelivered sink batches are written here before the ingest request is answered and re-sent after a restart; `dead/` keeps the batches given up on. One directory per ingester process; mount a volume to survive container replacement. `off` = memory only (lost on restart) |
 | `SINK_OUTBOX_FSYNC` | off | `1` fsyncs every outbox write (survives a host crash, not just a process crash) |
+| `SINK_OUTBOX_SHARED` | off | `1` when `SINK_OUTBOX_DIR` is a volume every task mounts (EFS on Fargate): each process uses its own subdirectory and adopts the batches of processes that closed theirs or stopped their heartbeat 2 min ago |
+| `INSERT_RECEIPTS_FILE` | `<SINK_OUTBOX_DIR>/insert-receipts.log`, else `<os tmpdir>/autter-insert-receipts-<port>.log` | Journal of which tables each recent request wrote, so a retry after a restart does not insert committed rows again; `off` = memory only. With `AUTTER_REDIS_URL` the receipts are also shared by every replica |
 | `SINK_MAX_AGE_HOURS` | `72` | A batch still undelivered after this long is dead-lettered |
 | `SINK_MAX_ATTEMPTS` | unlimited with an outbox, `12` without | Delivery attempts per batch before it is dead-lettered (1–60 s backoff); `0` = no limit |
 | `SINK_MAX_BUFFERED_BATCHES` | `1000` | Sink queue cap in memory; past it the oldest batch of the heaviest tenant is dead-lettered |
@@ -216,6 +218,10 @@ recreated) or `unconfigured` (no `CLICKHOUSE_URL`: every ingest request gets
 503, so this is 503 too). A table dropped under a running ingester is
 recreated on the next write. An ingest request with nothing to store (an
 empty export) gets 503 too while storage is not writable, instead of a 2xx.
+
+`clickhouseVersion` is the server's `version()`. `insertReceipts.mode` says
+where the receipts that stop a retried request from writing its rows twice
+are kept (`memory`, `file`, `redis`, `redis+file`).
 
 `writes.lagSeconds` is how long writes have been failing since the last one
 that succeeded. `drops` are the process-lifetime counts by route and reason

@@ -1030,17 +1030,29 @@ twice, and in `runtime_metrics_1m` (SummingMergeTree) request and error
 counts summed twice, which inflated error rates and regression counts.
 Now:
 
-- every fan-out insert carries `insert_deduplication_token` =
-  `<request digest>:<table>` (the digest covers tenant, route and the exact
-  body). ClickHouse drops a block whose token it has seen. Replicated and
-  Shared engines (ClickHouse Cloud) keep those tokens by default; for plain
-  MergeTree tables the ingester sets `non_replicated_deduplication_window`
-  at boot (best effort, logged). Async inserts are deduplicated by
-  ClickHouse 26.2+, or with `async_insert_deduplicate` on Replicated
-  tables. A server that refuses either setting gets the insert without it
-  (logged once), never a failed ingest;
-- independently of the server version, each process remembers for 15
-  minutes which tables a request digest already wrote and skips them on a
-  retry, so a re-sent request that reaches the same replica writes each
-  table exactly once. A byte-identical re-send of a request that fully
-  succeeded writes nothing.
+- the ingester keeps receipts: per request digest (tenant, route and the
+  exact body), the tables whose insert committed. A retry skips those
+  tables, and a retry that arrives while the first attempt is still
+  writing waits for it. Receipts live 15 minutes in memory, in a journal
+  file (`INSERT_RECEIPTS_FILE`, next to the sink outbox by default) that is
+  reloaded at start, so a retry after a deploy or crash is caught, and in
+  Redis when `AUTTER_REDIS_URL` is set, so a retry that lands on another
+  replica is caught too (a Redis failure falls back to the process's own
+  receipts). A byte-identical re-send of a request that fully succeeded
+  writes nothing;
+- every fan-out insert also carries `insert_deduplication_token` =
+  `<request digest>:<table>`, for servers that honour it. ClickHouse 24.8
+  (the version the single-server deploy runs) does not for async inserts
+  into plain MergeTree tables: the per-query token reaches only
+  ReplicatedMergeTree's async sink, and async inserts are deduplicated by
+  default only from 26.2. It does on Replicated and Shared engines with
+  `async_insert_deduplicate` (sent), and on 26.2+ for plain MergeTree with
+  `non_replicated_deduplication_window` (set at boot, best effort). A
+  server that refuses either setting gets the insert without it (logged
+  once), never a failed ingest. The receipts are what make retries safe
+  on every version; the token is a second line where the server has one.
+
+What is left: an insert that commits and a process killed before its
+receipt is written (one append to a local file) can be written again by
+the retry; and with several replicas and no Redis, a retry that lands on
+another replica is caught only by servers that honour the token.

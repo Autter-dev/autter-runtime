@@ -127,6 +127,8 @@ export class ClickHouseStore {
 	private asyncDedupSetting = true;
 	/** False once the server refused insert_deduplication_token. */
 	private dedupTokens = true;
+	/** ClickHouse server version, read by the first successful probe. */
+	serverVersion: string | null = null;
 	/** Called when a write fails or succeeds after failing — lets the
 	 * readiness probe drop a stale cached answer. */
 	onWriteStateChange: (() => void) | null = null;
@@ -504,6 +506,10 @@ export class ClickHouseStore {
 						clickhouse_settings: INSERT_SETTINGS,
 						values: [{ instance_id: instanceId, version, checked_at: new Date().toISOString() }],
 					});
+					if (!this.serverVersion) {
+						const rows = await this.getClient().query({ query: "SELECT version() AS v", format: "JSONEachRow" });
+						this.serverVersion = (await rows.json<{ v: string }>())[0]?.v ?? null;
+					}
 				})(),
 				timeout,
 			]);

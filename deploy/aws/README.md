@@ -86,12 +86,25 @@ ClickHouse, so the target group stops routing to a task that cannot store
 anything. The container health check uses `/livez` (liveness) instead, so a
 ClickHouse outage does not make ECS replace tasks in a loop.
 
-Fargate tasks have no persistent disk, so the sink outbox
-(`SINK_OUTBOX_DIR`) survives a process crash inside a running task but not a
-task replacement; on SIGTERM the ingester spends up to 4 s delivering its
-queue first. Anything left undelivered is dead-lettered or lost with the
-task, and the platform's sink reconciler replays it from ClickHouse. Each
-task needs its own outbox directory, so a shared EFS mount is not a fix.
+Fargate tasks have no persistent disk, so `setup.sh` creates an encrypted
+EFS file system for the sink outbox (creation token
+`autter-otlp-ingester-sink-outbox`): mount targets in `SUBNET_IDS`, an NFS
+security group open to `SECURITY_GROUP_ID` only, and an access point owned
+by the image's `node` user (uid/gid 1000). It is idempotent; `OUTBOX_EFS=0`
+skips it. `deploy.sh` finds the volume by its creation token, mounts it at
+`/var/lib/autter/sink-outbox` and sets `SINK_OUTBOX_SHARED=1`: each task
+keeps its batches in its own subdirectory, touches a heartbeat every 10 s,
+and adopts the batches of any task that closed its directory on shutdown or
+stopped beating two minutes ago. A deploy, crash or scale-in therefore loses
+no queued batch. The deploy role needs `elasticfilesystem:DescribeFileSystems`
+and `elasticfilesystem:DescribeAccessPoints`; without them, or without the
+volume, `deploy.sh` warns and the outbox falls back to the task's own disk
+(it survives a process crash, not a task replacement, and the platform's
+sink reconciler replays what is lost from ClickHouse).
+
+With more than one task, set `AUTTER_REDIS_URL_SECRET_ARN`: besides rate
+limits, Redis shares the insert receipts that stop a request retried on
+another task from writing its rows twice.
 
 ## 2. Every subsequent deploy
 

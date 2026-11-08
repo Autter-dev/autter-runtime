@@ -210,12 +210,15 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	// Tenant request and record limits, the unknown-key budget and log
 	// promotion lookups (limits.ts): shared through Redis when configured,
 	// else per process with each limit divided by AUTTER_INGESTER_REPLICAS.
+	// One Redis connection (AUTTER_REDIS_URL) for shared limits and shared
+	// insert receipts; tests that pass their own limit store get neither.
+	const redis = deps.sharedLimits === undefined && config.redisUrl ? connectRedis(config.redisUrl) : null;
 	const limits = new RateLimits({
 		shared:
 			deps.sharedLimits !== undefined
 				? deps.sharedLimits
-				: config.redisUrl
-					? new RedisLimitStore(connectRedis(config.redisUrl))
+				: redis
+					? new RedisLimitStore(redis)
 					: null,
 		replicas: config.replicas ?? 1,
 	});
@@ -261,7 +264,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	// way ingest writes, plus the outcome of real ingest writes.
 	const readiness = new CachedProbe(() => store.probe(instanceId, version));
 	store.onWriteStateChange = () => readiness.invalidate();
-	const receipts = new InsertReceipts();
+	const receipts = new InsertReceipts({ file: config.insertReceiptsFile ?? null, redis });
 	// Loop collapse (1.9.0, loop-collapse.ts): a looping error past its first
 	// LOOP_COLLAPSE_AFTER occurrences of the minute is stored as one sample a
 	// minute with an exact count. The minute's samples are written here, then
@@ -609,6 +612,10 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			retryable: !ok && retryable(state),
 			checkedAt: probe.checkedAt,
 			probeLatencyMs: probe.latencyMs,
+			clickhouseVersion: store.serverVersion,
+			// How a retried request is kept from writing rows twice: the
+			// receipts (memory, journal file, Redis) — see insert-receipts.ts.
+			insertReceipts: receipts.stats(),
 			writes,
 			drops: {
 				// Since this process started, kept in memory: readable while
@@ -640,15 +647,17 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			await requireWritable();
 			return;
 		}
-		const done = receipts.committed(digest);
-		await Promise.all(
-			pending
-				.filter((write) => !done.has(write.table))
-				.map(async (write) => {
-					await write.run(digest);
-					receipts.add(digest, write.table);
-				}),
-		);
+		await receipts.coalesce(digest, async () => {
+			const done = await receipts.committed(digest, pending.map((write) => write.table));
+			await Promise.all(
+				pending
+					.filter((write) => !done.has(write.table))
+					.map(async (write) => {
+						await write.run(digest);
+						await receipts.add(digest, write.table);
+					}),
+			);
+		});
 	}
 
 	/** Throw unless storage can take writes (cached readiness). */
@@ -1390,6 +1399,8 @@ function openOutbox(config: IngesterConfig): { outbox: SinkOutbox; pending: Outb
 	const outbox = new SinkOutbox(config.sinkOutboxDir, {
 		fsync: config.sinkOutboxFsync,
 		deadLetterMaxBytes: (config.sinkDeadLetterMaxMb ?? 256) * 1024 * 1024,
+		shared: config.sinkOutboxShared,
+		instance: `${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`,
 	});
 	try {
 		return { outbox, pending: outbox.open() };

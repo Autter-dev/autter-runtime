@@ -34,6 +34,10 @@
 #                         desired count, else 1). Without Redis each task
 #                         enforces 1/N of every rate limit.
 #   TRUST_PROXY           default 1 (the ALB appends the client address)
+#   EFS_FILE_SYSTEM_ID / EFS_ACCESS_POINT_ID
+#                         the sink outbox volume setup.sh creates. Default: found
+#                         by its creation token / tag; none found = no volume
+#                         (the outbox then lives on the task's ephemeral disk).
 #   SKIP_BUILD=1          reuse an already-pushed IMAGE_TAG
 set -euo pipefail
 
@@ -103,6 +107,41 @@ env_json="[
   {\"name\":\"AUTTER_KEY_VALIDATOR_URL\",\"value\":\"${KEY_VALIDATOR_URL}\"}"
 [[ -n "${SINK_URL:-}" ]] && env_json+=",
   {\"name\":\"AUTTER_SINK_URL\",\"value\":\"${SINK_URL}\"}"
+
+# --- sink outbox on EFS ------------------------------------------------------
+# Undelivered sink batches survive a task being replaced only on a volume
+# every task mounts: each task writes its own subdirectory and adopts what
+# gone tasks left (SINK_OUTBOX_SHARED, packages/otlp-ingester/src/sink-outbox.ts).
+EFS_CREATION_TOKEN="${EFS_CREATION_TOKEN:-${TASK_FAMILY}-sink-outbox}"
+if [[ -z "${EFS_FILE_SYSTEM_ID:-}" ]]; then
+  EFS_FILE_SYSTEM_ID=$(aws efs describe-file-systems --creation-token "$EFS_CREATION_TOKEN" --region "$AWS_REGION" \
+    --query 'FileSystems[0].FileSystemId' --output text 2>/dev/null || true)
+  [[ "$EFS_FILE_SYSTEM_ID" == "None" ]] && EFS_FILE_SYSTEM_ID=""
+fi
+if [[ -n "$EFS_FILE_SYSTEM_ID" && -z "${EFS_ACCESS_POINT_ID:-}" ]]; then
+  EFS_ACCESS_POINT_ID=$(aws efs describe-access-points --file-system-id "$EFS_FILE_SYSTEM_ID" --region "$AWS_REGION" \
+    --query "AccessPoints[?Tags[?Key=='Name' && Value=='${EFS_CREATION_TOKEN}']].AccessPointId | [0]" --output text 2>/dev/null || true)
+  [[ "$EFS_ACCESS_POINT_ID" == "None" ]] && EFS_ACCESS_POINT_ID=""
+fi
+volumes_json="[]"
+mounts_json="[]"
+if [[ -n "$EFS_FILE_SYSTEM_ID" && -n "${EFS_ACCESS_POINT_ID:-}" ]]; then
+  echo "==> sink outbox on EFS ${EFS_FILE_SYSTEM_ID} (access point ${EFS_ACCESS_POINT_ID})"
+  volumes_json="[{
+    \"name\": \"sink-outbox\",
+    \"efsVolumeConfiguration\": {
+      \"fileSystemId\": \"${EFS_FILE_SYSTEM_ID}\",
+      \"transitEncryption\": \"ENABLED\",
+      \"authorizationConfig\": { \"accessPointId\": \"${EFS_ACCESS_POINT_ID}\", \"iam\": \"DISABLED\" }
+    }
+  }]"
+  mounts_json="[{ \"sourceVolume\": \"sink-outbox\", \"containerPath\": \"/var/lib/autter/sink-outbox\" }]"
+  env_json+=",
+  {\"name\":\"SINK_OUTBOX_SHARED\",\"value\":\"1\"}"
+elif [[ -n "${SINK_URL:-}" ]]; then
+  echo "!! no sink outbox EFS (run deploy/aws/setup.sh): undelivered sink batches are lost when a task is replaced;"
+  echo "   the platform's sink reconciler replays them from ClickHouse."
+fi
 env_json+="]"
 
 log_group="/ecs/${TASK_FAMILY}"
@@ -118,11 +157,13 @@ task_def=$(cat <<JSON
   "memory": "${TASK_MEM}",
   "executionRoleArn": "${EXECUTION_ROLE_ARN}",
   "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "volumes": ${volumes_json},
   "containerDefinitions": [{
     "name": "otlp-ingester",
     "image": "${IMAGE}",
     "essential": true,
     "portMappings": [{ "containerPort": 4318, "protocol": "tcp" }],
+    "mountPoints": ${mounts_json},
     "environment": ${env_json},
     "secrets": ${secrets_json},
     "healthCheck": {

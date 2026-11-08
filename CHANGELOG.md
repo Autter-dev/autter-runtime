@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+`otlp-ingester`: closes what 1.12.0 left open in the durable sink. The AWS deploy needs `deploy/aws/setup.sh` re-run once (it creates the outbox EFS) and the deploy role allowed `elasticfilesystem:DescribeFileSystems` and `DescribeAccessPoints`.
+
+### Fixes
+
+- A retried request no longer writes its rows twice after a restart or on another replica, on any ClickHouse version. 1.12.0's insert dedupe tokens are ignored by ClickHouse 24.8 (the single-server deploy) for async inserts into plain MergeTree tables, and its in-memory receipts were lost on restart. The receipts of which tables each request wrote are now also journaled to a file (`INSERT_RECEIPTS_FILE`, next to the sink outbox by default) and reloaded at start, and shared through Redis when `AUTTER_REDIS_URL` is set. A re-send that arrives while the first attempt is still writing waits for it instead of writing in parallel. `/healthz` shows the ClickHouse version and where the receipts are kept (`insertReceipts.mode`).
+- The sink outbox survives a Fargate task being replaced. `deploy/aws/setup.sh` creates an encrypted EFS file system (mount targets, an NFS security group open to the tasks only, an access point for the image's user), idempotently, and `deploy.sh` mounts it with the new `SINK_OUTBOX_SHARED=1`: each task keeps its own subdirectory with a heartbeat and adopts the batches of tasks that closed theirs or stopped beating two minutes ago. Without the volume, `deploy.sh` says so and the outbox falls back to the task's disk.
+- Docs: idempotent writes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) say which ClickHouse versions honour the tokens; the `otlp-ingester` README and `deploy/aws/README.md` cover the receipts journal and the outbox EFS.
+
 ## [1.12.0] - 2026-11-08
 
 Packages: `otlp-ingester` 1.12.0, `runtime-node` 1.9.1, `runtime-browser` 1.8.1, `runtime-edge` 1.4.1, `runtime-cli` 1.3.1. `runtime-next` stays 1.9.0 and picks up the new `runtime-node`, `runtime-browser` and `runtime-edge` through its existing ranges. Upgrade the ingester first; give every client key at least one allowed origin before deploying it.

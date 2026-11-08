@@ -86,8 +86,22 @@ export interface IngesterConfig {
 	/** fsync each outbox write (SINK_OUTBOX_FSYNC=1): survives a host crash,
 	 * not just a process crash. */
 	sinkOutboxFsync?: boolean;
+	/**
+	 * SINK_OUTBOX_SHARED=1: SINK_OUTBOX_DIR is a volume every task mounts
+	 * (EFS on Fargate). Each process uses its own subdirectory and adopts the
+	 * batches of processes that are gone (sink-outbox.ts).
+	 */
+	sinkOutboxShared?: boolean;
 	/** Budget for dead-lettered batches on disk (SINK_DEAD_LETTER_MAX_MB, default 256). */
 	sinkDeadLetterMaxMb?: number;
+	/**
+	 * Journal of which tables each recent ingest request wrote
+	 * (INSERT_RECEIPTS_FILE; `off` = memory only), so a retry after a restart
+	 * does not insert committed rows again (insert-receipts.ts). loadConfig
+	 * defaults it into the sink outbox directory, else the OS temp dir. Unset
+	 * (null or undefined) = memory only.
+	 */
+	insertReceiptsFile?: string | null;
 	maxBodyBytes: number;
 	/** Requests per minute per tenant (repository) for server and upload keys; sliding window. */
 	rateLimitPerMinute: number;
@@ -200,6 +214,15 @@ export function sinkOutboxDirEnv(raw: string | undefined, sinkUrl: string | null
 	return value || join(tmpdir(), `autter-sink-outbox-${port}`);
 }
 
+/** INSERT_RECEIPTS_FILE: `off`/`none`/`false`/`0` = memory only; unset = in
+ * the sink outbox directory when there is one, else the OS temp dir. */
+export function insertReceiptsFileEnv(raw: string | undefined, outboxDir: string | null, port: number): string | null {
+	const value = raw?.trim();
+	if (value && /^(off|none|false|0)$/i.test(value)) return null;
+	if (value) return value;
+	return outboxDir ? join(outboxDir, "insert-receipts.log") : join(tmpdir(), `autter-insert-receipts-${port}.log`);
+}
+
 function intEnv(name: string, fallback: number): number {
 	const raw = process.env[name];
 	if (!raw) return fallback;
@@ -265,7 +288,9 @@ export function loadConfig(): IngesterConfig {
 		sinkMaxAgeHours: intEnv("SINK_MAX_AGE_HOURS", 72),
 		sinkOutboxDir: sinkOutboxDirEnv(process.env.SINK_OUTBOX_DIR, process.env.AUTTER_SINK_URL || null, intEnv("PORT", 4318)),
 		sinkOutboxFsync: /^(1|true|yes)$/i.test(process.env.SINK_OUTBOX_FSYNC ?? ""),
+		sinkOutboxShared: /^(1|true|yes)$/i.test(process.env.SINK_OUTBOX_SHARED ?? ""),
 		sinkDeadLetterMaxMb: intEnv("SINK_DEAD_LETTER_MAX_MB", 256),
+		insertReceiptsFile: null,
 		sinkMaxBufferedBatches: intEnv("SINK_MAX_BUFFERED_BATCHES", 1000),
 		sinkMaxBufferedMb: intEnv("SINK_MAX_BUFFERED_MB", 64),
 		maxBodyBytes: intEnv("MAX_BODY_BYTES", 1024 * 1024),
@@ -292,6 +317,13 @@ export function loadConfig(): IngesterConfig {
 		sourceMapCacheMb: intEnv("SOURCE_MAP_CACHE_MB", 64),
 		loopCollapseAfter: loopCollapseAfterEnv(process.env.LOOP_COLLAPSE_AFTER),
 	};
+	// A shared outbox is on a network volume every task mounts: keep the
+	// receipts journal on the task's own disk (Redis shares receipts there).
+	config.insertReceiptsFile = insertReceiptsFileEnv(
+		process.env.INSERT_RECEIPTS_FILE,
+		config.sinkOutboxShared ? null : (config.sinkOutboxDir ?? null),
+		config.port,
+	);
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.clickhouseDatabase)) {
 		throw new Error(
 			`Invalid CLICKHOUSE_DATABASE name: ${config.clickhouseDatabase}`,

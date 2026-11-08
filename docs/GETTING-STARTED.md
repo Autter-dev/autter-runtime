@@ -70,16 +70,30 @@ writes ClickHouse. For a local try-out:
 ```bash
 git clone https://github.com/Autter-dev/autter-runtime
 cd autter-runtime
-export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
-(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
-docker compose up   # ClickHouse + ingester on :4318
+docker compose up   # ClickHouse + ingester on http://localhost:4318
 ```
 
-The generated key is kept in your shell and the Compose mapping is stored in
-the git-ignored `.env` file. Use the same key in your local SDK configuration;
-never commit `.env` or paste the key into tracked files. If you skip key setup,
-the ingester starts without an authentication source and rejects ingest
-requests with HTTP 401.
+No key step: the compose file starts the ingester in local dev mode, which
+accepts the built-in key `autter_rt_local_dev_only` from your own machine.
+Use these two values in your app while you try it out:
+
+```bash
+AUTTER_ENDPOINT=http://localhost:4318
+AUTTER_RUNTIME_KEY=autter_rt_local_dev_only
+```
+
+The local key is not a secret and works nowhere else. The ingester refuses
+it from other networks, and only accepts it when `AUTTER_LOCAL_DEV=1` is set,
+which only the repo's `docker-compose.yml` does. A deployed ingester
+(`deploy/single-server`, `deploy/aws`, or Autter cloud at
+`https://otlp.autter.dev`) needs a real key. To use your own key locally as
+well, put its mapping in the git-ignored `.env` file before `docker compose up`;
+both keys then work:
+
+```bash
+export AUTTER_RUNTIME_KEY="autter_rt_$(openssl rand -hex 16)"
+(umask 077 && printf 'AUTTER_INGEST_KEYS=[{"key":"%s","orgId":"local","repositoryId":"local"}]\n' "$AUTTER_RUNTIME_KEY" > .env)
+```
 
 > **That's all the clone is for.** It runs the ingester — you never add
 > code to this checkout. Every step from here on (installing packages,
@@ -123,7 +137,7 @@ const { initAutterServer } = require("@autter/runtime-node");
 
 initAutterServer({
   apiKey: process.env.AUTTER_RUNTIME_KEY,        // server key
-  endpoint: process.env.AUTTER_ENDPOINT,          // your ingester URL
+  endpoint: process.env.AUTTER_ENDPOINT,          // your ingester URL (below)
   service: "payments-api",
   environment: process.env.NODE_ENV,
   release: process.env.GIT_SHA,                   // enables "broke in release X"
@@ -131,8 +145,17 @@ initAutterServer({
 ```
 
 ```bash
-node --require ./instrument.cjs server.js
+# Local try-out, against the compose ingester from step 2:
+AUTTER_ENDPOINT=http://localhost:4318 AUTTER_RUNTIME_KEY=autter_rt_local_dev_only \
+  node --require ./instrument.cjs server.js
+
+# Autter cloud: https://otlp.autter.dev and the server key from your
+# repository's Runtime settings. Self-hosted: your ingester's URL, e.g.
+# https://ingest.example.com, and a key from its AUTTER_INGEST_KEYS.
 ```
+
+`AUTTER_ENDPOINT` is the ingester's base URL, without `/v1/...`. If you
+leave `endpoint` out, the SDK sends to Autter cloud (`https://otlp.autter.dev`).
 
 That alone gives you: every incoming HTTP request traced-and-sampled,
 request/error/duration rollups per route, crashes and unhandled promise
@@ -384,7 +407,33 @@ tracer provider. See
 
 ## 7. Verify data is flowing
 
-Trigger a test error, then query ClickHouse:
+First, check the connection from your app's directory. `doctor` reaches the
+ingester, checks versions, and checks the key:
+
+```bash
+npx @autter/runtime-node doctor --endpoint http://localhost:4318 --key autter_rt_local_dev_only
+```
+
+It should end with `key        accepted` and exit 0. Against another
+ingester, pass its URL and leave out `--key` (it reads
+`AUTTER_RUNTIME_KEY`).
+
+Then see your event. Trigger an error in your app (a route that throws, or
+`captureException(new Error("hello from my app"))`), wait a few seconds for
+the batch to flush, and read it back from the local ClickHouse:
+
+```bash
+docker compose exec clickhouse clickhouse-client --password dev --query "
+  SELECT service, error_type, message, occurred_at
+  FROM autter_runtime.runtime_error_occurrences
+  ORDER BY occurred_at DESC LIMIT 5"
+```
+
+Run it in the `autter-runtime` checkout from step 2. A row with your
+service name means the whole path works. No row: re-run `doctor`, and check
+your app's logs for the endpoint it sends to.
+
+More queries:
 
 ```sql
 SELECT service, error_type, message, route, occurred_at

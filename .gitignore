@@ -6,6 +6,8 @@ examples/express-app/public/sdk/
 .env
 .env.*
 !.env.example
+# wrangler dev secrets (examples ship .dev.vars.example)
+.dev.vars
 .DS_Store
 
 # Local runtime files written by fileSink in development

@@ -1,0 +1,7 @@
+# Local `wrangler dev` against the repo's `docker compose up` ingester:
+#   cp .dev.vars.example .dev.vars
+# .dev.vars overrides wrangler.jsonc's vars in `wrangler dev` only, and is
+# git-ignored. The key is the ingester's built-in local key; it works only
+# with the compose ingester. For a deployed relay use `wrangler secret put`.
+AUTTER_INGEST_URL=http://localhost:4318/v1/browser
+AUTTER_RUNTIME_KEY=autter_rt_local_dev_only

@@ -20,12 +20,19 @@ cd examples/python/django
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 PYTHONPATH=../../../adapters/python \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-OTEL_EXPORTER_OTLP_HEADERS=x-autter-key=$AUTTER_RUNTIME_KEY \
+OTEL_EXPORTER_OTLP_HEADERS=x-autter-key=autter_rt_local_dev_only \
 OTEL_SERVICE_NAME=shop OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.1 \
   .venv/bin/python manage.py runserver --noreload
 
 .venv/bin/python -m unittest -v test_django_recipe.py
 ```
+
+That sends to the repo's `docker compose up` ingester with its built-in
+local key; for another ingester, use its URL and a real key. Without
+`OTEL_EXPORTER_OTLP_ENDPOINT`, OpenTelemetry sends to `http://localhost:4318`.
+To see the error stored, run `python ../testing/compose_e2e.py django` (CI
+does this for every recipe), or query ClickHouse as in
+[Getting started § 7](../../docs/GETTING-STARTED.md#7-verify-data-is-flowing).
 
 The tests need no services: each starts its app as above, at sampling ratio
 0 so that only the always-on error path exports, points the exporter at a

@@ -1,10 +1,12 @@
 /**
  * Example: Express app instrumented with Autter Runtime.
  *
- *   AUTTER_RUNTIME_KEY=<your local key> AUTTER_ENDPOINT=http://localhost:4318 node server.js
+ *   docker compose up        # in the autter-runtime repo: ClickHouse + ingester on :4318
+ *   npm start                # here: sends to http://localhost:4318 with the local key
  *
- * (The local `docker compose up` ingester has no built-in key; see
- * docs/GETTING-STARTED.md for generating one.)
+ * Against another ingester, set both:
+ *
+ *   AUTTER_ENDPOINT=https://otlp.autter.dev AUTTER_RUNTIME_KEY=autter_rt_… npm start
  *
  * - Server tracing/errors via @autter/runtime-node (OTel → /v1/traces); thrown
  *   errors keep their stack through autterErrorHandler
@@ -12,6 +14,7 @@
  *   echoed request ids, coded errors and client-safe error responses
  * - Browser errors via @autter/runtime-browser → same-origin relay → /v1/browser
  */
+import { fileURLToPath } from "node:url";
 import {
 	initAutterServer,
 	createBrowserRelayHandler,
@@ -24,8 +27,33 @@ import {
 	runtimeContext,
 } from "@autter/runtime-node";
 
-const endpoint = process.env.AUTTER_ENDPOINT ?? "https://otlp.autter.dev";
-const apiKey = process.env.AUTTER_RUNTIME_KEY ?? "dev-key";
+// With nothing set, the example talks to the local `docker compose up`
+// ingester, never to a hosted one: that takes an explicit AUTTER_ENDPOINT
+// and a real key.
+const LOCAL_ENDPOINT = "http://localhost:4318";
+// Built into the ingester, accepted only by the repo's docker compose setup.
+const LOCAL_DEV_KEY = "autter_rt_local_dev_only";
+
+const endpoint = (process.env.AUTTER_ENDPOINT || LOCAL_ENDPOINT).replace(/\/+$/, "");
+const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(endpoint);
+const apiKey = process.env.AUTTER_RUNTIME_KEY || (isLocal ? LOCAL_DEV_KEY : "");
+if (!apiKey) {
+	console.error(`AUTTER_ENDPOINT is ${endpoint}, but AUTTER_RUNTIME_KEY is not set. Set it to a server key (autter_rt_…).`);
+	process.exit(1);
+}
+if (apiKey === LOCAL_DEV_KEY && !isLocal) {
+	console.error(
+		`${LOCAL_DEV_KEY} only works with the local docker compose ingester, not ${endpoint}. Set AUTTER_RUNTIME_KEY to a server key (autter_rt_…).`,
+	);
+	process.exit(1);
+}
+console.log(
+	`Sending telemetry to ${endpoint}${process.env.AUTTER_ENDPOINT ? "" : " (AUTTER_ENDPOINT not set: the local docker compose ingester)"}, ` +
+		`key ${apiKey === LOCAL_DEV_KEY ? `${LOCAL_DEV_KEY} (built-in local key)` : "from AUTTER_RUNTIME_KEY"}.`,
+);
+console.log(
+	`Check the connection: npx @autter/runtime-node doctor --endpoint ${endpoint}${apiKey === LOCAL_DEV_KEY ? ` --key ${LOCAL_DEV_KEY}` : ""}`,
+);
 
 // Must run before other imports create connections — in real apps put this
 // in a preloaded module (node --import ./instrument.js).
@@ -61,7 +89,7 @@ const app = express();
 // One `kind: "request"` summary per request (always kept), with the request
 // id echoed in `x-request-id`. Health checks are not worth a record.
 app.use(autterRequests({ ignore: ["/healthz"] }));
-app.use(express.static("public"));
+app.use(express.static(fileURLToPath(new URL("./public", import.meta.url))));
 app.get("/healthz", (_req, res) => res.send("ok"));
 
 // Same-origin relay: the browser posts here; the key stays server-side.
@@ -123,6 +151,7 @@ app.use(autterErrorHandler());
 // first, so each error is reported once.)
 app.use(autterErrorResponse());
 
-app.listen(3000, () => {
-	console.log("example app on http://localhost:3000 (open it, then click the buttons)");
+const port = Number(process.env.PORT) || 3000;
+app.listen(port, () => {
+	console.log(`example app on http://localhost:${port} (open it, then click the buttons)`);
 });

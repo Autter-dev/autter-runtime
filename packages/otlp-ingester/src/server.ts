@@ -32,7 +32,7 @@ import {
 } from "./ingest-drops.js";
 import { ClickHouseStore, routeLatencyPoints } from "./clickhouse.js";
 import { normalizeLatencyHistograms } from "./latency.js";
-import { UPLOAD_KEY_PREFIX, type IngesterConfig } from "./config.js";
+import { isLocalAddress, LOCAL_DEV_KEY, UPLOAD_KEY_PREFIX, type IngesterConfig } from "./config.js";
 import { deriveFields, occurrenceIdFor } from "./fingerprint.js";
 import { causeTexts, type CauseText } from "./cause-chain.js";
 import { occurrenceIdentity, type CauseLink } from "./fingerprint-v3.js";
@@ -761,6 +761,15 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				return null;
 			}
 			refuse(req, res, { keyHash: autterKeyHash(key) }, "unknown_key", 401, { error: "invalid ingest key" });
+			return null;
+		}
+		// The built-in local key (local dev mode only, see config.ts): from
+		// this machine or a Docker bridge, never from another network. The
+		// socket address, not X-Forwarded-For, which a caller can write.
+		if (key === LOCAL_DEV_KEY && !isLocalAddress(req.socket.remoteAddress)) {
+			refuse(req, res, ctx, "unknown_key", 401, {
+				error: `${LOCAL_DEV_KEY} is accepted only from this machine — use a real ingest key`,
+			});
 			return null;
 		}
 		// Any key without an Autter prefix (self-host static keys) is judged

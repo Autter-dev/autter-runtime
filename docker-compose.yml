@@ -24,6 +24,13 @@ services:
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_PASSWORD: dev
+      # Local only: accept the built-in key autter_rt_local_dev_only from this
+      # machine, so `docker compose up` works without a key step. The ingester
+      # refuses that key from other networks, refuses this flag next to a key
+      # validator, and ignores the key without the flag. Never copy this line
+      # to a deployed ingester (deploy/single-server does not pass it).
+      AUTTER_LOCAL_DEV: ${AUTTER_LOCAL_DEV:-1}
+      # Your own keys work too (optional; e.g. in the git-ignored .env file).
       AUTTER_INGEST_KEYS: ${AUTTER_INGEST_KEYS:-}
       AUTTER_SINK_URL: ${AUTTER_SINK_URL:-}
       AUTTER_SINK_TOKEN: ${AUTTER_SINK_TOKEN:-}

@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [1.12.0] - 2026-11-08
+
+Packages: `otlp-ingester` 1.12.0, `runtime-node` 1.9.1, `runtime-browser` 1.8.1, `runtime-edge` 1.4.1, `runtime-cli` 1.3.1. `runtime-next` stays 1.9.0 and picks up the new `runtime-node`, `runtime-browser` and `runtime-edge` through its existing ranges. Upgrade the ingester first; give every client key at least one allowed origin before deploying it.
 
 `otlp-ingester`: a durable sink, honest readiness and idempotent writes. Migration `0023-readiness-and-sink-dead-letters` runs at boot (two new tables). Container health checks should use the new `/livez`; keep `/healthz` for load balancers (`deploy/aws/deploy.sh` does this). Any deploy order works with the platform: it already dedupes on `batchId`.
 

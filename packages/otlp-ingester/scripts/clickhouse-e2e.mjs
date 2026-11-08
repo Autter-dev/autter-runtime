@@ -20,7 +20,8 @@
  *   2. a partial failure — INSERT revoked on runtime_metrics_1m for one
  *      request — then the retry;
  *   3. a partial failure, the ingester killed, restarted, and the retry;
- *   4. a dropped table, and a wrong password: /healthz unready;
+ *   4. a dropped table the ingester may not recreate, and a wrong
+ *      password: /healthz unready (and ready again once the table is back);
  * and reports (without asserting) whether the server itself deduplicates a
  * retried async insert by its token when the ingester's receipts are off.
  * Exits non-zero on the first failed assertion.
@@ -266,17 +267,24 @@ async function main() {
 	check((await send(ingester, e1)) === 200, "export 1 re-sent after the restart");
 	await checkOneCopy(e1, one, "export 1 after the restart");
 
-	console.log("\n— 4. a dropped table makes /healthz unready until it is recreated");
+	console.log("\n— 4. a dropped table that cannot be recreated makes /healthz unready; once it can, the ingester heals");
+	// Without CREATE TABLE the ingester cannot put the table back (with it,
+	// the next readiness probe or write recreates it at once).
+	await sql(`REVOKE CREATE TABLE ON ${DB}.* FROM ${USER}`);
 	await sql(`DROP TABLE ${DB}.runtime_spans`);
 	const e4 = exportFor("dropped-table");
 	status = await send(ingester, e4);
 	check(status === 503, "a write into the dropped table answers 503", status);
 	h = await health(ingester);
-	check(h.status === 503 && h.body.clickhouse === "schema_missing", "/healthz: schema_missing", h.body.clickhouse);
-	check((await send(ingester, e4)) === 200, "the next write recreates the table and stores");
-	await checkOneCopy(e4, one, "after the table was recreated");
+	check(h.status === 503 && h.body.clickhouse !== "up", "/healthz is unready while the table is missing", h.body.clickhouse);
+	check(h.body.writes.failingTables.includes("runtime_spans"), "/healthz names the failing table", h.body.writes.failingTables);
+	await sql(`GRANT CREATE TABLE ON ${DB}.* TO ${USER}`);
 	h = await waitHealth(ingester, (r) => r.status === 200);
-	check(h.status === 200, "/healthz ready again", h.body);
+	check(h.status === 200, "/healthz ready again once the table could be recreated", h.body);
+	const spansBack = (await sql(`SELECT name FROM system.tables WHERE database = '${DB}' AND name = 'runtime_spans'`)).length;
+	check(spansBack === 1, "runtime_spans recreated by the ingester");
+	check((await send(ingester, e4)) === 200, "the retry stores");
+	await checkOneCopy(e4, one, "after the table was recreated");
 
 	console.log("\n— 5. a wrong password makes /healthz unready (not retryable)");
 	const wrong = await startIngester(14319, { CLICKHOUSE_PASSWORD: "not-the-password", INSERT_RECEIPTS_FILE: "off" });

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { IngesterConfig } from "./config.js";
+import { WriteHealth } from "./health.js";
 import { InsertReceipts } from "./insert-receipts.js";
 import { createIngesterApp } from "./server.js";
 import { batchIdFor, SINK_BATCH_LIMITS, SinkForwarder } from "./sink.js";
@@ -217,6 +218,25 @@ test("another replica retrying the same request sends the same dedup tokens", as
 	assert.ok(fromA);
 	assert.equal(fromA, fromB, "metrics inserted by both replicas share a token, so ClickHouse keeps one");
 	assert.equal(tokens("runtime_error_occurrences")[0], tokens("runtime_error_occurrences")[1]);
+});
+
+test("write health is per table: one table's successes never hide another that fails", () => {
+	let now = 0;
+	const writes = new WriteHealth(() => now);
+	writes.recordFailure("auth", "db.runtime_metrics_1m");
+	writes.recordOk("db.runtime_spans");
+	writes.recordOk("db.runtime_error_occurrences");
+	assert.equal(writes.failing(60_000), true);
+	assert.equal(writes.lastCategoryOrNull(60_000), "auth");
+	assert.deepEqual(writes.stats(60_000).failingTables, ["runtime_metrics_1m"]);
+	now = 61_000;
+	assert.equal(writes.failing(60_000), false, "a failure older than the window no longer counts");
+	now = 1_000;
+	writes.recordOk("db.runtime_metrics_1m");
+	assert.equal(writes.failing(60_000), false);
+	writes.recordFailure("unreachable");
+	writes.recordOk();
+	assert.equal(writes.failing(60_000), false, "a table-less success clears every table");
 });
 
 test("insert receipts are bounded and expire", async () => {
@@ -637,8 +657,18 @@ test("a 503 waits for sibling inserts still in flight, so an immediate retry wri
 	assert.equal((await app.post("/v1/traces", body)).status, 503);
 	assert.ok(Date.now() - started >= 250, "the 503 came after the slow sibling settled");
 	assert.equal(ch.inserts("runtime_spans").length, 1, "the sibling committed before the answer");
+	// The siblings' later successes must not hide the table that refuses.
+	let health = await fetch(`${app.url}/healthz`);
+	let report = (await health.json()) as { clickhouse: string; writes: { failingTables: string[] } };
+	assert.equal(health.status, 503);
+	assert.equal(report.clickhouse, "auth_failed");
+	assert.deepEqual(report.writes.failingTables, ["runtime_metrics_1m"]);
 	refuseMetrics = false;
 	assert.equal((await app.post("/v1/traces", body)).status, 200);
+	health = await fetch(`${app.url}/healthz`);
+	report = (await health.json()) as typeof report;
+	assert.equal(health.status, 200, JSON.stringify(report));
+	assert.deepEqual(report.writes.failingTables, []);
 	assert.equal(ch.inserts("runtime_spans").length, 1, "the retry did not write spans again");
 	assert.equal(ch.inserts("runtime_metrics_1m").filter((c) => c.rows > 0).length, 2);
 });

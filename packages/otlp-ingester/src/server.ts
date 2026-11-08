@@ -595,12 +595,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 
 	async function readinessReport() {
 		const probe = await readiness.get();
-		const writes = store.writes.stats();
+		const writes = store.writes.stats(WRITE_FAILURE_WINDOW_MS);
 		let state: StorageState = probe.state;
 		// The probe passing does not clear real writes that keep failing (a
 		// table the probe does not touch, a grant on one table).
 		if (state === "up" && store.writes.failing(WRITE_FAILURE_WINDOW_MS)) {
-			state = stateFor(store.writes.lastCategoryOrNull() ?? "error");
+			state = stateFor(store.writes.lastCategoryOrNull(WRITE_FAILURE_WINDOW_MS) ?? "error");
 		}
 		const ok = state === "up";
 		const dropTotals = drops.totals();
@@ -670,7 +670,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	/** Throw unless storage can take writes (cached readiness). */
 	async function requireWritable(): Promise<void> {
 		if (store.writes.failing(WRITE_FAILURE_WINDOW_MS)) {
-			throw new Error(`storage is failing writes (${store.writes.lastCategoryOrNull() ?? "error"})`);
+			throw new Error(`storage is failing writes (${store.writes.lastCategoryOrNull(WRITE_FAILURE_WINDOW_MS) ?? "error"})`);
 		}
 		const probe = await readiness.get();
 		if (probe.state !== "up") throw new Error(`storage not writable (${probe.state})`);

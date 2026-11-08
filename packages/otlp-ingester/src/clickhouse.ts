@@ -334,6 +334,8 @@ export class ClickHouseStore {
 			await this.applyDedupWindow();
 			this.appliedIds = migrations.map((migration) => migration.id);
 			this.schemaState = "ready";
+			// Every table exists again: a "table missing" failure is resolved.
+			if (this.writes.clearCategory("schema")) this.onWriteStateChange?.();
 		})().catch((err) => {
 			this.ensurePromise = null;
 			this.schemaState = "failed";
@@ -429,6 +431,10 @@ export class ClickHouseStore {
 	private async insertTracked(
 		params: { table: string; format: "JSONEachRow"; clickhouse_settings?: ClickHouseSettings; values: unknown[] },
 		dedupToken?: string,
+		/** Count the outcome toward readiness: ingest writes do; background
+		 * bookkeeping (SDK versions, drop counts, ingester info, dead
+		 * letters) is best-effort and does not. */
+		track = true,
 	): Promise<void> {
 		const wasFailing = this.writes.stats().consecutiveFailures > 0;
 		try {
@@ -460,13 +466,13 @@ export class ClickHouseStore {
 					}
 				}
 			}
-			this.writes.recordOk();
-			if (wasFailing) this.onWriteStateChange?.();
+			if (track) this.writes.recordOk(params.table);
+			if (track && wasFailing) this.onWriteStateChange?.();
 		} catch (err) {
 			const category = storageErrorCategory(err);
-			this.writes.recordFailure(category);
+			if (track) this.writes.recordFailure(category, params.table);
 			if (category === "schema") this.resetSchema();
-			this.onWriteStateChange?.();
+			if (track) this.onWriteStateChange?.();
 			throw err;
 		}
 	}
@@ -550,7 +556,7 @@ export class ClickHouseStore {
 				instance_id: row.instanceId,
 				file: row.file,
 			})),
-		});
+		}, undefined, false);
 	}
 
 	/**
@@ -618,7 +624,7 @@ export class ClickHouseStore {
 				last_seen: row.seenAt.toISOString(),
 				via: row.via,
 			})),
-		});
+		}, undefined, false);
 	}
 
 	/** Rejection and drop counts (ingest-drops.ts); rows carry their own tenant. */
@@ -640,7 +646,7 @@ export class ClickHouseStore {
 				requests: row.requests,
 				records: row.records,
 			})),
-		});
+		}, undefined, false);
 	}
 
 	/** Record this ingester's version and schema level (global, not tenant data). */
@@ -656,7 +662,7 @@ export class ClickHouseStore {
 				report: JSON.stringify(info.report),
 				reported_at: new Date().toISOString(),
 			}],
-		});
+		}, undefined, false);
 	}
 
 	async ping(): Promise<boolean> {

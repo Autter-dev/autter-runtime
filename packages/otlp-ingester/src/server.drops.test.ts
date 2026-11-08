@@ -91,8 +91,8 @@ async function start(overrides: Partial<IngesterConfig> = {}) {
 type App = Awaited<ReturnType<typeof start>>;
 
 /** The one row counted for this route and reason (summed across minutes and writes). */
-function only(rows: IngestDropRow[], route: string, reason: string) {
-	const matching = rows.filter((row) => row.route === route && row.reason === reason);
+function only(rows: IngestDropRow[], route: string, reason: string, keyHash?: string) {
+	const matching = rows.filter((row) => row.route === route && row.reason === reason && (keyHash === undefined || row.keyHash === keyHash));
 	assert.ok(matching.length > 0, `nothing counted for ${route} ${reason}: ${JSON.stringify(rows.map((r) => [r.route, r.reason]))}`);
 	const [first] = matching;
 	return {
@@ -198,7 +198,7 @@ test("every rejection is counted under its reason, tenant and status", async (t)
 	assert.equal(rows.filter((row) => row.kind === "rejected").reduce((sum, row) => sum + row.requests, 0), 21);
 });
 
-test("a key the validator can't check is key_unverified; one it refuses is unknown_key", async (t) => {
+test("a key the validator can't check is key_unverified (503, Retry-After); one it refuses is unknown_key (401)", async (t) => {
 	let status = 500;
 	const validator = createServer((req, res) => {
 		req.resume();
@@ -210,19 +210,26 @@ test("a key the validator can't check is key_unverified; one it refuses is unkno
 	const app = await start({ ingestKeys: [], keyValidatorUrl: url });
 	t.after(app.close);
 	const key = (n: number) => `autter_rt_${String(n).repeat(48)}`;
-	assert.equal((await app.json("/v1/traces", key(1), traces(1))).status, 401);
-	// Cached: the same answer, and the same reason, inside the cache window.
-	assert.equal((await app.json("/v1/traces", key(1), traces(1))).status, 401);
-	status = 403;
+	const first = await app.json("/v1/traces", key(1), traces(1));
+	assert.equal(first.status, 503);
+	assert.ok(Number(first.headers.get("retry-after")) >= 1);
+	// Inside the retry window: the same answer without asking again.
+	assert.equal((await app.json("/v1/traces", key(1), traces(1))).status, 503);
+	status = 404;
 	assert.equal((await app.json("/v1/traces", key(2), traces(1))).status, 401);
+	// A 4xx that is not a refusal of the key (here: the validator rejects
+	// the ingester's token) is not a definite answer either.
+	status = 401;
+	assert.equal((await app.json("/v1/traces", key(4), traces(1))).status, 503);
 	// Unreachable validator.
 	const down = await start({ ingestKeys: [], keyValidatorUrl: "http://127.0.0.1:1/validate" });
 	t.after(down.close);
-	assert.equal((await down.json("/v1/logs", key(3), { resourceLogs: [] })).status, 401);
+	assert.equal((await down.json("/v1/logs", key(3), { resourceLogs: [] })).status, 503);
 
 	const rows = await app.counted();
-	assert.deepEqual(only(rows, "/v1/traces", "key_unverified"), { tenant: ["", ""], kind: "rejected", status: 401, keyHash: sha256(key(1)), requests: 2, records: 2 });
+	assert.deepEqual(only(rows, "/v1/traces", "key_unverified", sha256(key(1))), { tenant: ["", ""], kind: "rejected", status: 503, keyHash: sha256(key(1)), requests: 2, records: 2 });
 	assert.deepEqual(only(rows, "/v1/traces", "unknown_key").keyHash, sha256(key(2)));
+	assert.deepEqual(only(rows, "/v1/traces", "key_unverified", sha256(key(4))).status, 503);
 	assert.deepEqual(only(await down.counted(), "/v1/logs", "key_unverified").keyHash, sha256(key(3)));
 });
 

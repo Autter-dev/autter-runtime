@@ -49,10 +49,10 @@ export const DROP_REASONS = {
 	// ── rejected: the request got this status and nothing was stored ──
 	/** No key in `Authorization`, `x-autter-key` or `?key=`. */
 	missing_key: { kind: "rejected", status: 401 },
-	/** Not a configured key, and the validator did not accept it (revoked, mistyped, another repository's deployment). */
+	/** Not a configured key, and the validator definitely refused it (revoked, mistyped, another repository's deployment). */
 	unknown_key: { kind: "rejected", status: 401 },
-	/** The key validator could not answer (unreachable, timeout, 5xx) and nothing was cached. */
-	key_unverified: { kind: "rejected", status: 401 },
+	/** The key validator could not answer (unreachable, timeout, 5xx) and no good answer recent enough was cached (503, Retry-After; 401 before 1.12.0). */
+	key_unverified: { kind: "rejected", status: 503 },
 	/** An upload key (`autter_rtu_…`) on a telemetry route. */
 	upload_key_not_allowed: { kind: "rejected", status: 403 },
 	/** A client key (`autter_rtc_…`) on an OTLP or source map route. */

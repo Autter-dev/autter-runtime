@@ -28,19 +28,37 @@ import { LruMap } from "./limits.js";
  * `suppression` array, or a static entry's, parsed by suppression.ts and
  * cached with the key, so a rule change reaches the ingester within the
  * cache TTL (60 s). Validators before 1.9.0 send none: nothing suppressed.
+ *
+ * Validator answers (1.12.0):
+ *  - 2xx with a tenant: the key is valid. Cached for 60 s, and kept as the
+ *    last good answer for up to 15 min in case the validator goes down.
+ *  - 2xx without a usable tenant, 404 or 410: the key is definitely
+ *    invalid. Cached for 60 s; the ingester answers 401. Nothing else
+ *    produces a 401 for a key that was sent.
+ *  - Anything else (5xx, 429, another 4xx such as a wrong validator token,
+ *    an unreadable body, a timeout, a network error): the validator could
+ *    not answer. Nothing negative is cached. The key's last good answer is
+ *    used while it is under the stale cap; otherwise the ingester answers
+ *    503 with Retry-After, which OTLP exporters retry, instead of a 401
+ *    they treat as permanent. The validator is not asked again for that key
+ *    for VALIDATOR_RETRY_MS, so an outage doesn't add a 5 s timeout to
+ *    every request.
  */
 
 interface CacheEntry {
-	ctx: IngestContext | null;
-	/** Why `ctx` is null: the validator said no, or could not answer (5xx). */
-	failure?: KeyFailure;
-	expiresAt: number;
+	/**
+	 * The validator's last definite answer and when it was given: a tenant,
+	 * or null for "invalid key". Absent when it has never answered.
+	 */
+	answer?: { ctx: IngestContext | null; at: number };
+	/** Don't ask the validator about this key again before this time. */
+	nextCheckAt: number;
 }
 
 /**
  * Why a key did not resolve: `unknown_key` — not a static key and the
- * validator did not accept it; `key_unverified` — the validator could not
- * answer (unreachable, timed out or a 5xx) and no earlier answer was cached;
+ * validator definitely refused it (401); `key_unverified` — the validator
+ * could not answer and there is no good answer recent enough to use (503);
  * `lookup_limited` — the key is not cached and the unknown-key budget (per
  * client address, and for the whole ingester) is spent, so the validator was
  * not asked (answered 429: the exporter retries).
@@ -49,12 +67,23 @@ export type KeyFailure = "unknown_key" | "key_unverified" | "lookup_limited";
 
 export type KeyResolution =
 	| { ctx: IngestContext; failure?: undefined }
-	| { ctx: null; failure: KeyFailure };
+	| { ctx: null; failure: "unknown_key" | "lookup_limited" }
+	/** `retryAfterSeconds`: when the validator will be asked again (for Retry-After). */
+	| { ctx: null; failure: "key_unverified"; retryAfterSeconds: number };
+
+/** How long a definite validator answer is used before asking again. */
+export const VALIDATOR_CACHE_TTL_MS = 60_000;
+/** How long after it was given a valid answer may still be used while the validator can't answer. */
+export const VALIDATOR_STALE_CAP_MS = 15 * 60_000;
+/** After the validator failed to answer for a key, how long before asking again. */
+export const VALIDATOR_RETRY_MS = 5_000;
+/** At most one "validator unavailable" log line per this interval. */
+const FAILURE_LOG_INTERVAL_MS = 60_000;
+
+type ValidatorAnswer = { kind: "valid"; ctx: IngestContext } | { kind: "invalid" } | { kind: "unavailable"; reason: string };
 
 /** Asked before a key that is in neither cache goes to the validator; false = don't ask. */
 export type LookupGate = () => boolean | Promise<boolean>;
-
-const VALIDATOR_CACHE_TTL_MS = 60_000;
 
 /** Keys the validator accepted (fresh or stale). Junk keys never enter it, so they can't evict these. */
 const KNOWN_KEYS_MAX = 10_000;
@@ -75,15 +104,16 @@ export interface KeyResolverOptions {
 
 export class KeyResolver {
 	private readonly staticKeys = new Map<string, IngestContext>();
-	/** Validator answers that named a tenant. Kept past expiry (LRU) so an outage can fall back to them. */
+	/** Validator answers that named a tenant. Kept past expiry (LRU) so an outage can fall back to them (under the stale cap). */
 	private readonly known: LruMap<string, CacheEntry>;
-	/** Validator refusals and failures: a separate LRU, so junk keys only ever evict each other. */
+	/** Validator refusals, and failures for keys with no good answer: a separate LRU, so junk keys only ever evict each other. */
 	private readonly unknown: LruMap<string, CacheEntry>;
 	private readonly now: () => number;
 	/** One validator call per key at a time: concurrent requests for the same key share it. */
 	private readonly inflight = new Map<string, Promise<KeyResolution>>();
 	/** Validator calls made (for tests and stats). */
 	validatorCalls = 0;
+	private lastFailureLogAt = Number.NEGATIVE_INFINITY;
 
 	constructor(
 		private readonly config: IngesterConfig,
@@ -132,7 +162,7 @@ export class KeyResolver {
 	 * which must never cost a validator call.
 	 */
 	peek(key: string): IngestContext | null {
-		return this.staticKeys.get(key) ?? this.known.peek(key)?.ctx ?? null;
+		return this.staticKeys.get(key) ?? this.known.peek(key)?.answer?.ctx ?? null;
 	}
 
 	async resolve(key: string): Promise<IngestContext | null> {
@@ -140,7 +170,7 @@ export class KeyResolver {
 	}
 
 	/**
-	 * `resolve`, plus why a key that did not resolve failed (for drop counts).
+	 * `resolve`, plus why a key that did not resolve failed (for drop counts and the status).
 	 * `gate` is asked only when the validator would be called for a key that
 	 * is in neither cache (a known key being refreshed is never gated): it
 	 * spends the unknown-key budget.
@@ -153,9 +183,9 @@ export class KeyResolver {
 
 		const now = this.now();
 		const known = this.known.get(key);
-		if (known && known.expiresAt > now) return resolution(known);
+		if (known && known.nextCheckAt > now) return this.fromEntry(known);
 		const unknown = this.unknown.get(key);
-		if (unknown && unknown.expiresAt > now) return resolution(unknown);
+		if (unknown && unknown.nextCheckAt > now) return this.fromEntry(unknown);
 
 		// Requests that arrive while this key is being looked up (or gated)
 		// share the outcome: one gate check, at most one validator call.
@@ -172,10 +202,61 @@ export class KeyResolver {
 
 	private async lookup(key: string, cached: CacheEntry | undefined): Promise<KeyResolution> {
 		this.validatorCalls += 1;
-		let ctx: IngestContext | null = null;
-		let failure: KeyFailure = "unknown_key";
+		const answer = await this.askValidator(this.config.keyValidatorUrl!, key);
+		const now = this.now();
+		if (answer.kind === "unavailable") {
+			this.logFailure(answer.reason);
+			// Keep the last definite answer (fromEntry decides whether it may
+			// still be used); never record the failure as an answer.
+			const entry: CacheEntry = {
+				...(cached?.answer ? { answer: cached.answer } : {}),
+				nextCheckAt: now + VALIDATOR_RETRY_MS,
+			};
+			if (entry.answer?.ctx) this.known.set(key, entry);
+			else this.unknown.set(key, entry);
+			return this.fromEntry(entry);
+		}
+		const entry: CacheEntry = {
+			answer: { ctx: answer.kind === "valid" ? answer.ctx : null, at: now },
+			nextCheckAt: now + VALIDATOR_CACHE_TTL_MS,
+		};
+		if (answer.kind === "valid") {
+			this.known.set(key, entry);
+			this.unknown.delete(key);
+		} else {
+			// A key the validator now refuses (revoked) leaves the known cache:
+			// an outage must not bring it back.
+			this.known.delete(key);
+			this.unknown.set(key, entry);
+		}
+		return this.fromEntry(entry);
+	}
+
+	/**
+	 * What a cache entry says now: a fresh answer as given; a valid answer
+	 * past its TTL (the validator could not answer since) while it is under
+	 * the stale cap; otherwise key_unverified. A refusal past its TTL is not
+	 * reused: the key might have been created since.
+	 */
+	private fromEntry(entry: CacheEntry): KeyResolution {
+		const now = this.now();
+		const answer = entry.answer;
+		if (answer) {
+			const age = now - answer.at;
+			if (answer.ctx && age < VALIDATOR_STALE_CAP_MS) return { ctx: answer.ctx };
+			if (!answer.ctx && age < VALIDATOR_CACHE_TTL_MS) return { ctx: null, failure: "unknown_key" };
+		}
+		return {
+			ctx: null,
+			failure: "key_unverified",
+			retryAfterSeconds: Math.max(1, Math.ceil((entry.nextCheckAt - now) / 1000)),
+		};
+	}
+
+	private async askValidator(url: string, key: string): Promise<ValidatorAnswer> {
+		let response: globalThis.Response;
 		try {
-			const response = await fetch(this.config.keyValidatorUrl!, {
+			response = await fetch(url, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
@@ -191,49 +272,51 @@ export class KeyResolver {
 				body: JSON.stringify({ key }),
 				signal: AbortSignal.timeout(5000),
 			});
-			if (response.ok) {
-				const body = (await response.json()) as {
-					orgId?: string;
-					repositoryId?: string;
-					scope?: unknown;
-					allowedOrigins?: string[];
-					suppression?: unknown;
-				};
-				const scope = body.scope === undefined || body.scope === null ? defaultScopeFor(key) : body.scope;
-				if (body.orgId && body.repositoryId && isIngestKeyScope(scope)) {
-					const suppression = parseSuppressionRules(body.suppression);
-					ctx = {
-						orgId: body.orgId,
-						repositoryId: body.repositoryId,
-						scope,
-						allowedOrigins: body.allowedOrigins ?? [],
-						...(suppression.length ? { suppression } : {}),
-					};
-				}
-			} else if (response.status >= 500) {
-				failure = "key_unverified";
-			}
-		} catch {
-			// Validator unreachable: fail closed for unknown keys, but reuse a
-			// stale cache entry if we have one so transient validator outages
-			// don't drop telemetry from known-good keys.
-			if (cached) return resolution(cached);
-			return { ctx: null, failure: "key_unverified" };
+		} catch (err) {
+			return { kind: "unavailable", reason: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
 		}
-		const entry: CacheEntry = { ctx, expiresAt: this.now() + VALIDATOR_CACHE_TTL_MS, ...(ctx ? {} : { failure }) };
-		if (ctx) {
-			this.known.set(key, entry);
-			this.unknown.delete(key);
-		} else {
-			// A key the validator now refuses (revoked) leaves the known cache:
-			// an outage must not bring it back.
-			this.known.delete(key);
-			this.unknown.set(key, entry);
+		if (response.status === 404 || response.status === 410) {
+			await response.body?.cancel().catch(() => {});
+			return { kind: "invalid" };
 		}
-		return resolution(entry);
+		if (!response.ok) {
+			await response.body?.cancel().catch(() => {});
+			return { kind: "unavailable", reason: `HTTP ${response.status}` };
+		}
+		let body: {
+			orgId?: string;
+			repositoryId?: string;
+			scope?: unknown;
+			allowedOrigins?: string[];
+			suppression?: unknown;
+		};
+		try {
+			body = (await response.json()) as typeof body;
+		} catch (err) {
+			return { kind: "unavailable", reason: `unreadable answer (${err instanceof Error ? err.message : String(err)})` };
+		}
+		if (!body || typeof body !== "object") return { kind: "invalid" };
+		const scope = body.scope === undefined || body.scope === null ? defaultScopeFor(key) : body.scope;
+		if (!body.orgId || !body.repositoryId || !isIngestKeyScope(scope)) return { kind: "invalid" };
+		const suppression = parseSuppressionRules(body.suppression);
+		return {
+			kind: "valid",
+			ctx: {
+				orgId: body.orgId,
+				repositoryId: body.repositoryId,
+				scope,
+				allowedOrigins: body.allowedOrigins ?? [],
+				...(suppression.length ? { suppression } : {}),
+			},
+		};
 	}
-}
 
-function resolution(entry: CacheEntry): KeyResolution {
-	return entry.ctx ? { ctx: entry.ctx } : { ctx: null, failure: entry.failure ?? "unknown_key" };
+	private logFailure(reason: string): void {
+		const now = this.now();
+		if (now - this.lastFailureLogAt < FAILURE_LOG_INTERVAL_MS) return;
+		this.lastFailureLogAt = now;
+		console.warn(
+			`key validator could not answer (${reason}): serving cached keys for up to ${VALIDATOR_STALE_CAP_MS / 60_000} min, 503 for the rest`,
+		);
+	}
 }

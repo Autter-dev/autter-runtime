@@ -62,6 +62,21 @@ The validator webhook may return the same extra fields:
 repository's suppression rules (1.9.0, below); a static entry takes
 `"suppression": [ … ]` too.
 
+### Validator outages
+
+Only a definite refusal from the validator — 404, 410, or a 2xx without
+`orgId` and `repositoryId` (or with a scope this ingester doesn't know) —
+makes a key invalid: the ingester answers 401 and remembers the refusal
+for 60 s. Every other outcome (a 5xx, 429 or other 4xx such as a wrong
+`AUTTER_KEY_VALIDATOR_TOKEN`, an unreadable body, a 5 s timeout, a
+network error) means the validator could not answer, and is never
+remembered as a refusal. A key the validator accepted in the last 15
+minutes keeps working on that answer. Any other key gets
+`503 Retry-After: 5`, which OTLP exporters and the Autter SDKs retry
+(401 is permanent for them). The validator is asked about that key again
+after 5 s, so a recovered validator is picked up on the next retry. One
+warning a minute is logged while the validator can't answer.
+
 ### Volume control (1.9.0)
 
 - **Loop collapse.** Per tenant and identity (fingerprints, service,
@@ -114,7 +129,7 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / empty | |
 | `CLICKHOUSE_DATABASE` | `autter_runtime` | Created automatically |
 | `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` (optional `scope`, `allowedOrigins`, `suppression`) |
-| `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId, scope?, allowedOrigins?, suppression?}` (60 s cache) |
+| `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId, scope?, allowedOrigins?, suppression?}`, or 404 for an unknown or revoked key (60 s cache; see [Validator outages](#validator-outages)) |
 | `AUTTER_KEY_VALIDATOR_TOKEN` | — | Bearer token sent to the validator |
 | `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once (`docs/ARCHITECTURE.md`) |
 | `AUTTER_SINK_TOKEN` | — | Bearer token sent to the sink |

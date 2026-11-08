@@ -576,7 +576,17 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				refuse(req, res, { keyHash: autterKeyHash(key) }, "rate_limited", 429, { error: "too many unrecognised keys, retry later" });
 				return null;
 			}
-			refuse(req, res, { keyHash: autterKeyHash(key) }, resolution.failure, 401, { error: "invalid ingest key" });
+			if (resolution.failure === "key_unverified") {
+				// The validator could not answer and nothing recent enough is
+				// cached. Exporters drop a batch for good on 401 but retry a
+				// 503, so a validator outage must not look like a bad key.
+				res.setHeader("retry-after", String(resolution.retryAfterSeconds));
+				refuse(req, res, { keyHash: autterKeyHash(key) }, "key_unverified", 503, {
+					error: "ingest key could not be checked right now, retry later",
+				});
+				return null;
+			}
+			refuse(req, res, { keyHash: autterKeyHash(key) }, "unknown_key", 401, { error: "invalid ingest key" });
 			return null;
 		}
 		if (ctx.scope === "upload") {

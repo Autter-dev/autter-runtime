@@ -251,8 +251,8 @@ rejection finds nothing refused in the last hour).
 | Reason | Kind | Status | When |
 | --- | --- | --- | --- |
 | `missing_key` | rejected | 401 | no key in `Authorization`, `x-autter-key` or `?key=` |
-| `unknown_key` | rejected | 401 | not a configured key, and the validator did not accept it (revoked, mistyped, another deployment's) |
-| `key_unverified` | rejected | 401 | the key validator could not answer (unreachable, timed out, 5xx) and no earlier answer was cached |
+| `unknown_key` | rejected | 401 | not a configured key, and the validator refused it: 404, 410, or a 2xx without a usable tenant (revoked, mistyped, another deployment's) |
+| `key_unverified` | rejected | 503 | the key validator could not answer (unreachable, timed out, 5xx, another 4xx, an unreadable answer) and the key has no valid answer from the last 15 minutes; sent with `Retry-After` (401 before 1.12.0) |
 | `upload_key_not_allowed` | rejected | 403 | an upload key (`autter_rtu_…`) on a telemetry route |
 | `client_key_not_allowed` | rejected | 403 | a client key (`autter_rtc_…`) on an OTLP or source map route |
 | `origin_not_allowed` | rejected | 403 | a client key from an origin missing from its allow-list |
@@ -292,7 +292,7 @@ that can be known: the parsed JSON is walked, a protobuf body is counted
 from its wire format without being decoded, and a body that was never read
 (413, a bad encoding) or not understood counts 0.
 
-**The null tenant.** A key that does not resolve (401) has no tenant. Those
+**The null tenant.** A key that does not resolve (401, or 503 while the validator can't answer) has no tenant. Those
 requests are counted with `org_id = ''` and `repository_id = ''` rather than
 skipped: they are the commonest silent failure (a rotated key still
 deployed, a validator outage), and skipping them would leave nothing to

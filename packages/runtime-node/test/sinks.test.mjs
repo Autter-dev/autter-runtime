@@ -3,7 +3,8 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, mkdirSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { consoleSink, fileSink } from "../dist/index.js";
+import { createServer } from "node:http";
+import { consoleSink, fileSink, otlpSink } from "../dist/index.js";
 
 const context = { endpoint: "http://x", apiKey: "k", service: "svc", environment: "development" };
 const summary = (i) => ({
@@ -86,4 +87,43 @@ test("consoleSink: JSON lines identical to 1.4.0, pretty tree without ANSI off-T
 	const colored = consoleSink({ format: "pretty", color: true, write: (line) => lines.push(line) });
 	colored.write(summary(3));
 	assert.ok(lines[2].includes("\u001b["));
+});
+
+test("otlpSink retries 503 and 429 after Retry-After within the flush; a 401 is tried once", async (t) => {
+	const answers = [];
+	const at = [];
+	const server = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			at.push(Date.now());
+			const [status, headers] = answers.shift() ?? [202, {}];
+			res.writeHead(status, headers).end("{}");
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	t.after(() => server.close());
+	const endpoint = `http://127.0.0.1:${server.address().port}`;
+
+	// The ingester's answer while its key validator is down, then back.
+	answers.push([503, { "retry-after": "1" }], [429, {}], [202, {}]);
+	const sink = otlpSink();
+	sink.start({ ...context, endpoint });
+	sink.write(summary(1));
+	await sink.flush();
+	assert.equal(at.length, 3);
+	assert.ok(at[1] - at[0] >= 950, `waited for Retry-After (${at[1] - at[0]} ms)`);
+	assert.ok(at[2] - at[1] >= 900, `then backed off (${at[2] - at[1]} ms)`);
+	assert.equal(sink.buffered(), 0);
+
+	// A refused key: one attempt, the batch kept for a later flush.
+	at.length = 0;
+	answers.push([401, {}]);
+	const refused = otlpSink();
+	refused.start({ ...context, endpoint });
+	refused.write(summary(2));
+	await assert.rejects(refused.flush(), /\(401\)/);
+	assert.equal(at.length, 1);
+	assert.equal(refused.buffered(), 1);
+	await refused.shutdown?.().catch(() => {});
+	await sink.shutdown?.();
 });

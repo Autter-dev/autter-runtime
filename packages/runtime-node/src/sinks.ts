@@ -79,7 +79,9 @@ interface QueuedLog {
  * OTLP/HTTP JSON export to `${endpoint}/v1/logs`. Bounded exactly like
  * 1.4.0: 1000 records / 4 MiB buffered, 256 KiB per record, batches of 50
  * (≤ 512 KiB), 3 attempts within a 10 s deadline, exponential back-off
- * on failure, undelivered records reported at shutdown.
+ * on failure, undelivered records reported at shutdown. A 429 or 5xx is
+ * retried after its Retry-After (else 500 ms, 1 s); any other 4xx is not
+ * retried within the flush.
  */
 export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 	let context: RuntimeSinkContext | null = null;
@@ -91,6 +93,8 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 	let flushing: Promise<void> | null = null;
 	let stopping = false;
 	let failureStreak = 0;
+	/** The last failed attempt's wait (Retry-After, else back-off): the next flush is no sooner. */
+	let nextFlushAfter = 0;
 
 	const scheduleFlush = () => {
 		if (!timer && context && !stopping && queue.length) {
@@ -99,7 +103,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 					timer = undefined;
 					void flush().catch(() => {});
 				},
-				Math.min(30000, 2000 * 2 ** Math.min(failureStreak, 4)),
+				Math.max(nextFlushAfter, Math.min(30000, 2000 * 2 ** Math.min(failureStreak, 4))),
 			);
 			timer.unref();
 		}
@@ -143,6 +147,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 				);
 				let failure: unknown;
 				for (let attempt = 0; attempt < 3; attempt++) {
+					let retryAfter: string | null = null;
 					try {
 						if (Date.now() >= deadline)
 							throw new Error("Runtime log flush exceeded 10 seconds");
@@ -158,13 +163,26 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 							),
 						});
 						observeIngesterResponse({ status: response.status, headers: response.headers, route: "/v1/logs" });
-						if (!response.ok)
-							throw new Error(`Runtime log export failed (${response.status})`);
-						failure = undefined;
-						break;
+						if (!response.ok) {
+							failure = new Error(`Runtime log export failed (${response.status})`);
+							// A refused key or payload won't change on the next attempt;
+							// 429 and 5xx (e.g. 503 while the ingester can't check the
+							// key) may, after the answer's Retry-After.
+							if (response.status !== 429 && response.status < 500) break;
+							retryAfter = response.headers.get("retry-after");
+						} else {
+							failure = undefined;
+							break;
+						}
 					} catch (error) {
 						failure = error;
 					}
+					const seconds = Number(retryAfter);
+					const wait = seconds > 0 ? Math.min(seconds * 1000, 300_000) : 500 * 2 ** attempt;
+					nextFlushAfter = Math.max(nextFlushAfter, wait);
+					// The last attempt, or past the deadline: the next flush retries, no sooner than the wait.
+					if (attempt >= 2 || Date.now() + wait >= deadline) break;
+					await new Promise((resolve) => setTimeout(resolve, wait));
 				}
 				inFlight = 0;
 				if (failure) {
@@ -176,6 +194,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 				}
 				inFlightBytes = 0;
 				failureStreak = 0;
+				nextFlushAfter = 0;
 			}
 		})().finally(() => {
 			flushing = null;

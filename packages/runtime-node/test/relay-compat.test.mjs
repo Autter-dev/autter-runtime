@@ -66,3 +66,35 @@ test("relay warns once when CSP events reach an ingester without CSP support", a
 		await old.close();
 	}
 });
+
+test("the relay retries a forward the ingester answers 503 (Retry-After) or 429, never a 401", async () => {
+	const answers = [[503, { "retry-after": "1" }], [429, {}], [202, {}], [401, {}]];
+	const at = [];
+	const server = await ingester((res) => {
+		at.push(Date.now());
+		const [status, headers] = answers.shift() ?? [202, {}];
+		res.writeHead(status, headers).end("{}");
+	});
+	try {
+		const POST = createBrowserRelayFetchHandler({ apiKey: "k", endpoint: server.url, perIpRateLimit: false, compatCheck: false });
+		const send = () =>
+			POST(new Request("http://app.test/api/autter", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ version: 1, service: "web", environment: "production", events: [event("csp_violation")] }),
+			}));
+		assert.equal((await send()).status, 202);
+		await until(() => server.bodies.length === 3, 5000);
+		assert.equal(server.bodies.length, 3);
+		assert.deepEqual(server.bodies[2], server.bodies[0]);
+		assert.ok(at[1] - at[0] >= 950, `waited for Retry-After (${at[1] - at[0]} ms)`);
+		assert.ok(at[2] - at[1] >= 1900, `then backed off (${at[2] - at[1]} ms)`);
+
+		assert.equal((await send()).status, 202);
+		await until(() => server.bodies.length === 4);
+		await new Promise((r) => setTimeout(r, 1200));
+		assert.equal(server.bodies.length, 4, "a 401 is final");
+	} finally {
+		await server.close();
+	}
+});

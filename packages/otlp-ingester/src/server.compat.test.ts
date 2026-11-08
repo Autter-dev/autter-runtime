@@ -174,7 +174,7 @@ test("ingest responses carry the version header; SDK versions are recorded once 
 			});
 		const ok = await browser("1.4.0");
 		assert.equal(ok.status, 202);
-		assert.equal(ok.headers.get("access-control-expose-headers"), "x-autter-ingester-version");
+		assert.equal(ok.headers.get("access-control-expose-headers"), "x-autter-ingester-version, retry-after");
 		assert.equal((await browser("<img>")).status, 202);
 		await waitFor(() => ch.inserts.runtime_sdk_versions!.some((row) => row.sdk_name === "@autter/runtime-browser"));
 		const browserRows = ch.inserts.runtime_sdk_versions!.filter((row) => row.sdk_name === "@autter/runtime-browser");

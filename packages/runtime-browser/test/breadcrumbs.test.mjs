@@ -30,6 +30,8 @@ class FakeXHR {
 	emit(name) { this.listeners.get(name)?.call(this); }
 }
 
+// The tracker's own scheduled sends use the global fetch (not window.fetch).
+globalThis.fetch = async () => new Response(null, { status: 202 });
 globalThis.Element = Element;
 globalThis.XMLHttpRequest = FakeXHR;
 globalThis.location = { href: "https://app.example.test/", pathname: "/" };

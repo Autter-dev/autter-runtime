@@ -304,9 +304,13 @@ coverage panel shows how many they left out.
 ## Batching & delivery
 
 Events queue and flush at 10 events / 5 s / page hidden / `pagehide` /
-manually; errors trigger a fast flush (500 ms). Delivery uses
-`navigator.sendBeacon` (JSON blob) with a `fetch(keepalive)` fallback, so
-events survive page navigation. A hard cap of 200 events per session
+manually; errors trigger a fast flush (500 ms). Timed and full-queue
+flushes use `fetch`, so a 429, 5xx or network error (for example the
+ingester's 503 while it can't check your key) is retried after the answer's
+`Retry-After` (at most 60 s), else after 5, 10 and 20 s, before the events
+are dropped; a 401 or other 4xx is not retried. `flush()`, page hidden and
+`pagehide` use `navigator.sendBeacon` (JSON blob) with a `fetch(keepalive)`
+fallback, so events survive page navigation. A hard cap of 200 events per session
 prevents error loops from flooding (events left out by `beforeSend` or the
 filters do not count toward it); the ingester also collapses a looping error
 into one sample a minute with an exact count (1.9.0).

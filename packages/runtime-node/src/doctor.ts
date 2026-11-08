@@ -34,7 +34,7 @@ export interface DoctorReport {
 	sdks: SdkIdentity[];
 	ingester: IngesterCompatInfo | null;
 	ingesterError?: string;
-	key?: "accepted" | "rejected" | "client_key" | "storage_unavailable" | "unknown";
+	key?: "accepted" | "rejected" | "client_key" | "storage_unavailable" | "unverified" | "unknown";
 	features: Array<{ id: string; title: string; status: "ok" | "incompatible" | "unknown" }>;
 	issues: CompatIssue[];
 	exitCode: 0 | 1 | 2;
@@ -99,7 +99,8 @@ async function checkKey(endpoint: string, key: string, timeoutMs: number): Promi
 	if (res.status >= 200 && res.status < 300) return "accepted";
 	if (res.status === 401) return "rejected";
 	if (res.status === 403) return "client_key";
-	if (res.status === 503) return "storage_unavailable";
+	// 503 with Retry-After (ingester 1.12.0+): it could not check the key right now.
+	if (res.status === 503) return res.headers["retry-after"] ? "unverified" : "storage_unavailable";
 	return "unknown";
 }
 
@@ -146,7 +147,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
 	});
 	const exitCode: DoctorReport["exitCode"] = !info
 		? 2
-		: issues.length || key === "rejected" || key === "client_key" || key === "storage_unavailable"
+		: issues.length || key === "rejected" || key === "client_key" || key === "storage_unavailable" || key === "unverified"
 			? 1
 			: 0;
 	return {
@@ -185,6 +186,7 @@ export function formatDoctorReport(report: DoctorReport): string {
 			rejected: "REJECTED (401): check AUTTER_RUNTIME_KEY",
 			client_key: "is a client/browser key; server SDKs need a server key",
 			storage_unavailable: "accepted, but the ingester's ClickHouse is unavailable (503)",
+			unverified: "could not be checked: the ingester's key validator is unavailable (503); exporters retry",
 			unknown: "could not be verified",
 		}[report.key];
 		lines.push(`  key        ${text}`);

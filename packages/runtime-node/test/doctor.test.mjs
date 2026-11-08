@@ -116,6 +116,26 @@ test("doctor reports a rejected key and exits 1; unreachable ingester exits 2", 
 	assert.match(down.stdout, /unreachable/);
 });
 
+test("doctor tells a validator outage (503 + Retry-After) from a storage outage (503)", async () => {
+	const fake = createServer((req, res) => {
+		if (req.url === "/v1/compat") {
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({ ingester: { version: "1.4.0" }, schema: { status: "ready", applied: ["0004-llm-calls"] } }));
+		} else if (req.headers.authorization === "Bearer unchecked") res.writeHead(503, { "retry-after": "5" }).end("{}");
+		else res.writeHead(503).end("{}");
+	});
+	const endpoint = await listen(fake);
+	try {
+		const unchecked = await runCli(["--endpoint", endpoint, "--key", "unchecked", "--features", "llm_calls"]);
+		assert.equal(unchecked.code, 1, unchecked.stdout);
+		assert.match(unchecked.stdout, /key\s+could not be checked: the ingester's key validator is unavailable/);
+		const storage = await runCli(["--endpoint", endpoint, "--key", "any", "--features", "llm_calls", "--json"]);
+		assert.equal(JSON.parse(storage.stdout).key, "storage_unavailable");
+	} finally {
+		await close(fake);
+	}
+});
+
 test("unknown options print usage and exit 64", async () => {
 	const { code, stdout } = await runCli(["--nope"]);
 	assert.equal(code, 64);

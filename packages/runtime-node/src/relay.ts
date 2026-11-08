@@ -535,20 +535,45 @@ export function sanitizeBrowserPayload(
 	};
 }
 
+/** Attempts per forwarded batch, and the longest wait between two. */
+const FORWARD_ATTEMPTS = 3;
+const FORWARD_MAX_WAIT_MS = 10_000;
+
+/**
+ * Forward one batch in the background (the browser already has its 202).
+ * A 429, a 5xx (e.g. the ingester's 503 while it can't check the key) or a
+ * network error is retried after the answer's Retry-After (at most 10 s),
+ * else 1 s then 2 s; any other answer is final.
+ */
 function forward(payload: object, opts: RelayOptions): void {
 	const endpoint = (opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "");
 	const url = `${endpoint}/v1/browser`;
 	const compat = opts.compatCheck !== false;
 	if (compat) ensureCompatConfigured(endpoint);
-	void fetch(url, {
-		method: "POST",
-		headers: {
-			"content-type": "application/json",
-			authorization: `Bearer ${opts.apiKey}`,
-		},
-		body: JSON.stringify(payload),
-		signal: AbortSignal.timeout(10_000),
-	}).then((response) => {
+	const body = JSON.stringify(payload);
+	const attempt = async (n: number): Promise<void> => {
+		let response: Response;
+		try {
+			response = await fetch(url, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					authorization: `Bearer ${opts.apiKey}`,
+				},
+				body,
+				signal: AbortSignal.timeout(10_000),
+			});
+		} catch (err) {
+			if (n >= FORWARD_ATTEMPTS) throw err;
+			await sleep(1000 * 2 ** (n - 1));
+			return attempt(n + 1);
+		}
+		if ((response.status === 429 || response.status >= 500) && n < FORWARD_ATTEMPTS) {
+			const seconds = Number(response.headers.get("retry-after"));
+			await response.body?.cancel().catch(() => {});
+			await sleep(seconds > 0 ? Math.min(seconds * 1000, FORWARD_MAX_WAIT_MS) : 1000 * 2 ** (n - 1));
+			return attempt(n + 1);
+		}
 		if (!compat) return;
 		const types = new Set(
 			((payload as { events?: Array<{ type?: string }> }).events ?? []).map((e) => String(e.type)),
@@ -560,11 +585,16 @@ function forward(payload: object, opts: RelayOptions): void {
 			noteCompatFeature("browser_trace_propagation");
 		}
 		noteRelayRejection(types, response.status, response.headers);
-	}).catch((err) => {
+	};
+	void attempt(1).catch((err) => {
 		(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(
 			err,
 		);
 	});
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

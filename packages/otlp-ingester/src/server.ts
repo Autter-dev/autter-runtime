@@ -479,7 +479,8 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			"access-control-allow-headers",
 			"content-type, authorization, x-autter-key",
 		);
-		res.setHeader("access-control-expose-headers", INGESTER_VERSION_HEADER);
+		// retry-after: a browser reads it on a 503 (key not checkable right now) or 429.
+		res.setHeader("access-control-expose-headers", `${INGESTER_VERSION_HEADER}, retry-after`);
 		res.setHeader("access-control-max-age", "86400");
 		if (req.method === "OPTIONS") {
 			res.status(204).end();

@@ -136,7 +136,7 @@ test("the queue is bounded per isolate", async () => {
 		const pending = [];
 		await worker(new Request("https://edge.test/"), {}, { waitUntil: (p) => pending.push(p) });
 		await Promise.all(pending);
-		assert.equal(calls, 2, "one batch of ≤3 records, retried once on 5xx");
+		assert.equal(calls, 3, "one batch of ≤3 records, tried three times on 5xx");
 	} finally {
 		console.warn = warn;
 	}
@@ -274,7 +274,7 @@ test("captureEdgeException never rejects: no key, failing fetch, hostile errors"
 			{ apiKey: "k", service: "web-edge", fetch: async () => (calls++, new Response("", { status: 503 })) },
 			new Error("x"),
 		);
-		assert.equal(calls, 2, "retried once on 5xx");
+		assert.equal(calls, 3, "tried three times on 5xx");
 		await captureEdgeException(
 			{ apiKey: "k", service: "web-edge", fetch: async () => { throw new TypeError("network down"); } },
 			new Error("x"),
@@ -403,4 +403,31 @@ test("captureLoggedErrors is per source: console off, rt.error (runtimeLogger) s
 	assert.ok(!records.some((r) => r.attrs["autter.handling"] === "caught" && r.attrs["exception.message"] === "console off"), "console capture off");
 	const caught = records.find((r) => r.attrs["exception.message"] === "rt caught" && r.attrs["autter.handling"] === "caught");
 	assert.ok(caught, "rt.error (a runtimeLogger source) is still captured");
+});
+
+test("delivery retries 503 and 429 after Retry-After, and never a 401", async () => {
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		const answers = [
+			new Response("", { status: 503, headers: { "retry-after": "1" } }),
+			new Response("", { status: 429 }),
+			new Response("{}", { status: 200 }),
+		];
+		const at = [];
+		const fetch = async () => (at.push(Date.now()), answers.shift());
+		await captureEdgeException({ apiKey: "k", service: "web-edge", fetch }, new Error("during a validator outage"));
+		assert.equal(at.length, 3);
+		assert.ok(at[1] - at[0] >= 950, `waited for Retry-After (${at[1] - at[0]} ms)`);
+		assert.ok(at[2] - at[1] >= 450, `then backed off (${at[2] - at[1]} ms)`);
+
+		let refused = 0;
+		await captureEdgeException(
+			{ apiKey: "k", service: "web-edge", fetch: async () => (refused++, new Response("", { status: 401 })) },
+			new Error("bad key"),
+		);
+		assert.equal(refused, 1);
+	} finally {
+		console.warn = warn;
+	}
 });

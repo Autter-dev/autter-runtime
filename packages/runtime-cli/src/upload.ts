@@ -353,9 +353,11 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 			if (fatal) return;
 			let status = 0;
 			let detail = "";
+			let retryAfter: string | null = null;
 			try {
 				const res = await doFetch(`${endpoint}/v1/sourcemaps`, { method: "POST", headers: uploadHeaders, body: item.body });
 				status = res.status;
+				retryAfter = res.headers?.get?.("retry-after") ?? null;
 				if (res.ok) {
 					uploaded.push(item);
 					return;
@@ -377,7 +379,10 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 				summary.failed.push({ path: item.path, filename: item.filename, error });
 				return;
 			}
-			await sleep(500 * 2 ** (attempt - 1));
+			// The ingester's Retry-After (e.g. 5 s on a 503 while it can't check
+			// the key), at most 30 s; else 500 ms, then 1 s.
+			const seconds = Number(retryAfter);
+			await sleep(seconds > 0 ? Math.min(seconds, 30) * 1000 : 500 * 2 ** (attempt - 1));
 		}
 	};
 	const queue = items.filter((item) => !skipped.has(item));

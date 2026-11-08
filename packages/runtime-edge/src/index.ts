@@ -273,7 +273,16 @@ function sameDestination(a: Destination, b: Destination): boolean {
 
 const encoder = new TextEncoder();
 
-/** POST one batch to `/v1/logs`: at most two attempts, no retry on 4xx. */
+/** Attempts per batch, and the longest wait between two (an edge invocation's waitUntil is short). */
+const POST_ATTEMPTS = 3;
+const MAX_RETRY_WAIT_MS = 5000;
+
+/**
+ * POST one batch to `/v1/logs`: up to POST_ATTEMPTS attempts. A 429, a 5xx
+ * (e.g. the ingester's 503 while it can't check the key) or a network error
+ * is retried after the answer's Retry-After (at most 5 s), else 250 ms then
+ * 500 ms. Any other 4xx (a refused key, a rejected payload) is not retried.
+ */
 async function postLogs(destination: Destination, batch: OtlpLogRecord[]): Promise<boolean> {
 	const body = JSON.stringify(
 		buildOtlpLogsRequest(
@@ -285,7 +294,8 @@ async function postLogs(destination: Destination, batch: OtlpLogRecord[]): Promi
 			batch,
 		),
 	);
-	for (let attempt = 0; attempt < 2; attempt++) {
+	for (let attempt = 1; ; attempt++) {
+		let retryAfter: string | null = null;
 		try {
 			const response = await destination.fetch(`${destination.endpoint}/v1/logs`, {
 				method: "POST",
@@ -296,13 +306,16 @@ async function postLogs(destination: Destination, batch: OtlpLogRecord[]): Promi
 				body,
 			});
 			if (response.ok) return true;
-			// 4xx (bad key, payload rejected) will not improve on retry.
-			if (response.status < 500) return false;
+			if (response.status !== 429 && response.status < 500) return false;
+			retryAfter = response.headers.get("retry-after");
 		} catch {
-			/* retry once */
+			/* network error: retried below */
 		}
+		if (attempt >= POST_ATTEMPTS) return false;
+		const seconds = Number(retryAfter);
+		const wait = seconds > 0 ? Math.min(seconds * 1000, MAX_RETRY_WAIT_MS) : 250 * 2 ** (attempt - 1);
+		await new Promise((resolve) => setTimeout(resolve, wait));
 	}
-	return false;
 }
 
 function randomId(): string {

@@ -168,6 +168,24 @@ test("transient failures are retried; bad keys stop the upload", async (t) => {
 	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, env: {} }), /AUTTER_RUNTIME_KEY/);
 });
 
+test("a 503 with Retry-After (the ingester can't check the key) waits that long, then uploads", async (t) => {
+	const ingester = await startIngester();
+	t.after(ingester.close);
+	const dir = build();
+	const posts = [];
+	const fetch = async (url, init) => {
+		if (String(url).endsWith("/v1/sourcemaps")) {
+			posts.push(Date.now());
+			if (posts.length === 1) return new Response("{}", { status: 503, headers: { "retry-after": "1" } });
+		}
+		return globalThis.fetch(url, init);
+	};
+	const summary = await uploadDir(dir, { ...quiet, release: "abc123", endpoint: ingester.url, key: SERVER_KEY, concurrency: 1, fetch });
+	assert.equal(summary.uploaded.length, 3);
+	assert.equal(summary.failed.length, 0);
+	assert.ok(posts[1] - posts[0] >= 950, `waited for Retry-After (${posts[1] - posts[0]} ms)`);
+});
+
 test("maps over the ingester's limit and invalid maps are reported as failures", async (t) => {
 	const ingester = await startIngester();
 	t.after(ingester.close);

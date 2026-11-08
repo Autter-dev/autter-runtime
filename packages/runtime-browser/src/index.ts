@@ -105,6 +105,8 @@ const MAX_QUEUE = 10;
 const FLUSH_INTERVAL_MS = 5000;
 const ERROR_FLUSH_DELAY_MS = 500;
 const MAX_EVENTS_PER_SESSION = 200;
+/** Failed scheduled sends retried in a row before their events are dropped. */
+const MAX_RETRIES = 3;
 /** Usage signals: no client details, no last action. */
 const USAGE_TYPES: string[] = ["session_start", "track_event", "timing"];
 
@@ -116,6 +118,7 @@ let userId: string | undefined;
 let globalContext: Record<string, unknown> | undefined;
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 let sentCount = 0;
+let retries = 0;
 let initialized = false;
 let timingCount = 0;
 let lastAction: { name: string; at: number; route: string } | undefined;
@@ -522,7 +525,7 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 	}
 	queue.push(event);
 	if (queue.length >= MAX_QUEUE) {
-		flush();
+		send(false);
 	} else if (urgent) {
 		schedule(ERROR_FLUSH_DELAY_MS);
 	} else {
@@ -532,7 +535,7 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 
 function schedule(delay: number): void {
 	if (flushTimer !== undefined) return;
-	flushTimer = setTimeout(flush, delay);
+	flushTimer = setTimeout(send, delay, false);
 }
 
 function baseEvent(
@@ -553,6 +556,17 @@ function baseEvent(
 /** Send everything queued, now. Uses sendBeacon when available so a closing
  * page still delivers; falls back to keepalive fetch. */
 export function flush(): void {
+	send(true);
+}
+
+/**
+ * `final` (flush(), page hidden or closing): sendBeacon, which can't report
+ * the answer. Otherwise (the timer, a full queue): fetch, so a 429 or 5xx —
+ * e.g. the ingester's 503 while it can't check the key — puts the events
+ * back and tries again after Retry-After (else 5 s, 10 s, 20 s), up to
+ * MAX_RETRIES times in a row before they are dropped.
+ */
+function send(final: boolean): void {
 	if (flushTimer !== undefined) {
 		clearTimeout(flushTimer);
 		flushTimer = undefined;
@@ -581,19 +595,45 @@ export function flush(): void {
 			encodeURIComponent(opts.clientKey!)
 		: opts.endpoint;
 	const contentType = direct ? "text/plain" : "application/json";
-	try {
-		// No navigator (or no sendBeacon): fetch below.
-		if (navigator.sendBeacon?.(url, new Blob([body], { type: contentType }))) return;
-	} catch {
-		// fall through to fetch
+	if (final || typeof fetch !== "function") {
+		try {
+			// No navigator (or no sendBeacon): fetch below.
+			if (navigator.sendBeacon?.(url, new Blob([body], { type: contentType }))) return;
+		} catch {
+			// fall through to fetch
+		}
 	}
-	void fetch(url, {
-		method: "POST",
-		body,
-		headers: { "content-type": contentType },
-		keepalive: true,
-		credentials: "omit",
-	}).catch(() => {});
+	const retry = (retryAfter?: string | null) => {
+		if (retries >= MAX_RETRIES) {
+			retries = 0;
+			return;
+		}
+		const seconds = Number(retryAfter);
+		const delay = seconds > 0 ? Math.min(seconds, 60) * 1000 : FLUSH_INTERVAL_MS * 2 ** retries;
+		retries++;
+		sentCount -= events.length;
+		queue = events.concat(queue);
+		if (flushTimer !== undefined) clearTimeout(flushTimer);
+		flushTimer = setTimeout(send, delay, false);
+	};
+	try {
+		void fetch(url, {
+			method: "POST",
+			body,
+			headers: { "content-type": contentType },
+			keepalive: final,
+			credentials: "omit",
+		}).then(
+			(response) => {
+				if (final) return;
+				if (response.status === 429 || response.status >= 500) retry(response.headers?.get("retry-after"));
+				else retries = 0;
+			},
+			() => final || retry(),
+		);
+	} catch {
+		// fetch threw synchronously (no fetch at all): nothing to deliver with
+	}
 }
 
 export function captureException(

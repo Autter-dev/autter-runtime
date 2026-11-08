@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.12.2] - 2026-11-08
+
+Packages: `runtime-node` 1.10.0, `otlp-ingester` 1.12.2. `runtime-next` stays 1.9.0 and picks up the new `runtime-node` through its existing range. Any upgrade order works.
+
+### Security
+
+- `runtime-node` no longer installs vulnerable OpenTelemetry packages. 1.9.1 depended on `@opentelemetry/*` ^0.57.1 / ^1.30.1, and `npm audit` on a project with it installed reported 25 advisories (5 high, 20 moderate): GHSA-8988-4f7v-96qf (unbounded memory in `@opentelemetry/core`'s W3C Baggage propagation, fixed in core 2.8.0), GHSA-q7rr-3cgh-j5r3 (Prometheus exporter crash on a malformed request, pulled in by `sdk-node`), GHSA-45rx-2jwx-cxfr (`JaegerPropagator` crash on a malformed header) and the packages that depend on them. The whole chain moves together to OpenTelemetry JS 2.9.0 / 0.220.0 (`api` ~1.9.0, `core`, `resources`, `sdk-metrics`, `sdk-trace-base` ~2.9.0; `sdk-node`, `instrumentation-http`, both OTLP HTTP exporters ~0.220.0); `npm audit` now reports 0. npm's suggested `npm audit fix --force`, a downgrade to `@autter/runtime-node@1.0.0`, does not fix them (1.0.0 has the same OpenTelemetry ranges): upgrade to 1.10.0 instead. 0.220.0 is the last OpenTelemetry release whose HTTP instrumentation still emits the semantic conventions the SDK and older ingesters read (`http.target`, `http.server.duration`); 0.221.0 emits only the stable ones, a separate change. OpenTelemetry 3.x needs Node 22.15, above this package's `>=20`.
+- `otlp-ingester`: `zod` 3 → 4.6.7 (GHSA-mrhx-c7xc-m3w5, memory exhaustion on oversized constrained collections) and `express` 4.22.3 with `body-parser` 1.20.9 (GHSA-27r3-jxmh-p828) and `qs` 6.16.2 in the lockfile.
+- CI audits what we publish (`.github/workflows/audit.yml`): on every push and pull request, `npm audit --omit=dev --audit-level=high` over the workspace lockfile, and `scripts/audit-published.mjs`, which packs each public package and resolves its production dependencies fresh from its ranges, the way a user's `npm install` does (the lockfile pins versions a user never gets). Weekly, the same script audits the versions on npm (`--registry`). High or critical advisories fail the job.
+
+### Changes
+
+- `runtime-node`: the OpenTelemetry 2.x API (`resourceFromAttributes`, `metricReaders`, view options instead of `View` / `ExplicitBucketHistogramAggregation`, `parentSpanContext` and `instrumentationScope` on re-wrapped spans). Instrumentations passed in `instrumentations` should be OpenTelemetry JS 2.x releases (`@opentelemetry/instrumentation` 0.2xx).
+
 ## [1.12.1] - 2026-11-08
 
 Packages: `otlp-ingester` 1.12.1. The SDKs are unchanged from 1.12.0.

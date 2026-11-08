@@ -55,7 +55,7 @@ const browserEventSchema = z.object({
 	 * in normalizeBrowserPayload — a malformed value is dropped on its own
 	 * instead of rejecting the whole beacon.
 	 */
-	context: z.record(z.unknown()).optional(),
+	context: z.record(z.string(), z.unknown()).optional(),
 	/** runtime-browser `/breadcrumbs`: steps before a failure. Validated entry by entry in breadcrumbs.ts; a malformed list is dropped, never the beacon. */
 	breadcrumbs: z.array(z.unknown()).optional().catch(undefined),
 	/** runtime-browser ≥1.6.0: script URL → debug id for the scripts in this

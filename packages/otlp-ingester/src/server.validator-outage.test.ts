@@ -65,8 +65,7 @@ async function setup(t: TestContext, answers: Array<{ status: number; body?: unk
 /** One span, exported once through the OTLP/protobuf exporter. */
 async function exportSpan(base: string, name: string): Promise<ExportResult> {
 	const memory = new InMemorySpanExporter();
-	const provider = new BasicTracerProvider();
-	provider.addSpanProcessor(new SimpleSpanProcessor(memory));
+	const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(memory)] });
 	provider.getTracer("outage-test").startSpan(name).end();
 	await provider.forceFlush();
 	const exporter = new OTLPTraceExporter({ url: `${base}/v1/traces`, headers: { authorization: `Bearer ${KEY}` } });

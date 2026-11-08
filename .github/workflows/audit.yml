@@ -1,0 +1,46 @@
+name: Dependency audit
+
+# npm audit of the packages we publish, failing on high or critical
+# advisories. runtime-node 1.9.1 shipped `@opentelemetry/*` ^0.57.1 with 25
+# advisories (GHSA-8988-4f7v-96qf among them) and nothing here noticed.
+#
+# - published-packages: what `npm install` of this checkout's packages gives a
+#   user (each package packed, its production dependencies resolved fresh
+#   from its ranges), plus the workspace lockfile's production dependencies.
+# - npm-latest: the same for the versions on npm right now, weekly, so a new
+#   advisory against a released version is noticed before a user reports it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  published-packages:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Workspace lockfile (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Published packages, resolved as a user installs them
+        run: node scripts/audit-published.mjs
+
+  npm-latest:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Released packages on npm (latest)
+        run: node scripts/audit-published.mjs --registry

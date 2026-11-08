@@ -1,5 +1,5 @@
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import {
 	AggregationTemporality,
 	type InstrumentType,
@@ -38,7 +38,7 @@ const scrubbedResources = new WeakMap<object, Resource>();
 function redactResource<R extends ReadableSpan["resource"]>(resource: R, redactor: Redactor): Resource {
 	const cached = scrubbedResources.get(resource);
 	if (cached) return cached;
-	const scrubbed = new Resource(redactor.exported(resource.attributes));
+	const scrubbed = resourceFromAttributes(redactor.exported(resource.attributes));
 	scrubbedResources.set(resource, scrubbed);
 	return scrubbed;
 }
@@ -61,7 +61,7 @@ function wrap(
 		name: fields.name,
 		kind: span.kind,
 		spanContext: () => span.spanContext(),
-		parentSpanId: span.parentSpanId,
+		parentSpanContext: span.parentSpanContext,
 		startTime: span.startTime,
 		endTime: span.endTime,
 		status: fields.status ?? span.status,
@@ -71,7 +71,7 @@ function wrap(
 		duration: span.duration,
 		ended: span.ended,
 		resource: fields.resource ?? span.resource,
-		instrumentationLibrary: span.instrumentationLibrary,
+		instrumentationScope: span.instrumentationScope,
 		droppedAttributesCount: span.droppedAttributesCount,
 		droppedEventsCount: span.droppedEventsCount,
 		droppedLinksCount: span.droppedLinksCount,

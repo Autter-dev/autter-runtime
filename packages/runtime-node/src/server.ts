@@ -22,8 +22,8 @@ import {
 } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
-import { Resource } from "@opentelemetry/resources";
-import { ExplicitBucketHistogramAggregation, PeriodicExportingMetricReader, View } from "@opentelemetry/sdk-metrics";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { AggregationType, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import {
 	BatchSpanProcessor,
@@ -553,7 +553,7 @@ function withSampledFlag(span: ReadableSpan): ReadableSpan {
 		name: span.name,
 		kind: span.kind,
 		spanContext: () => spanContext,
-		parentSpanId: span.parentSpanId,
+		parentSpanContext: span.parentSpanContext,
 		startTime: span.startTime,
 		endTime: span.endTime,
 		status: span.status,
@@ -563,7 +563,7 @@ function withSampledFlag(span: ReadableSpan): ReadableSpan {
 		duration: span.duration,
 		ended: span.ended,
 		resource: span.resource,
-		instrumentationLibrary: span.instrumentationLibrary,
+		instrumentationScope: span.instrumentationScope,
 		droppedAttributesCount: span.droppedAttributesCount,
 		droppedEventsCount: span.droppedEventsCount,
 		droppedLinksCount: span.droppedLinksCount,
@@ -632,7 +632,7 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		// The local root ended: the request is over, and an error inside it
 		// would have surfaced by now. Drop a healthy trace's buffer; keep
 		// retained entries so late stragglers still export (sweep cleans up).
-		if (span.parentSpanId === undefined && !entry.retained) {
+		if (span.parentSpanContext === undefined && !entry.retained) {
 			this.drop(ctx.traceId);
 		}
 	}
@@ -989,7 +989,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const distro = options.distro ?? SDK_IDENTITY;
 	configureCompatCheck({ endpoint, enabled: options.compatCheck !== false, sdk: distro });
 
-	const resource = new Resource({
+	const resource = resourceFromAttributes({
 		[ATTR_SERVICE_NAME]: options.service,
 		"service.instance.id": (options.instanceId || process.env.AUTTER_RUNTIME_INSTANCE_ID || randomUUID()).slice(0, 128),
 		...(options.release ? { [ATTR_SERVICE_VERSION]: options.release } : {}),
@@ -1072,14 +1072,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			mainSpanProcessor,
 			...(errorTraceBuffer ? [errorTraceBuffer] : []),
 		],
-		metricReader,
+		metricReaders: [metricReader],
 		views: [
-			new View({ instrumentName: "http.server.duration", aggregation: new ExplicitBucketHistogramAggregation(
+			{ instrumentName: "http.server.duration", aggregation: { type: AggregationType.EXPLICIT_BUCKET_HISTOGRAM, options: { boundaries:
 				[5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000],
-			) }),
-			new View({ instrumentName: "http.server.request.duration", aggregation: new ExplicitBucketHistogramAggregation(
+			} } },
+			{ instrumentName: "http.server.request.duration", aggregation: { type: AggregationType.EXPLICIT_BUCKET_HISTOGRAM, options: { boundaries:
 				[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 20, 30, 60, 120],
-			) }),
+			} } },
 		],
 		instrumentations: [
 			new HttpInstrumentation({ responseHook: captureRequestRoute }),

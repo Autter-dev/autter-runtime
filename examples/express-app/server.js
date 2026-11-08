@@ -115,11 +115,23 @@ app.post("/api/checkout", express.json(), (req, res, next) => {
 	res.json({ ok: true, requestId: runtimeContext.requestId });
 });
 
-// A plain bug: no try/catch, no manual captureException. autterErrorHandler
-// below records it with its stack on the request span.
+// A plain bug: no try/catch, no manual captureException. Recorded with its
+// stack on the request span.
 app.get("/api/boom", () => {
 	throw new TypeError("cannot read properties of undefined (reading 'total')");
 });
+
+// A router with its own error handler: its errors never reach the app-level
+// handlers below. initAutterServer still records the error behind the 500
+// (type, message, stack, route, request id); no autterErrorHandler needed.
+const orders = express.Router();
+orders.get("/search", () => {
+	throw new RangeError("search index unavailable");
+});
+orders.use((_error, _req, res, _next) => {
+	res.status(500).json({ error: "order search failed" });
+});
+app.use("/api/orders", orders);
 
 // LLM tracing: withLlmCall records the call at 100% with tokens + cost.
 // Simulated here — swap the body for a real openai/anthropic call.
@@ -141,9 +153,10 @@ app.get("/api/llm-selftest", async (_req, res) => {
 	res.json(await emitLlmSelftestTrace());
 });
 
-// After the routes: records every 5xx/coded error, stack included, on the
-// request span, then calls next(err) unchanged. Keep your own error handler
-// after it; here that is autterErrorResponse.
+// After the routes: also reports coded and 4xx errors (initAutterServer
+// alone reports the error behind every 5xx), stack included, on the request
+// span, then calls next(err) unchanged. Keep your own error handler after
+// it; here that is autterErrorResponse.
 app.use(autterErrorHandler());
 
 // Last: turns errors into client-safe JSON (never `internal`) and records them

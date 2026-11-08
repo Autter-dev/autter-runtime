@@ -84,7 +84,8 @@ before:
 
 | Framework | Hook |
 | --- | --- |
-| Express / Connect | `app.use(autterErrorHandler())` after your routes, before your own error handlers — calls `next(err)` unchanged |
+| Express 4/5 | Automatic with `initAutterServer`: the error behind every 5xx, in any router (`captureExpressErrors: false` turns it off). `app.use(autterErrorHandler())` after your routes, before your own error handlers, also reports coded 4xx errors — calls `next(err)` unchanged |
+| Connect | `app.use(autterErrorHandler())` after your routes, before your own error handlers — calls `next(err)` unchanged |
 | Fastify 4/5 | `app.register(autterFastifyErrors)` or `autterFastifyErrors(app)` (`onError` hook; `autterFastify` already includes it) |
 | Koa 2/3 | `app.use(autterKoa())` first — records and rethrows |
 | Anything else (NestJS filters, hapi, …) | `captureRequestError(err)` from your error hook |

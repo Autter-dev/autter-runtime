@@ -159,24 +159,32 @@ leave `endpoint` out, the SDK sends to Autter cloud (`https://otlp.autter.dev`).
 
 That alone gives you: every incoming HTTP request traced-and-sampled,
 request/error/duration rollups per route, crashes and unhandled promise
-rejections captured (without changing whether your process crashes), and the
+rejections captured (without changing whether your process crashes, and
+with the route and request id of the request that started the promise), the
+error behind every Express 5xx with its type, message and stack, and the
 full trace of any request that errors — erroring traces are retained even
 when the sampler wouldn't have kept them, so every issue keeps the trace that
 explains it.
 
-Add your framework's error hook so errors thrown in handlers keep their
-stack. Without it, the 500 the framework answers with is all Autter sees:
+Then add request summaries and your framework's error hook:
 
 ```js
-const { autterErrorHandler, autterFastifyErrors, autterKoa } = require("@autter/runtime-node");
+const { autterRequests, autterErrorHandler, autterFastifyErrors, autterKoa } = require("@autter/runtime-node");
 
-app.use(autterErrorHandler());        // Express: after your routes, before your own error handlers
-app.register(autterFastifyErrors);    // Fastify
-app.use(autterKoa());                 // Koa: first
+// Express
+app.use(autterRequests());            // first: request ids (x-request-id) and one summary per request
+// ... your routes and routers ...
+app.use(autterErrorHandler());        // after your routes, before your own error handlers
+
+app.register(autterFastifyErrors);    // Fastify (without it, a thrown error is only a stackless 500)
+app.use(autterKoa());                 // Koa: first (same)
 ```
 
 Each records the error on the request span and lets the framework handle it
-as before. For handled errors:
+as before. On Express the SDK already records the error behind a 5xx without
+the hook, in any router, nested ones with their own error handler included;
+`autterErrorHandler()` adds coded errors that end in a 4xx, and it never
+reports an error twice. One at app level is enough. For handled errors:
 
 ```js
 const { captureException } = require("@autter/runtime-node");

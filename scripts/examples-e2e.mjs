@@ -172,6 +172,10 @@ async function expressApp() {
 	check(seen.size > 1, `the SDK's imports were followed (${[...seen].join(", ")})`);
 
 	check((await fetch(`${base}/api/boom`)).status === 500, "GET /api/boom → 500");
+	const search = await fetch(`${base}/api/orders/search`);
+	check(search.status === 500, "GET /api/orders/search (router with its own error handler) → 500");
+	const searchRequestId = search.headers.get("x-request-id") ?? "";
+	check(/^[\w.-]{8,128}$/.test(searchRequestId), "GET /api/orders/search echoes its request id", searchRequestId);
 	check((await fetch(`${base}/api/checkout?declined`, { method: "POST" })).status === 402, "POST /api/checkout?declined → 402");
 	const relay = await fetch(`${base}/api/autter-runtime`, {
 		method: "POST",
@@ -183,6 +187,12 @@ async function expressApp() {
 	await row(
 		`SELECT error_type, message FROM runtime_error_occurrences WHERE service = 'example-express' AND release = '${RUN}' AND message LIKE '%reading ''total''%' LIMIT 1`,
 		"the server error from /api/boom (runtime_error_occurrences)",
+	);
+	// No autterErrorHandler in that router: the SDK captures Express errors
+	// by default, with the route and the request id.
+	await row(
+		`SELECT error_type FROM runtime_error_occurrences WHERE service = 'example-express' AND release = '${RUN}' AND error_type = 'RangeError' AND message = 'search index unavailable' AND route = '/api/orders/search' AND request_id = '${searchRequestId}' AND position(stack, 'server.js') > 0 LIMIT 1`,
+		"the nested router's error, captured by default with stack, route and request id",
 	);
 	await row(
 		`SELECT status_code FROM runtime_logs WHERE service = 'example-express' AND release = '${RUN}' AND kind = 'request' AND status_code = 402 LIMIT 1`,

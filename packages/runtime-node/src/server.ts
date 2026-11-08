@@ -61,6 +61,8 @@ import {
 	type Redactor,
 } from "./redact.js";
 import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporter.js";
+import { authHeaders, resolveIngestKey, warnKeyKind, warnMissingKey } from "./ingest-auth.js";
+import { IngestMetricExporter, IngestSpanExporter } from "./ingest-exporters.js";
 import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
 import {
@@ -180,8 +182,11 @@ const S = sharedSlot<ServerSlot>("server", () => ({
 export interface AutterServerOptions {
 	/** Structured logs and completed operation summaries. */
 	logging?: RuntimeLoggingOptions;
-	/** Private ingest key (autter_rt_…). */
-	apiKey: string;
+	/**
+	 * Private ingest key (autter_rt_…). Default: AUTTER_RUNTIME_KEY. Without
+	 * one nothing is sent and one warning says so at startup.
+	 */
+	apiKey?: string;
 	/** Ingester base URL. Default: https://otlp.autter.dev */
 	endpoint?: string;
 	service: string;
@@ -983,7 +988,10 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		/\/$/,
 		"",
 	);
-	const headers = { authorization: `Bearer ${options.apiKey}` };
+	// Never "Bearer undefined": unset/empty/"undefined" is no key at all.
+	const apiKey = resolveIngestKey(options.apiKey);
+	const headers = authHeaders(apiKey);
+	const ingestTarget = { endpoint, hasKey: apiKey !== null };
 	const redactor = makeRedactor(options.redactAttributes ?? true);
 	// Every trace exporter scrubs spans on the way out, whoever created them
 	// (see redact-exporter.ts): secrets and PII, and URL query values.
@@ -991,7 +999,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const traceExporter = () =>
 		new CountingExporter(
 			new RedactingSpanExporter(
-				new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
+				new IngestSpanExporter(new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }), ingestTarget),
 				() => redactor,
 				queryPolicy,
 			),
@@ -1002,6 +1010,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// env at import time — never clobber an env-enabled session here).
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
 	debugLog(`initialising service=${options.service} endpoint=${endpoint}`);
+	if (apiKey === null) warnMissingKey("server", options.service);
+	else warnKeyKind(apiKey);
 	S.redactor = redactor;
 	const distro = options.distro ?? SDK_IDENTITY;
 	configureCompatCheck({ endpoint, enabled: options.compatCheck !== false, sdk: distro });
@@ -1068,7 +1078,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const mainSpanProcessor = new BatchSpanProcessor(traceExporter());
 	const metricReader = new PeriodicExportingMetricReader({
 		exporter: new RedactingMetricExporter(
-			new OTLPMetricExporter({
+			new IngestMetricExporter(new OTLPMetricExporter({
 				url: `${endpoint}/v1/metrics`,
 				headers,
 				// Deltas, not lifetime totals: the ingester SUMs data points
@@ -1076,7 +1086,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 				// temporality would re-count every past request on each
 				// 60 s export.
 				temporalityPreference: AggregationTemporalityPreference.DELTA,
-			}),
+			}), ingestTarget),
 			() => redactor,
 		),
 		exportIntervalMillis: options.metricIntervalMs ?? 60_000,
@@ -1336,7 +1346,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		if (!reuseActive) span.end();
 	}
 
-	configureRuntimeLogger({ endpoint, apiKey: options.apiKey, service: options.service, environment, distro,
+	configureRuntimeLogger({ endpoint, apiKey: apiKey ?? "", service: options.service, environment, distro,
 		release: options.release, options: options.logging, redact: redactor,
 		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, redactor(attributes), links),
 		reportOutcome,

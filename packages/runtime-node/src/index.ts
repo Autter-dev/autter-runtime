@@ -2,6 +2,8 @@ export {
 	createBrowserRelayHandler,
 	createBrowserRelayFetchHandler,
 	sanitizeBrowserPayload,
+	checkBrowserPayload,
+	type RelayPayloadIssue,
 	type RelayOptions,
 } from "./relay.js";
 export {

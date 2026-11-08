@@ -142,6 +142,7 @@ Full walkthrough (keys, relay setup, Next.js, verification):
 | [`@autter/runtime-next`](packages/runtime-next) | **v1.6** | One-command Next.js integration (server, client, relay route, error boundary, edge middleware) |
 | [`@autter/runtime-edge`](packages/runtime-edge) | **v1.1** | Zero-dependency edge SDK: request summaries and coded errors for Workers, Vercel Edge, Deno, Bun |
 | [`@autter/otlp-ingester`](packages/otlp-ingester) | **v1.6** | Self-hostable ingest service: OTLP/HTTP (protobuf + JSON) traces, metrics, logs, browser payloads → ClickHouse |
+| [`dashboard`](dashboard) | **v0.1** | Local development UI: browse what your local ingester stored (single Rust binary, read-only) |
 | [`@autter/runtime-cli`](packages/runtime-cli) | **v1.0** | Readable stack traces: `autter-runtime sourcemaps inject/upload`, Vite/Rollup, webpack and Next.js plugins ([guide](docs/SOURCE-MAPS.md)) |
 
 `packages/runtime-core` is private: shared code bundled into runtime-node and
@@ -183,12 +184,39 @@ When your app has a backend, prefer the **relay**: the browser posts to your
 own server, which forwards with the server key — no key in the browser at
 all, and ad-blockers can't tell it apart from your own API traffic.
 
+## Local dashboard
+
+When you're building with Autter Runtime locally, the
+[dashboard](dashboard) lets you see what the ingester stored without writing
+ClickHouse queries. It covers telemetry, errors, events and logs, traces and
+LLM usage. It's a development tool only. It isn't part of the hosted Autter
+cloud, and the self-hosted deploy files don't include it.
+
+```bash
+docker compose up        # ClickHouse + ingester (:4318) + dashboard
+open http://localhost:4319
+```
+
+Events sent with the local key `autter_rt_local_dev_only` show up under the
+`local` repository. Already running ClickHouse and the ingester some other way?
+Start just the dashboard from the published image:
+
+```bash
+docker run --rm -p 127.0.0.1:4319:4319 \
+  -e CLICKHOUSE_URL=http://host.docker.internal:8123 -e CLICKHOUSE_PASSWORD=dev \
+  ghcr.io/autter-dev/runtime-dashboard:latest
+```
+
+Or build from source with `cd dashboard && cargo run --release`. See the
+[dashboard README](dashboard/README.md) for configuration.
+
 ## Docs
 
 - **[Getting started](docs/GETTING-STARTED.md)** — zero to data flowing
 - [Stack integrations](docs/INTEGRATIONS.md) — React, Node, Next.js, Python, Go, Rust, generic OTel
 - [Using Autter Runtime **without npm**](docs/WITHOUT-NPM.md) — any OTel SDK, an OTel Collector, or plain HTTP from any language
 - [Architecture & data model](docs/ARCHITECTURE.md)
+- [Local dashboard](dashboard/README.md) — browse local telemetry, errors, events, traces and LLM usage
 - [Operation logging and diagnostic context](docs/OPERATION-LOGGING.md)
 - [Requests, coded errors and background work](docs/REQUESTS-AND-ERRORS.md)
 - [Continuous detection, profiles, and outcomes](docs/CONTINUOUS-DETECTION.md)
@@ -233,6 +261,7 @@ Or for local development with a bundled ClickHouse, from a clone of this repo:
 
 ```bash
 docker compose up          # local ClickHouse + ingester on http://localhost:4318
+                           # + local dashboard on http://localhost:4319
 ```
 
 No key step: the dev compose file accepts the built-in local key

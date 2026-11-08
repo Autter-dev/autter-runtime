@@ -1,0 +1,38 @@
+[package]
+name = "autter-runtime-dashboard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+description = "Small, fast local dashboard for a self-hosted Autter Runtime (ingester + ClickHouse)"
+repository = "https://github.com/Autter-dev/autter-runtime"
+publish = false
+
+[[bin]]
+name = "autter-runtime-dashboard"
+path = "src/main.rs"
+
+[features]
+default = []
+# HTTPS to ClickHouse (e.g. ClickHouse Cloud). Off by default: the self-hosted
+# setups talk to ClickHouse over the private compose network.
+tls = ["dep:hyper-rustls"]
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
+bytes = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "webpki-roots"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+maud = "0.27"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "net", "macros", "signal", "time"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

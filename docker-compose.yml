@@ -51,5 +51,18 @@ services:
       retries: 3
       start_period: 15s
 
+  # Local development UI for what the ingester stored: http://localhost:4319
+  # (read-only; not part of any hosted or self-hosted deployment)
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "127.0.0.1:4319:4319"
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_PASSWORD: dev
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
 volumes:
   sink_outbox:

@@ -51,13 +51,15 @@ export const DROP_REASONS = {
 	missing_key: { kind: "rejected", status: 401 },
 	/** Not a configured key, and the validator definitely refused it (revoked, mistyped, another repository's deployment). */
 	unknown_key: { kind: "rejected", status: 401 },
+	/** A server or upload key in `?key=`, where only publishable client keys may go (URLs are logged by proxies and CDNs). */
+	key_in_url: { kind: "rejected", status: 401 },
 	/** The key validator could not answer (unreachable, timeout, 5xx) and no good answer recent enough was cached (503, Retry-After; 401 before 1.12.0). */
 	key_unverified: { kind: "rejected", status: 503 },
 	/** An upload key (`autter_rtu_…`) on a telemetry route. */
 	upload_key_not_allowed: { kind: "rejected", status: 403 },
 	/** A client key (`autter_rtc_…`) on an OTLP or source map route. */
 	client_key_not_allowed: { kind: "rejected", status: 403 },
-	/** A client key sent from an origin missing from its allow-list. */
+	/** A client key sent without an Origin, or from one missing from its allow-list (an empty list allows none). */
 	origin_not_allowed: { kind: "rejected", status: 403 },
 	/** A key whose scope this ingester does not know (never yielded by KeyResolver). */
 	key_scope_not_allowed: { kind: "rejected", status: 403 },

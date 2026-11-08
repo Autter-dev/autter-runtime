@@ -26,7 +26,7 @@ function config(clickhouseUrl: string | null): IngesterConfig {
 		clickhouseDatabase: "autter_runtime",
 		ingestKeys: [
 			{ key: "server", orgId: "org-1", repositoryId: "repo-1" },
-			{ key: "client", orgId: "org-1", repositoryId: "repo-1", scope: "client" },
+			{ key: "client", orgId: "org-1", repositoryId: "repo-1", scope: "client", allowedOrigins: ["https://app.test"] },
 		],
 		keyValidatorUrl: null,
 		keyValidatorToken: null,
@@ -166,7 +166,7 @@ test("ingest responses carry the version header; SDK versions are recorded once 
 		const browser = (sdk: string) =>
 			fetch(`${url}/v1/browser?key=client`, {
 				method: "POST",
-				headers: { "content-type": "text/plain" },
+				headers: { "content-type": "text/plain", origin: "https://app.test" },
 				body: JSON.stringify({
 					version: 1, service: "web", environment: "production", sdk,
 					events: [{ type: "session_start", timestamp: new Date().toISOString() }],

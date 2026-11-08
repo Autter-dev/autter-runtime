@@ -20,7 +20,10 @@ one per-repo signal model, fingerprints errors, and writes ClickHouse.
 
 Auth on every ingest route: `Authorization: Bearer <ingest key>`,
 `x-autter-key`, or `?key=` (query param — for sendBeacon, which cannot set
-headers). OTLP endpoints accept **both protobuf and JSON** (`content-type:
+headers; **client keys only**: a server or upload key in the URL gets
+`401 {"error":"key_in_url"}` and should be rotated, since URLs end up in
+proxy and CDN logs). The ingester masks `key` in the request URL before any
+route runs, so nothing it logs carries a key. OTLP endpoints accept **both protobuf and JSON** (`content-type:
 application/x-protobuf` or `application/json`), gzip/deflate bodies
 included — so any OpenTelemetry SDK (Go, Rust, Python, Java, .NET, JS)
 works with its default exporter settings.
@@ -30,7 +33,7 @@ works with its default exporter settings.
 | Scope | Prefix convention | Valid on | Extras |
 | --- | --- | --- | --- |
 | `server` (default) | `autter_rt_…` (secret) | all endpoints | 300 req/min |
-| `client` | `autter_rtc_…` (publishable, safe in frontend bundles) | `/v1/browser` only | origin allow-list, 120 req/min |
+| `client` | `autter_rtc_…` (publishable, safe in frontend bundles) | `/v1/browser` only | origin allow-list (required: no origins = no browser origin; list `http://localhost:3000` for local dev), 120 req/min |
 | `upload` (1.7.0+) | `autter_rtu_…` (secret, for CI) | `/v1/sourcemaps` and `/v1/sourcemaps/check` only | 300 req/min |
 
 An upload key gets `403 {"error":"upload_key_not_allowed","detail":"autter_rtu_ keys can only upload source maps …"}`

@@ -4,7 +4,7 @@ import express, {
 	type Request,
 	type Response,
 } from "express";
-import { KeyResolver } from "./auth.js";
+import { extractKeyWithSource, KeyResolver, redactKeyFromUrl } from "./auth.js";
 import {
 	clientAddress,
 	connectRedis,
@@ -32,7 +32,7 @@ import {
 } from "./ingest-drops.js";
 import { ClickHouseStore } from "./clickhouse.js";
 import { normalizeLatencyHistograms } from "./latency.js";
-import type { IngesterConfig } from "./config.js";
+import { UPLOAD_KEY_PREFIX, type IngesterConfig } from "./config.js";
 import { deriveFields, occurrenceIdFor } from "./fingerprint.js";
 import { causeTexts, type CauseText } from "./cause-chain.js";
 import { occurrenceIdentity, type CauseLink } from "./fingerprint-v3.js";
@@ -123,6 +123,36 @@ export const UPLOAD_KEY_NOT_ALLOWED = {
 		"autter_rtu_ keys can only upload source maps (POST /v1/sourcemaps and /v1/sourcemaps/check); " +
 		"telemetry needs a server key (autter_rt_…), or a client key (autter_rtc_…) for /v1/browser",
 } as const;
+
+/**
+ * The 401 a server or upload key gets in `?key=`. A URL is written to
+ * proxy, CDN and access logs, so only publishable client keys may travel
+ * there (navigator.sendBeacon cannot set headers).
+ */
+export const KEY_IN_URL = {
+	error: "key_in_url",
+	detail:
+		"Only publishable client keys (autter_rtc_…) may be sent in the ?key= query parameter. " +
+		"Send server and upload keys in the Authorization: Bearer header (or x-autter-key). " +
+		"This key has been in a URL, which proxies and CDNs log: rotate it.",
+} as const;
+
+/** Prefix of secret server keys (`autter_rt_…`; `autter_rtc_` and `autter_rtu_` do not match). */
+const SERVER_KEY_PREFIX = "autter_rt_";
+
+/** Why a client key's request was refused for its Origin. */
+function originRefusal(allowedOrigins: string[], origin: string | undefined) {
+	return {
+		error: "origin not allowed for this key",
+		detail:
+			allowedOrigins.length === 0
+				? "This client key has no allowed origins, so it accepts no browser origin. " +
+					"Add your site's exact origins (e.g. https://app.example.com, or http://localhost:3000 for local development) to the key."
+				: origin
+					? `Origin ${origin.slice(0, 200)} is not in this client key's allowed origins.`
+					: "Client keys need an Origin header from one of the key's allowed origins.",
+	};
+}
 
 /** What an authenticated route accepts: "otlp" (server keys), "browser"
  * (server and client keys), "sourcemaps" (server and upload keys). */
@@ -383,8 +413,16 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	app.set("trust proxy", config.trustProxy ?? 1);
 	// Every response names the ingester version, so SDKs (and the browser
 	// relay) learn it for free from responses they already receive.
-	app.use((_req, res, next) => {
+	app.use((req, res, next) => {
 		res.setHeader(INGESTER_VERSION_HEADER, version);
+		// `?key=` stays readable in req.query (already parsed) but is masked
+		// in the URL, so nothing that logs req.url / req.originalUrl can
+		// write a key into the ingester's logs.
+		const url = redactKeyFromUrl(req.url);
+		if (url !== req.url) {
+			req.url = url;
+			req.originalUrl = redactKeyFromUrl(req.originalUrl);
+		}
 		next();
 	});
 	// Per-address request limit (1.12.0), before any body is read or key
@@ -560,9 +598,15 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			res.status(503).json({ error: "storage not configured" });
 			return null;
 		}
-		const key = keys.extractKey(req);
-		if (!key) {
+		const extracted = extractKeyWithSource(req);
+		if (!extracted) {
 			refuse(req, res, null, "missing_key", 401, { error: "missing ingest key" });
+			return null;
+		}
+		const { key, source } = extracted;
+		// A secret key in the URL: refused on its prefix, before any lookup.
+		if (source === "query" && (key.startsWith(SERVER_KEY_PREFIX) || key.startsWith(UPLOAD_KEY_PREFIX))) {
+			refuse(req, res, { keyHash: autterKeyHash(key) }, "key_in_url", 401, KEY_IN_URL);
 			return null;
 		}
 		const retry = { ms: WINDOW_MS };
@@ -590,6 +634,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			refuse(req, res, { keyHash: autterKeyHash(key) }, "unknown_key", 401, { error: "invalid ingest key" });
 			return null;
 		}
+		// Any key without an Autter prefix (self-host static keys) is judged
+		// on its resolved scope: only client keys may come in the URL.
+		if (source === "query" && ctx.scope !== "client") {
+			refuse(req, res, ctx, "key_in_url", 401, KEY_IN_URL);
+			return null;
+		}
 		if (ctx.scope === "upload") {
 			// CI keys: source map upload and check only. Server rate window
 			// (each key has its own).
@@ -609,12 +659,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				});
 				return null;
 			}
+			// Exact match only. A key with no allowed origins accepts none: a
+			// publishable key is public, so "any origin" would let every site
+			// send as this repository.
 			const origin = req.headers.origin;
-			if (
-				ctx.allowedOrigins.length > 0 &&
-				(!origin || !ctx.allowedOrigins.includes(origin))
-			) {
-				refuse(req, res, ctx, "origin_not_allowed", 403, { error: "origin not allowed for this key" });
+			if (!origin || !ctx.allowedOrigins.includes(origin)) {
+				refuse(req, res, ctx, "origin_not_allowed", 403, originRefusal(ctx.allowedOrigins, origin));
 				return null;
 			}
 			return (await withinTenantLimits(req, res, ctx)) ? ctx : null;

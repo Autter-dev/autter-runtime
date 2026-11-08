@@ -416,7 +416,9 @@ clickhouse-client --password dev`.
 
 - [ ] Server keys only in backend env vars; client keys only where a relay
       is genuinely impossible.
-- [ ] Client keys have `allowedOrigins` set to your exact app origins.
+- [ ] Client keys have `allowedOrigins` set to your exact app origins (a
+      client key with none accepts no origin; add your dev origin, e.g.
+      `http://localhost:3000`, if you test locally with it).
 - [ ] `release` is wired to your git SHA in **both** frontend and backend —
       it's what powers regression detection ("broke in release X").
 - [ ] Request summaries are always kept: `ignore` health checks and metrics

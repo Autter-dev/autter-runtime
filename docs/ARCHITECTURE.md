@@ -37,7 +37,10 @@ Three key scopes separate frontend, backend and CI credentials:
 - **Client keys** (`autter_rtc_…`, publishable): shipped in frontend
   bundles for direct browser ingest. Restricted to `/v1/browser`, enforced
   against a per-key origin allow-list, tighter rate limits, and carried as
-  a `?key=` query param because `sendBeacon` cannot set headers. A leaked
+  a `?key=` query param because `sendBeacon` cannot set headers (only
+  client keys may use `?key=`: a server or upload key there is refused with
+  `401 key_in_url`). The allow-list is exact-match and required: a client
+  key with no allowed origins accepts no origin. A leaked
   client key can at worst submit fake browser events for one repo — it can
   never read data or send OTLP.
 - **Upload keys** (`autter_rtu_…`, secret, ingester 1.7.0+): CI only —
@@ -251,11 +254,12 @@ rejection finds nothing refused in the last hour).
 | Reason | Kind | Status | When |
 | --- | --- | --- | --- |
 | `missing_key` | rejected | 401 | no key in `Authorization`, `x-autter-key` or `?key=` |
+| `key_in_url` | rejected | 401 | a server or upload key in `?key=`, where only client keys may go (URLs are logged by proxies and CDNs) |
 | `unknown_key` | rejected | 401 | not a configured key, and the validator refused it: 404, 410, or a 2xx without a usable tenant (revoked, mistyped, another deployment's) |
 | `key_unverified` | rejected | 503 | the key validator could not answer (unreachable, timed out, 5xx, another 4xx, an unreadable answer) and the key has no valid answer from the last 15 minutes; sent with `Retry-After` (401 before 1.12.0) |
 | `upload_key_not_allowed` | rejected | 403 | an upload key (`autter_rtu_…`) on a telemetry route |
 | `client_key_not_allowed` | rejected | 403 | a client key (`autter_rtc_…`) on an OTLP or source map route |
-| `origin_not_allowed` | rejected | 403 | a client key from an origin missing from its allow-list |
+| `origin_not_allowed` | rejected | 403 | a client key without an `Origin`, or from one missing from its allow-list (an empty list allows none) |
 | `key_scope_not_allowed` | rejected | 403 | a key scope this ingester does not know (never yielded today) |
 | `rate_limited` | rejected | 429 | past the key's requests a minute |
 | `invalid_payload` | rejected | 400 | malformed JSON or protobuf, an invalid browser envelope, platform event, profile or source map, or values the normaliser can't read (a timestamp that is not an integer) |

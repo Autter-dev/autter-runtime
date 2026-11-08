@@ -69,8 +69,11 @@ route on your own backend created with `createBrowserRelayHandler` from
 
 **Direct (static sites, SPAs without a backend)** — point at the ingester
 with a **publishable client key** (`autter_rtc_…`, scope `client`). Client
-keys only work on the browser endpoint, are origin-restricted server-side,
-and rate-limited harder — never ship a secret `autter_rt_` server key:
+keys only work on the browser endpoint, are origin-restricted server-side
+(exact origins, set on the key; add `http://localhost:3000` or your dev
+origin to test locally), and rate-limited harder — never ship a secret
+`autter_rt_` server key (the ingester refuses one in the URL with
+`401 key_in_url`):
 
 ```ts
 initAutterBrowser({

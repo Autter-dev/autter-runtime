@@ -8,7 +8,8 @@ import { LruMap } from "./limits.js";
 
 /**
  * Ingest-key authentication. Keys arrive as `Authorization: Bearer <key>`
- * or `x-autter-key: <key>` and resolve to a tenant {orgId, repositoryId}
+ * or `x-autter-key: <key>` (or `?key=`, for client keys only: see
+ * extractKeyWithSource) and resolve to a tenant {orgId, repositoryId}
  * via a static env mapping (self-host) or a validator webhook (cloud),
  * with a short in-process cache in front of the webhook.
  *
@@ -131,6 +132,11 @@ export class KeyResolver {
 					`AUTTER_INGEST_KEYS: ${entry.suppression.length - suppression.length} invalid suppression rule(s) for repository ${entry.repositoryId} ignored`,
 				);
 			}
+			if (scope === "client" && !entry.allowedOrigins?.length) {
+				console.error(
+					`AUTTER_INGEST_KEYS: client key for repository ${entry.repositoryId} has no allowedOrigins, so it accepts no browser origin — list your site's exact origins`,
+				);
+			}
 			this.staticKeys.set(entry.key, {
 				orgId: entry.orgId,
 				repositoryId: entry.repositoryId,
@@ -142,17 +148,7 @@ export class KeyResolver {
 	}
 
 	extractKey(req: Request): string | null {
-		const header = req.headers.authorization;
-		if (header?.toLowerCase().startsWith("bearer ")) {
-			return header.slice(7).trim() || null;
-		}
-		const alt = req.headers["x-autter-key"];
-		if (typeof alt === "string" && alt.trim()) return alt.trim();
-		// Query param — the only channel available to navigator.sendBeacon
-		// (it cannot set headers). Intended for publishable client keys.
-		const q = req.query.key;
-		if (typeof q === "string" && q.trim()) return q.trim();
-		return null;
+		return extractKeyWithSource(req)?.key ?? null;
 	}
 
 	/**
@@ -319,4 +315,55 @@ export class KeyResolver {
 			`key validator could not answer (${reason}): serving cached keys for up to ${VALIDATOR_STALE_CAP_MS / 60_000} min, 503 for the rest`,
 		);
 	}
+}
+
+/**
+ * Where a request's key came from. `query` is `?key=`: the only channel
+ * navigator.sendBeacon has (it cannot set headers), so it is for
+ * publishable client keys only. A URL ends up in proxy, CDN and access
+ * logs, so the server refuses any other scope sent this way
+ * (server.ts `authenticate`).
+ */
+export type KeySource = "authorization" | "x-autter-key" | "query";
+
+/** The request's key and where it came from; headers win over `?key=`. */
+export function extractKeyWithSource(req: Request): { key: string; source: KeySource } | null {
+	const header = req.headers.authorization;
+	if (header?.toLowerCase().startsWith("bearer ")) {
+		const key = header.slice(7).trim();
+		return key ? { key, source: "authorization" } : null;
+	}
+	const alt = req.headers["x-autter-key"];
+	if (typeof alt === "string" && alt.trim()) return { key: alt.trim(), source: "x-autter-key" };
+	const q = req.query.key;
+	if (typeof q === "string" && q.trim()) return { key: q.trim(), source: "query" };
+	return null;
+}
+
+/**
+ * `url` with the value of every `key` query parameter replaced by
+ * `[redacted]`, so nothing that logs a request URL can log a key. Leaves
+ * a URL without one untouched (same string).
+ */
+export function redactKeyFromUrl(url: string): string {
+	const q = url.indexOf("?");
+	if (q < 0) return url;
+	const hash = url.indexOf("#", q);
+	const end = hash < 0 ? url.length : hash;
+	const params = url.slice(q + 1, end).split("&");
+	let changed = false;
+	const redacted = params.map((param) => {
+		const eq = param.indexOf("=");
+		const name = eq < 0 ? param : param.slice(0, eq);
+		let decoded = name;
+		try {
+			decoded = decodeURIComponent(name.replace(/\+/g, " "));
+		} catch {
+			// a malformed name is compared as written
+		}
+		if (decoded !== "key" || eq < 0) return param;
+		changed = true;
+		return `${name}=[redacted]`;
+	});
+	return changed ? `${url.slice(0, q + 1)}${redacted.join("&")}${url.slice(end)}` : url;
 }

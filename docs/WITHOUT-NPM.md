@@ -155,7 +155,10 @@ Rules the hand-rolled path must respect (the ingester enforces them):
 - `route` is a path only — never include query strings (they're stripped
   defensively, but don't send them).
 - Client keys (`autter_rtc_…`) are origin-restricted; the `Origin` your
-  page sends must be on the key's allow-list.
+  page sends must be on the key's allow-list (exact match; a key with no
+  origins accepts none, so list `http://localhost:…` for local testing).
+- Only client keys go in `?key=`. A server key in the URL is refused with
+  `401 key_in_url`; rotate any server key that was ever sent that way.
 - Never put a server key (`autter_rt_…`) in browser code. If your site has
   a backend, prefer relaying through it (any language — the relay is just
   an authenticated proxy that forwards this same JSON with the server key).

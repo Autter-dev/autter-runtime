@@ -30,7 +30,11 @@ export interface StaticIngestKey {
 	 * ignored (never treated as a server key).
 	 */
 	scope?: IngestKeyScope;
-	/** client keys: exact origins allowed to send (e.g. https://app.example.com). */
+	/**
+	 * client keys: exact origins allowed to send (e.g. https://app.example.com,
+	 * or http://localhost:3000 for local development). Required: a client key
+	 * without one accepts no browser origin.
+	 */
 	allowedOrigins?: string[];
 	/**
 	 * Suppression rules for this key's repository (1.9.0, suppression.ts):

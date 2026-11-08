@@ -267,7 +267,7 @@ export interface IngestContext {
 	orgId: string;
 	repositoryId: string;
 	scope: IngestKeyScope;
-	/** client keys only: exact origins allowed to send (empty = any). */
+	/** client keys only: exact origins allowed to send (empty = none). */
 	allowedOrigins: string[];
 	/**
 	 * Suppression rules set by the user for this repository (1.9.0): from the

@@ -22,7 +22,7 @@ function config(): IngesterConfig {
 		clickhouseUrl: "http://127.0.0.1:1",
 		ingestKeys: [
 			{ key: SERVER, orgId: "org-a", repositoryId: "repo-a" },
-			{ key: CLIENT, orgId: "org-a", repositoryId: "repo-a", scope: "client" },
+			{ key: CLIENT, orgId: "org-a", repositoryId: "repo-a", scope: "client", allowedOrigins: ["https://app.test"] },
 			{ key: UPLOAD, orgId: "org-a", repositoryId: "repo-a", scope: "upload" },
 		],
 	};

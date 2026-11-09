@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
 import { normalizeRoute } from "./fingerprint.js";
-import { mergeLatency, requestLatency } from "./latency.js";
+import {
+	mergeLatency,
+	requestLatency,
+	SUMMARY_HISTOGRAM_BOUNDS_MS,
+	type LatencyHistogram,
+} from "./latency.js";
 import type { RuntimeLogRecord } from "./logs.js";
 import type {
 	RuntimeMetricPoint,
@@ -214,4 +220,63 @@ export function logRollups(
 		});
 	}
 	return [...rollups.values()];
+}
+
+/**
+ * `runtime_latency_histograms` points from counted request summaries
+ * (`countedBySummary`: `@autter/runtime-edge`), the senders with no
+ * `http.server.duration` histogram. Their summaries are never sampled, so
+ * each one is a request: one point per service, environment, release,
+ * method, route and minute of the batch, bucketed with the bounds
+ * `@autter/runtime-node` uses, so endpoint regression detection reads edge
+ * routes like Node ones. A summary without a method or route adds nothing.
+ *
+ * The point id hashes the records it was built from (their content-derived
+ * ids), so a retried batch replaces its points instead of adding to them.
+ * Node and Next.js summaries are never counted here: their histogram
+ * already has every request.
+ */
+export function summaryLatencyHistograms(rows: RuntimeLogRecord[]): LatencyHistogram[] {
+	const groups = new Map<string, { point: LatencyHistogram; ids: string[] }>();
+	for (const row of rows) {
+		if (row.kind !== "request" || !countedBySummary(row.attributes)) continue;
+		const method = String(row.attributes["http.request.method"] ?? "").toUpperCase().slice(0, 20);
+		if (!method || !row.route || !Number.isFinite(row.durationMs) || row.durationMs < 0) continue;
+		const bucketAt = new Date(Math.floor(row.occurredAt.getTime() / 60_000) * 60_000);
+		const key = JSON.stringify([row.service, row.environment, row.release, method, row.route, bucketAt.getTime()]);
+		let group = groups.get(key);
+		if (!group) {
+			group = {
+				point: {
+					pointId: "",
+					service: row.service,
+					environment: row.environment,
+					release: row.release,
+					method,
+					route: row.route,
+					bucketAt,
+					requestCount: 0,
+					errorCount: 0,
+					durationSumMs: 0,
+					boundsMs: [...SUMMARY_HISTOGRAM_BOUNDS_MS],
+					counts: new Array<number>(SUMMARY_HISTOGRAM_BOUNDS_MS.length + 1).fill(0),
+				},
+				ids: [],
+			};
+			groups.set(key, group);
+		}
+		const { point } = group;
+		const bucket = SUMMARY_HISTOGRAM_BOUNDS_MS.findIndex((bound) => row.durationMs <= bound);
+		point.counts[bucket === -1 ? SUMMARY_HISTOGRAM_BOUNDS_MS.length : bucket]! += 1;
+		point.requestCount += 1;
+		point.durationSumMs += row.durationMs;
+		if (row.outcome === "failed" || row.statusCode >= 500 || row.attributes[ERROR_REPORTED_ATTRIBUTE] === true) {
+			point.errorCount += 1;
+		}
+		group.ids.push(row.id);
+	}
+	return [...groups.entries()].map(([key, { point, ids }]) => ({
+		...point,
+		pointId: createHash("sha256").update(JSON.stringify(["request-summary", key, ids.sort()])).digest("hex"),
+	}));
 }

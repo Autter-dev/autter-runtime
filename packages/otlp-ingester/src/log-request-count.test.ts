@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import type { IngesterConfig } from "./config.js";
-import { logPromotionCandidates, logRollups } from "./log-promotion.js";
+import { logPromotionCandidates, logRollups, summaryLatencyHistograms } from "./log-promotion.js";
 import { normalizeLogs, type OtlpLogsRequest } from "./logs.js";
 import { createIngesterApp } from "./server.js";
 import type { RuntimeMetricPoint, RuntimeOccurrence } from "./types.js";
@@ -251,10 +251,52 @@ test("/v1/logs writes counted edge requests to runtime_metrics_1m", async () => 
 		assert.equal(metrics.reduce((n, row) => n + Number(row.request_count), 0), 2);
 		assert.equal(metrics.reduce((n, row) => n + Number(row.error_count), 0), 1);
 		assert.deepEqual([...new Set(metrics.map((row) => row.route))], ["/ok"]);
+		// …and to the latency histograms endpoint regression detection reads.
+		const histograms = inserted.runtime_latency_histograms ?? [];
+		assert.equal(histograms.length, 1);
+		assert.equal(histograms[0]!.request_count, 2);
+		assert.equal(histograms[0]!.error_count, 1);
+		assert.equal(histograms[0]!.method, "GET");
+		assert.equal(histograms[0]!.route, "/ok");
+		assert.match(res.headers.get("x-autter-ingest") ?? "", / latency_histograms=1 /);
 	} finally {
 		await close(app);
 		await close(ch);
 	}
+});
+
+test("counted edge summaries become latency histograms with runtime-node's bounds", () => {
+	const rows = normalizeLogs(
+		logsRequest(
+			[
+				...edgeRecords({ route: "/items/:id", status: 200, outcome: "succeeded", durationMs: 40 }),
+				...edgeRecords({ route: "/items/:id", status: 200, outcome: "succeeded", durationMs: 600, at: MINUTE + 2_000 }),
+				...edgeRecords({ route: "/items/:id", status: 503, outcome: "failed", durationMs: 200_000, at: MINUTE + 3_000 }),
+				// Another minute: its own point.
+				...edgeRecords({ route: "/items/:id", status: 200, outcome: "succeeded", durationMs: 5, at: MINUTE + 61_000 }),
+				// Not counted by its summary (runtime-node / runtime-next, or
+				// countRequests: false): its histogram, if any, has it already.
+				...edgeRecords({ route: "/node", status: 200, outcome: "succeeded", counted: false }),
+			],
+			{ "service.name": "edge-api", "service.version": "abc123" },
+		),
+	);
+	const points = summaryLatencyHistograms(rows).sort((a, b) => a.bucketAt.getTime() - b.bucketAt.getTime());
+	assert.equal(points.length, 2);
+	const [first, second] = points;
+	assert.deepEqual(first!.boundsMs, [5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000]);
+	assert.equal(first!.counts.length, first!.boundsMs.length + 1);
+	assert.equal(first!.counts[3], 1, "40 ms lands in (25, 50]");
+	assert.equal(first!.counts[7], 1, "600 ms lands in (500, 750]");
+	assert.equal(first!.counts[20], 1, "past the last bound: the overflow bucket");
+	assert.deepEqual(
+		[first!.requestCount, first!.errorCount, first!.durationSumMs, first!.method, first!.route, first!.release, first!.bucketAt.getTime()],
+		[3, 1, 200_640, "GET", "/items/:id", "abc123", MINUTE],
+	);
+	assert.deepEqual([second!.requestCount, second!.counts[0], second!.bucketAt.getTime()], [1, 1, MINUTE + 60_000]);
+	// A retried batch replaces its points (same id); other records do not.
+	assert.deepEqual(summaryLatencyHistograms(rows).map((p) => p.pointId).sort(), points.map((p) => p.pointId).sort());
+	assert.notEqual(first!.pointId, second!.pointId);
 });
 
 const close = (server: Server) =>

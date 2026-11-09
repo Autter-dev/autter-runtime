@@ -389,7 +389,7 @@ export class ClickHouseStore {
 	/**
 	 * Bring each table's delete TTL in line with its retention: LOG_TTL_DAYS
 	 * for runtime_logs (as before), and, for the tables an archive covers
-	 * (ARCHIVE_S3_URL), no TTL or the ARCHIVE_BACKSTOP_DAYS one, so the TTL
+	 * (ARCHIVE_S3_URL), the ARCHIVE_BACKSTOP_DAYS one (default hot window + 7) or none, so the TTL
 	 * never deletes a day the archiver has not exported (archive.ts). A table
 	 * whose TTL an archive removed gets its hot TTL back when the archive is
 	 * turned off. Idempotent: reads the current TTL from system.tables and

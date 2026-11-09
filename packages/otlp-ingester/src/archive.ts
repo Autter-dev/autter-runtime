@@ -9,8 +9,9 @@ import type { RedisLike } from "./limits.js";
  * every table keeps its TTL exactly as before.
  *
  * With an archive configured, each archived table gives up its delete TTL
- * (or keeps only ARCHIVE_BACKSTOP_DAYS, an opt-in disk guard) and this job
- * becomes the only thing that removes rows from it. Once a day partition is
+ * except a backstop (ARCHIVE_BACKSTOP_DAYS, default the hot window + 7
+ * days) that keeps the disk from filling if this job stops, and this job
+ * becomes what normally removes rows from it. Once a day partition is
  * older than the table's hot window (OCCURRENCE_TTL_DAYS, SPAN_TTL_DAYS, …):
  *
  *   1. a log row `exporting` (table, day, generation) is written;
@@ -74,12 +75,31 @@ export interface ArchiveConfig {
 	tables: ArchiveTable[];
 	/** Event age (days) after which rows are gone from the archive too (ARCHIVE_RETENTION_DAYS, 30–3650, default 365). */
 	retentionDays: number;
-	/** TTL kept on archived tables as a disk guard (ARCHIVE_BACKSTOP_DAYS; 0 = none, the default). */
-	backstopDays: number;
+	/**
+	 * TTL kept on archived tables as a disk guard (ARCHIVE_BACKSTOP_DAYS):
+	 * "auto" (the default) is each table's hot window + BACKSTOP_MARGIN_DAYS,
+	 * a number is at least that, 0 is no TTL at all.
+	 */
+	backstopDays: number | "auto";
+	/** Days a table may fall behind before each pass warns (ARCHIVE_OVERDUE_WARN_DAYS, default 2). */
+	overdueWarnDays: number;
 	intervalMinutes: number;
 	/** Day partitions handled per table per pass (bounded work). */
 	maxDaysPerPass: number;
 	scheduler: ArchiveSchedulerSetting;
+}
+
+/** Days past the hot window the backstop TTL waits: time to notice and fix a stopped archive job. */
+export const BACKSTOP_MARGIN_DAYS = 7;
+
+function parseBackstop(raw: string | undefined): number | "auto" {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "" || value === "auto") return "auto";
+	const days = Number(value);
+	if (!Number.isInteger(days) || days < 0) {
+		throw new Error("ARCHIVE_BACKSTOP_DAYS must be auto, 0 (no TTL) or a number of days");
+	}
+	return Math.min(3650, days);
 }
 
 function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -147,7 +167,8 @@ export function archiveConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Arch
 		secretAccessKey,
 		tables,
 		retentionDays: boundedInt(env.ARCHIVE_RETENTION_DAYS, 365, 30, 3650),
-		backstopDays: boundedInt(env.ARCHIVE_BACKSTOP_DAYS, 0, 0, 3650),
+		backstopDays: parseBackstop(env.ARCHIVE_BACKSTOP_DAYS),
+		overdueWarnDays: boundedInt(env.ARCHIVE_OVERDUE_WARN_DAYS, 2, 1, 30),
 		intervalMinutes: boundedInt(env.ARCHIVE_INTERVAL_MINUTES, 60, 5, 1440),
 		maxDaysPerPass: boundedInt(env.ARCHIVE_MAX_DAYS_PER_PASS, 4, 1, 31),
 		scheduler,
@@ -361,7 +382,7 @@ export function retentionTtlAction(input: {
 	current: number | null | "unrecognised";
 	hotDays: number;
 	archived: boolean;
-	backstopDays: number;
+	backstopDays: number | "auto";
 	/** runtime_logs: LOG_TTL_DAYS is applied to existing tables at every boot. */
 	alwaysApply: boolean;
 }): TtlAction {
@@ -376,10 +397,28 @@ export function retentionTtlAction(input: {
 	return { action: "none" };
 }
 
-/** The backstop TTL, at least a week past the hot window; null = no TTL. */
-export function effectiveBackstopDays(backstopDays: number, hotDays: number): number | null {
+/** The backstop TTL, at least a week past the hot window; null = no TTL (ARCHIVE_BACKSTOP_DAYS=0). */
+export function effectiveBackstopDays(backstopDays: number | "auto", hotDays: number): number | null {
+	if (backstopDays === "auto") return hotDays + BACKSTOP_MARGIN_DAYS;
 	if (backstopDays <= 0) return null;
-	return Math.max(backstopDays, hotDays + 7);
+	return Math.max(backstopDays, hotDays + BACKSTOP_MARGIN_DAYS);
+}
+
+/**
+ * How many days late the table's archiving is: 0 while the oldest day still
+ * in ClickHouse (hot or staged) is at most the one that left the hot window
+ * last, 1 when a day has waited a day past that, and so on. Hourly passes
+ * keep it at 0; it climbs when passes stop or fail.
+ */
+export function overdueDays(input: { now: Date; hotDays: number; main: PartitionRows[]; stage: PartitionRows[] }): number {
+	const cutoff = hotCutoffDay(input.now, input.hotDays);
+	let oldest: string | null = null;
+	for (const part of [...input.main, ...input.stage]) {
+		if (part.rows > 0 && part.day < cutoff && (oldest === null || part.day < oldest)) oldest = part.day;
+	}
+	if (oldest === null) return 0;
+	const days = Math.round((Date.parse(`${cutoff}T00:00:00Z`) - Date.parse(`${oldest}T00:00:00Z`)) / 86_400_000);
+	return Math.max(0, days - 1);
 }
 
 // ── Single instance ────────────────────────────────────────────────────────
@@ -467,6 +506,8 @@ export interface ArchivePassTableResult {
 	steps: number;
 	archivedDays: string[];
 	expiredDays: string[];
+	/** How late this table's archiving was when the pass began (see overdueDays). */
+	overdueDays?: number;
 	error?: string;
 }
 
@@ -627,6 +668,14 @@ export class RuntimeArchiver {
 	private async tablePass(table: ArchiveTable, result: ArchivePassTableResult): Promise<void> {
 		const stage = stageTableName(table);
 		const [main, staged, log] = await Promise.all([this.partitions(table), this.partitions(stage), this.logEntries(table)]);
+		result.overdueDays = overdueDays({ now: this.now(), hotDays: this.opts.hotDays[table], main, stage: staged });
+		if (result.overdueDays >= this.opts.config.overdueWarnDays) {
+			const backstop = effectiveBackstopDays(this.opts.config.backstopDays, this.opts.hotDays[table]);
+			console.warn(
+				`runtime archive: ${table} is behind: its oldest day left the ${this.opts.hotDays[table]}-day hot window ${result.overdueDays + 1} days ago and is not archived yet` +
+					(backstop === null ? " (no backstop TTL: the disk keeps filling until it is)" : ` (the ${backstop}-day backstop TTL deletes days that wait longer)`),
+			);
+		}
 		const steps = planTableArchive({
 			now: this.now(),
 			hotDays: this.opts.hotDays[table],

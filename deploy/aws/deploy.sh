@@ -45,7 +45,7 @@
 #                         S3 endpoint + prefix, e.g.
 #                         https://autter-runtime-archive.s3.us-east-1.amazonaws.com/runtime
 #   ARCHIVE_S3_NAMED_COLLECTION  instead of URL + keys: a ClickHouse named collection
-#   ARCHIVE_RETENTION_DAYS / ARCHIVE_TABLES / ARCHIVE_BACKSTOP_DAYS / ARCHIVE_SCHEDULER
+#   ARCHIVE_RETENTION_DAYS / ARCHIVE_TABLES / ARCHIVE_BACKSTOP_DAYS / ARCHIVE_OVERDUE_WARN_DAYS / ARCHIVE_SCHEDULER
 #                         passed through when set. With more than one task, the
 #                         archive job needs AUTTER_REDIS_URL_SECRET_ARN (a lease).
 #   SKIP_BUILD=1          reuse an already-pushed IMAGE_TAG
@@ -122,7 +122,7 @@ env_json="[
 [[ -n "${SINK_URL:-}" ]] && env_json+=",
   {\"name\":\"AUTTER_SINK_URL\",\"value\":\"${SINK_URL}\"}"
 # Tiered retention (docs/RETENTION.md): pass the archive settings through when set.
-for var in ARCHIVE_S3_URL ARCHIVE_S3_NAMED_COLLECTION ARCHIVE_RETENTION_DAYS ARCHIVE_TABLES ARCHIVE_BACKSTOP_DAYS ARCHIVE_SCHEDULER ARCHIVE_INTERVAL_MINUTES ARCHIVE_MAX_DAYS_PER_PASS; do
+for var in ARCHIVE_S3_URL ARCHIVE_S3_NAMED_COLLECTION ARCHIVE_RETENTION_DAYS ARCHIVE_TABLES ARCHIVE_BACKSTOP_DAYS ARCHIVE_OVERDUE_WARN_DAYS ARCHIVE_SCHEDULER ARCHIVE_INTERVAL_MINUTES ARCHIVE_MAX_DAYS_PER_PASS; do
   [[ -n "${!var:-}" ]] && env_json+=",
   {\"name\":\"${var}\",\"value\":\"${!var}\"}"
 done

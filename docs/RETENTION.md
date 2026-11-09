@@ -71,7 +71,8 @@ as `filename`.
 | `ARCHIVE_S3_ACCESS_KEY_ID` / `ARCHIVE_S3_SECRET_ACCESS_KEY` | unset | Keys passed in the `s3()` calls. Without them and without a named collection, ClickHouse uses its own credentials (environment, instance role). |
 | `ARCHIVE_TABLES` | all four | Comma-separated subset of `runtime_error_occurrences,runtime_spans,runtime_llm_calls,runtime_logs`. |
 | `ARCHIVE_RETENTION_DAYS` | `365` (30–3650) | Event age after which a day is gone from the archive too. A day already this old when its hot window ends is dropped without export, as its TTL would have done. |
-| `ARCHIVE_BACKSTOP_DAYS` | `0` (none) | Optional delete TTL kept on archived tables as a disk guard, at least the hot window plus 7 days. It deletes rows whether or not they were archived, so set it only when the disk matters more than the archive. |
+| `ARCHIVE_BACKSTOP_DAYS` | `auto` (hot window + 7 days) | Delete TTL kept on archived tables as a disk guard: traces 14 days, errors and logs 21, LLM calls 97 with the default hot windows. A number sets it (at least the hot window + 7); `0` removes it. It deletes rows whether or not they were archived, so a day the job could not archive for a week is lost, but a stopped job never fills the disk. |
+| `ARCHIVE_OVERDUE_WARN_DAYS` | `2` | Each pass warns (`runtime archive: <table> is behind`) when a table's oldest unarchived day has waited this many days past the one that just left the hot window. |
 | `ARCHIVE_INTERVAL_MINUTES` | `60` (5–1440) | How often the job runs. The first pass is a minute after start. |
 | `ARCHIVE_MAX_DAYS_PER_PASS` | `4` (1–31) | Day partitions handled per table per pass. A backlog takes a few passes. |
 | `ARCHIVE_SCHEDULER` | `auto` | `auto`: the holder of a Redis lease (`AUTTER_REDIS_URL`), or the only replica (`AUTTER_INGESTER_REPLICAS=1`). `on`: this process runs it without a lease. `off`: this process never runs it. |
@@ -103,12 +104,17 @@ never dropped before its rows were read back from the bucket. Rows that
 arrive late for an archived day are archived as a second generation, in a
 second file next to the first.
 
-While an archive is configured, the archived tables have no delete TTL
-(`ALTER TABLE … REMOVE TTL` at boot, or the backstop). The job is what
-removes rows. If it does not run (no Redis with several replicas, the
-bucket unreachable for days), the tables grow and the log says why. Watch
-ClickHouse's disk. Turning the archive off puts the hot TTLs back at the
-next boot.
+While an archive is configured, the archived tables' delete TTL moves out
+to the backstop, a week past the hot window (`ARCHIVE_BACKSTOP_DAYS`), so
+the job is what normally removes rows. If it does not run (no Redis with
+several replicas, the bucket unreachable for days), each pass that does run
+warns once a table is `ARCHIVE_OVERDUE_WARN_DAYS` behind, Autter's
+ClickHouse health monitor publishes `ArchiveOverdueDays` (its alarm fires
+at 2), and after a week the backstop deletes the oldest unarchived days
+rather than let the disk fill and stop ingest. `ARCHIVE_BACKSTOP_DAYS=0`
+removes the TTL entirely: nothing is lost unarchived, but a stopped job
+then grows the tables until the disk is full. Turning the archive off puts
+the hot TTLs back at the next boot.
 
 Org keys in paths are the org id when it consists of `[A-Za-z0-9_-]` (every
 Autter org id). Any other id becomes a readable form plus a 12-character

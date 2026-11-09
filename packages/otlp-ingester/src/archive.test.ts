@@ -8,6 +8,7 @@ import {
 	dayFromPartitionId,
 	effectiveBackstopDays,
 	hotCutoffDay,
+	overdueDays,
 	orgArchiveKey,
 	parseTtlDays,
 	planTableArchive,
@@ -45,7 +46,8 @@ test("archive config: defaults, bounds, tables", () => {
 	assert.equal(config.url, "https://bucket.s3.us-east-1.amazonaws.com/runtime");
 	assert.deepEqual(config.tables, ["runtime_error_occurrences", "runtime_spans", "runtime_llm_calls", "runtime_logs"]);
 	assert.equal(config.retentionDays, 365);
-	assert.equal(config.backstopDays, 0);
+	assert.equal(config.backstopDays, "auto");
+	assert.equal(config.overdueWarnDays, 2);
 	assert.equal(config.intervalMinutes, 60);
 	assert.equal(config.scheduler, "auto");
 	const bounded = archiveConfigFromEnv({
@@ -227,6 +229,29 @@ test("TTL with an archive never deletes inside hot window + export: removed, or 
 	assert.equal(effectiveBackstopDays(90, 7), 90);
 });
 
+test("backstop TTL is on by default: each table's hot window + 7 days; 0 turns it off", () => {
+	const base = { archived: true, alwaysApply: false, backstopDays: "auto" as const };
+	assert.deepEqual(retentionTtlAction({ ...base, hotDays: 7, current: 7 }), { action: "modify", days: 14 });
+	assert.deepEqual(retentionTtlAction({ ...base, hotDays: 14, current: null }), { action: "modify", days: 21 });
+	assert.deepEqual(retentionTtlAction({ ...base, hotDays: 90, current: 97 }), { action: "none" });
+	assert.equal(effectiveBackstopDays("auto", 14), 21);
+	const url = "https://bucket.s3.us-east-1.amazonaws.com/runtime";
+	assert.equal(archiveConfigFromEnv({ ARCHIVE_S3_URL: url, ARCHIVE_BACKSTOP_DAYS: "auto" })?.backstopDays, "auto");
+	assert.equal(archiveConfigFromEnv({ ARCHIVE_S3_URL: url, ARCHIVE_BACKSTOP_DAYS: "0" })?.backstopDays, 0);
+	assert.equal(archiveConfigFromEnv({ ARCHIVE_S3_URL: url, ARCHIVE_BACKSTOP_DAYS: "60" })?.backstopDays, 60);
+	assert.throws(() => archiveConfigFromEnv({ ARCHIVE_S3_URL: url, ARCHIVE_BACKSTOP_DAYS: "soon" }), /ARCHIVE_BACKSTOP_DAYS/);
+});
+
+test("overdue days: 0 while hourly passes keep up, climbing a day per day the job does not run", () => {
+	const now = new Date("2026-11-20T12:00:00Z");
+	// Hot window 7: the cutoff is 2026-11-13, so 2026-11-12 is the day that just left it.
+	assert.equal(overdueDays({ now, hotDays: 7, main: [{ day: "2026-11-13", rows: 5 }], stage: [] }), 0);
+	assert.equal(overdueDays({ now, hotDays: 7, main: [{ day: "2026-11-12", rows: 5 }], stage: [] }), 0);
+	assert.equal(overdueDays({ now, hotDays: 7, main: [{ day: "2026-11-10", rows: 5 }, { day: "2026-11-12", rows: 1 }], stage: [] }), 2);
+	// A day stuck in the stage table counts; empty partitions do not.
+	assert.equal(overdueDays({ now, hotDays: 7, main: [{ day: "2026-11-01", rows: 0 }], stage: [{ day: "2026-11-09", rows: 3 }] }), 3);
+});
+
 test("TTL parsing from engine_full", () => {
 	assert.equal(parseTtlDays("MergeTree PARTITION BY toDate(occurred_at) ORDER BY x TTL toDateTime(occurred_at) + toIntervalDay(14) SETTINGS index_granularity = 8192"), 14);
 	assert.equal(parseTtlDays("MergeTree PARTITION BY toDate(occurred_at) ORDER BY x SETTINGS ttl_only_drop_parts = 0"), null);
@@ -358,6 +383,7 @@ const ARCHIVE: ArchiveConfig = {
 	tables: ["runtime_spans"],
 	retentionDays: 365,
 	backstopDays: 0,
+	overdueWarnDays: 2,
 	intervalMinutes: 60,
 	maxDaysPerPass: 4,
 	scheduler: "auto",

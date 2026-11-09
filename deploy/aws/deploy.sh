@@ -19,6 +19,9 @@
 #   AUTTER_INGEST_KEYS_SECRET_ARN           (static keys JSON, if no validator)
 #   AUTTER_REDIS_URL_SECRET_ARN             (redis://… shared by all tasks for rate
 #                                            limits; strongly recommended with >1 task)
+#   ARCHIVE_S3_ACCESS_KEY_ID_SECRET_ARN / ARCHIVE_S3_SECRET_ACCESS_KEY_SECRET_ARN
+#                                           (tiered retention: keys ClickHouse uses for
+#                                            the archive bucket, when no named collection)
 # Optional env:
 #   CLUSTER               default autter-prod
 #   SERVICE               default autter-otlp-ingester
@@ -38,6 +41,13 @@
 #                         the sink outbox volume setup.sh creates. Default: found
 #                         by its creation token / tag; none found = no volume
 #                         (the outbox then lives on the task's ephemeral disk).
+#   ARCHIVE_S3_URL        tiered retention (docs/RETENTION.md): the archive bucket's
+#                         S3 endpoint + prefix, e.g.
+#                         https://autter-runtime-archive.s3.us-east-1.amazonaws.com/runtime
+#   ARCHIVE_S3_NAMED_COLLECTION  instead of URL + keys: a ClickHouse named collection
+#   ARCHIVE_RETENTION_DAYS / ARCHIVE_TABLES / ARCHIVE_BACKSTOP_DAYS / ARCHIVE_SCHEDULER
+#                         passed through when set. With more than one task, the
+#                         archive job needs AUTTER_REDIS_URL_SECRET_ARN (a lease).
 #   SKIP_BUILD=1          reuse an already-pushed IMAGE_TAG
 set -euo pipefail
 
@@ -85,6 +95,10 @@ secrets_json="[
   {\"name\":\"AUTTER_INGEST_KEYS\",\"valueFrom\":\"${AUTTER_INGEST_KEYS_SECRET_ARN}\"}"
 [[ -n "${AUTTER_REDIS_URL_SECRET_ARN:-}" ]] && secrets_json+=",
   {\"name\":\"AUTTER_REDIS_URL\",\"valueFrom\":\"${AUTTER_REDIS_URL_SECRET_ARN}\"}"
+[[ -n "${ARCHIVE_S3_ACCESS_KEY_ID_SECRET_ARN:-}" ]] && secrets_json+=",
+  {\"name\":\"ARCHIVE_S3_ACCESS_KEY_ID\",\"valueFrom\":\"${ARCHIVE_S3_ACCESS_KEY_ID_SECRET_ARN}\"}"
+[[ -n "${ARCHIVE_S3_SECRET_ACCESS_KEY_SECRET_ARN:-}" ]] && secrets_json+=",
+  {\"name\":\"ARCHIVE_S3_SECRET_ACCESS_KEY\",\"valueFrom\":\"${ARCHIVE_S3_SECRET_ACCESS_KEY_SECRET_ARN}\"}"
 secrets_json+="]"
 
 if [[ -z "${INGESTER_REPLICAS:-}" ]]; then
@@ -107,6 +121,14 @@ env_json="[
   {\"name\":\"AUTTER_KEY_VALIDATOR_URL\",\"value\":\"${KEY_VALIDATOR_URL}\"}"
 [[ -n "${SINK_URL:-}" ]] && env_json+=",
   {\"name\":\"AUTTER_SINK_URL\",\"value\":\"${SINK_URL}\"}"
+# Tiered retention (docs/RETENTION.md): pass the archive settings through when set.
+for var in ARCHIVE_S3_URL ARCHIVE_S3_NAMED_COLLECTION ARCHIVE_RETENTION_DAYS ARCHIVE_TABLES ARCHIVE_BACKSTOP_DAYS ARCHIVE_SCHEDULER ARCHIVE_INTERVAL_MINUTES ARCHIVE_MAX_DAYS_PER_PASS; do
+  [[ -n "${!var:-}" ]] && env_json+=",
+  {\"name\":\"${var}\",\"value\":\"${!var}\"}"
+done
+if [[ -n "${ARCHIVE_S3_URL:-}${ARCHIVE_S3_NAMED_COLLECTION:-}" && "$INGESTER_REPLICAS" -gt 1 && -z "${AUTTER_REDIS_URL_SECRET_ARN:-}" && "${ARCHIVE_SCHEDULER:-auto}" == "auto" ]]; then
+  echo "!! archive configured with ${INGESTER_REPLICAS} tasks and no Redis: no task runs the archive job and the archived tables keep growing."
+fi
 
 # --- sink outbox on EFS ------------------------------------------------------
 # Undelivered sink batches survive a task being replaced only on a volume

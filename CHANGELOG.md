@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Tiered retention (`otlp-ingester`, [docs/RETENTION.md](docs/RETENTION.md)): with `ARCHIVE_S3_URL` (or `ARCHIVE_S3_NAMED_COLLECTION`) set, error occurrences, spans, logs and LLM calls older than their hot window (`OCCURRENCE_TTL_DAYS`, `SPAN_TTL_DAYS`, `LOG_TTL_DAYS`, `LLM_CALL_TTL_DAYS`) are written to Parquet in object storage (S3, GCS through its S3-compatible endpoint with HMAC keys, MinIO, R2) before they leave ClickHouse, one object per org and day under `<table>/org=<org>/date=<day>/`, kept for `ARCHIVE_RETENTION_DAYS` (default 365). Each day partition is moved atomically into a stage table, exported, read back and counted, logged in `runtime_archive_log`, and only then dropped; a failed or interrupted pass resumes from the log and rewrites the same objects. The archived tables give up their delete TTL (optionally keeping an `ARCHIVE_BACKSTOP_DAYS` disk guard), so no TTL deletes a day that was not archived. One process runs the job: the holder of a Redis lease (`AUTTER_REDIS_URL`), or the only replica, or the one started with `ARCHIVE_SCHEDULER=on`. Without an archive configured nothing changes. `docker compose --profile archive up` adds a local MinIO; `deploy/single-server` and `deploy/aws/deploy.sh` pass the settings through.
+
 ## [1.15.0] - 2026-11-08
 
 Packages: no npm package changes, so nothing is re-published. New: the local development dashboard (`dashboard/` 0.1.0), published as the `ghcr.io/autter-dev/runtime-dashboard` image.

@@ -47,6 +47,17 @@ services:
       # Caddy is the one proxy hop in front: trust its X-Forwarded-For for
       # the per-address limits. One ingester, so limits need no Redis.
       TRUST_PROXY: 1
+      # Tiered retention (optional, docs/RETENTION.md): days older than each
+      # table's hot window go to Parquet in a bucket ClickHouse can write
+      # (S3, GCS's S3 endpoint with HMAC keys, MinIO, R2). Unset = off, the
+      # TTLs delete as before. The one ingester here runs the archive job.
+      OCCURRENCE_TTL_DAYS: ${OCCURRENCE_TTL_DAYS:-14}
+      SPAN_TTL_DAYS: ${SPAN_TTL_DAYS:-7}
+      ARCHIVE_S3_URL: ${ARCHIVE_S3_URL:-}
+      ARCHIVE_S3_NAMED_COLLECTION: ${ARCHIVE_S3_NAMED_COLLECTION:-}
+      ARCHIVE_S3_ACCESS_KEY_ID: ${ARCHIVE_S3_ACCESS_KEY_ID:-}
+      ARCHIVE_S3_SECRET_ACCESS_KEY: ${ARCHIVE_S3_SECRET_ACCESS_KEY:-}
+      ARCHIVE_RETENTION_DAYS: ${ARCHIVE_RETENTION_DAYS:-365}
     volumes:
       # Undelivered sink batches survive restarts and image upgrades and are
       # re-sent on start (SINK_OUTBOX_DIR, set in the image).

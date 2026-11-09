@@ -16,7 +16,8 @@
 		"start": "node dist/index.js",
 		"build": "tsc -p tsconfig.json",
 		"test": "tsx --test src/*.test.ts",
-		"e2e:clickhouse": "node scripts/clickhouse-e2e.mjs"
+		"e2e:clickhouse": "node scripts/clickhouse-e2e.mjs",
+		"e2e:archive": "node scripts/archive-e2e.mjs"
 	},
 	"dependencies": {
 		"@clickhouse/client": "^1.12.0",

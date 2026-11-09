@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
+import { archiveConfigFromEnv } from "./archive.js";
 import { ClickHouseStore } from "./clickhouse.js";
 import type { IngesterConfig } from "./config.js";
 import { liftErrorFields } from "./error-fields.js";
@@ -498,7 +499,7 @@ test("LOG_TTL_DAYS is applied only when it differs, and a failure never blocks t
 	let failTtl = false;
 	const stub = await startStub((call) => {
 		if (call.sql.includes("system.tables")) {
-			return failTtl ? { status: 500, body: "boom" } : { body: JSON.stringify({ engine_full: engine }) + "\n" };
+			return failTtl ? { status: 500, body: "boom" } : { body: JSON.stringify({ name: "runtime_logs", engine_full: engine }) + "\n" };
 		}
 	});
 	const modifies = () => stub.calls.filter((c) => c.sql.includes("MODIFY TTL"));
@@ -516,6 +517,12 @@ test("LOG_TTL_DAYS is applied only when it differs, and a failure never blocks t
 		assert.equal(modifies().length, 1);
 		// Fresh databases: the baseline CREATE carries the configured TTL.
 		assert.ok(stub.calls.some((c) => /runtime_logs[\s\S]*INTERVAL 7 DAY/.test(c.sql)));
+		// Tiered retention: an archived table gives up its delete TTL (the archive job drops exported days).
+		failTtl = false;
+		const archive = archiveConfigFromEnv({ ARCHIVE_S3_URL: "http://minio:9000/archive", ARCHIVE_TABLES: "runtime_logs" });
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30, archive })).ensureSchema();
+		assert.ok(stub.calls.some((c) => c.sql.includes("ALTER TABLE autter_runtime.runtime_logs REMOVE TTL")));
+		assert.equal(modifies().length, 1);
 	} finally {
 		await close(stub.server);
 	}

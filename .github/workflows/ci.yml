@@ -64,6 +64,19 @@ jobs:
           CLICKHOUSE_URL: http://127.0.0.1:8123
           CLICKHOUSE_ADMIN_PASSWORD: e2e
           EXPECT_CLICKHOUSE_VERSION: 24.8.14.39
+      # Tiered retention (docs/RETENTION.md): archive a day to Parquet in a
+      # MinIO bucket on the ClickHouse service's network, read it back.
+      - name: Start MinIO for the archive check
+        run: |
+          docker run -d --name minio --network ${{ job.services.clickhouse.network }}             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          docker run --rm --network ${{ job.services.clickhouse.network }} --entrypoint sh             minio/mc:RELEASE.2025-04-16T18-13-26Z -c             "until mc alias set l http://minio:9000 minioadmin minioadmin; do sleep 1; done; mc mb --ignore-existing l/archive"
+      - run: npm run e2e:archive -w @autter/otlp-ingester
+        env:
+          CLICKHOUSE_URL: http://127.0.0.1:8123
+          CLICKHOUSE_ADMIN_PASSWORD: e2e
+          ARCHIVE_E2E_S3_URL: http://minio:9000/archive/e2e
+          ARCHIVE_E2E_ACCESS_KEY_ID: minioadmin
+          ARCHIVE_E2E_SECRET_ACCESS_KEY: minioadmin
       # A real minified app built with the plugins (Vite 8 with Oxc and with
       # terser, webpack 5, Next.js 16 with Turbopack), its maps uploaded with
       # an upload-only key, an error thrown in headless Chromium, and the

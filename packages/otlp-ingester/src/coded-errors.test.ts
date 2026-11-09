@@ -517,12 +517,18 @@ test("LOG_TTL_DAYS is applied only when it differs, and a failure never blocks t
 		assert.equal(modifies().length, 1);
 		// Fresh databases: the baseline CREATE carries the configured TTL.
 		assert.ok(stub.calls.some((c) => /runtime_logs[\s\S]*INTERVAL 7 DAY/.test(c.sql)));
-		// Tiered retention: an archived table gives up its delete TTL (the archive job drops exported days).
+		// Tiered retention: an archived table's delete TTL moves to the backstop,
+		// a week past the hot window (the archive job drops exported days)...
 		failTtl = false;
 		const archive = archiveConfigFromEnv({ ARCHIVE_S3_URL: "http://minio:9000/archive", ARCHIVE_TABLES: "runtime_logs" });
 		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30, archive })).ensureSchema();
+		assert.equal(modifies().length, 2);
+		assert.match(modifies()[1]!.sql, /runtime_logs MODIFY TTL toDateTime\(occurred_at\) \+ INTERVAL 37 DAY/);
+		// ...and ARCHIVE_BACKSTOP_DAYS=0 removes it.
+		const noBackstop = archiveConfigFromEnv({ ARCHIVE_S3_URL: "http://minio:9000/archive", ARCHIVE_TABLES: "runtime_logs", ARCHIVE_BACKSTOP_DAYS: "0" });
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30, archive: noBackstop })).ensureSchema();
 		assert.ok(stub.calls.some((c) => c.sql.includes("ALTER TABLE autter_runtime.runtime_logs REMOVE TTL")));
-		assert.equal(modifies().length, 1);
+		assert.equal(modifies().length, 2);
 	} finally {
 		await close(stub.server);
 	}

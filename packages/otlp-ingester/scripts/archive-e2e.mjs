@@ -17,8 +17,8 @@
  *     node packages/otlp-ingester/scripts/archive-e2e.mjs
  *
  * It creates its own database, applies the schema with an archive configured
- * (the spans TTL is removed), inserts spans for two orgs on an old day and a
- * hot one, runs one archive pass, and checks: the old day left the table,
+ * (the spans TTL moves to the 14-day backstop), inserts spans for two orgs on
+ * an old day (past the 7-day hot window, inside the backstop) and a hot one, runs one archive pass, and checks: the old day left the table,
  * the stage table is empty, the log says archived, each org's object reads
  * back with its rows (also with an explicit structure, as the backend reads
  * it); then late rows for the archived day become a second generation.
@@ -75,7 +75,9 @@ async function sql(query) {
 const config = loadConfig();
 const store = new ClickHouseStore(config);
 const today = utcDay(new Date());
-const oldDay = addDays(today, -20);
+// Past the 7-day hot window but inside the 14-day backstop TTL, which would
+// delete older rows itself before the archiver sees them.
+const oldDay = addDays(today, -10);
 const hotDay = addDays(today, -1);
 
 async function insertSpans(day, org, n, tag) {
@@ -89,7 +91,7 @@ try {
 	console.log(`archive e2e: database ${DB}, archive ${PREFIX}`);
 	await store.ensureSchema();
 	const [engine] = await sql(`SELECT engine_full FROM system.tables WHERE database = '${DB}' AND name = 'runtime_spans'`);
-	check(!/\bTTL\b/.test(engine.engine_full), "archived table has no delete TTL", engine.engine_full);
+	check(/\bTTL\b[^]*toIntervalDay\(14\)/.test(engine.engine_full), "archived table keeps only the backstop TTL (hot window + 7 days)", engine.engine_full);
 
 	await insertSpans(oldDay, "org_a", 30, "a");
 	await insertSpans(oldDay, "org_b", 5, "b");

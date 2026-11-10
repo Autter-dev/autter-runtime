@@ -124,6 +124,20 @@ import { breadcrumbEventAttributes } from "./breadcrumbs.js";
 import { installExpressErrorCapture, watchExpressResponse } from "./express-errors.js";
 import { sharedSlot } from "./shared.js";
 import { RouteLabelSampler } from "./route-label.js";
+import {
+	DEFAULT_SLOW_TRACES_PER_MINUTE,
+	durationMsOf,
+	isLlmSpan,
+	isLocalRoot,
+	LlmContentExporter,
+	LlmContentPolicy,
+	requestKeyOf,
+	RETENTION_REASON_ATTR,
+	SlowPolicy,
+	spanIndicatesError,
+	type LlmContentMode,
+	type RetentionReason,
+} from "./tail-sampling.js";
 
 /**
  * The started tracker, shared by every copy of this package in the process
@@ -242,7 +256,26 @@ export interface AutterServerOptions {
 	 * Default true.
 	 */
 	retainTracesOnError?: boolean;
-	retainTracesAboveMs?: number;
+	/**
+	 * Keep the FULL local trace of a slow request, whatever head sampling
+	 * decided. By default (undefined) a request is slow when its root server
+	 * span takes longer than both 500 ms and its route's rolling p95: an
+	 * estimate per method + route over this process's recent requests, all
+	 * of them, sampled or not. A positive number is a fixed threshold in ms
+	 * instead; `0` or `false` turns slow-trace retention off. Kept traces are
+	 * rate limited (`retainSlowTracesPerMinute`) and their spans carry
+	 * `autter.retention_reason = "slow"`. Request histograms, and so p95 and
+	 * endpoint regression detection, never depend on this: they count every
+	 * request.
+	 */
+	retainTracesAboveMs?: number | false;
+	/**
+	 * Budget for the slow traces `retainTracesAboveMs` keeps (and for LLM
+	 * spans that keep their content because they were slow), per process: at
+	 * most this many a minute, in bursts of up to 20, and any one route (or
+	 * model) at most a sixth of it. `0` keeps none. Default 60.
+	 */
+	retainSlowTracesPerMinute?: number;
 	/** Metric export interval. Default 60_000 ms. */
 	metricIntervalMs?: number;
 	/** Collect RSS, heap, limit, and GC signals per process instance. Default true. */
@@ -342,9 +375,26 @@ export interface AutterServerOptions {
 	/**
 	 * Record LLM/GenAI spans (`gen_ai.*` semconv, Vercel AI SDK `ai.*`,
 	 * `withLlmCall`) at 100% regardless of `traceSampleRate`, so every model
-	 * call is tracked with tokens/cost (default true).
+	 * call is tracked with tokens/cost (default true). What else those spans
+	 * carry is `llmContent`.
 	 */
 	llmTracing?: boolean;
+	/**
+	 * Prompt and completion content on LLM spans (`ai.prompt*`,
+	 * `ai.response.text` / `toolCalls` / `object`, `ai.toolCall.args` /
+	 * `result`, `gen_ai.prompt*` / `gen_ai.completion*`,
+	 * `gen_ai.input.messages` / `output.messages`, the GenAI message events):
+	 * - `"slow-or-failed"` (default): exported only for a call that failed,
+	 *   or that took longer than both 500 ms and its model's rolling p95
+	 *   (within `retainSlowTracesPerMinute`), marked
+	 *   `autter.llm.content = "error"` / `"slow"`. Every other call keeps
+	 *   its model, token, cost, latency and status attributes; its content
+	 *   is dropped in the process and the span marked
+	 *   `autter.llm.content = "omitted"`.
+	 * - `"always"`: every call keeps its content (the behaviour up to 1.11).
+	 * - `"never"`: no call keeps it, failed ones included.
+	 */
+	llmContent?: LlmContentMode;
 	/** Extra instrumentations (e.g. `new ExpressInstrumentation()`). */
 	instrumentations?: unknown[];
 	/**
@@ -496,21 +546,31 @@ export interface LlmSelftestResult extends AutterFlushResult {
 
 export type { AutterExportError, AutterExportErrorHandler, AutterFlushResult };
 
-// Marks a span as an LLM/GenAI call: OTel GenAI semconv attributes, or the
-// span names the Vercel AI SDK and GenAI instrumentations use. Attributes
-// must be present at span creation for head sampling to see them — true for
-// the Vercel AI SDK, withLlmCall, and the OTel GenAI instrumentations.
-const LLM_MARKER_ATTRIBUTES = [
-	"gen_ai.operation.name",
-	"gen_ai.system",
-	"gen_ai.provider.name",
-	"gen_ai.request.model",
-	"autter.llm.provider",
-];
+/**
+ * Marks what the head sampler keeps `autter.retention_reason = "head"`
+ * (sampler attributes are set on the span at start), so a stored span says
+ * whether it is a random sample of the traffic or was kept by tail
+ * retention for an error or for being slow.
+ */
+class HeadReasonSampler implements Sampler {
+	constructor(private readonly delegate: Sampler) {}
 
-function isLlmSpan(name: string, attributes: Attributes): boolean {
-	if (name.startsWith("ai.") || name.startsWith("gen_ai.")) return true;
-	return LLM_MARKER_ATTRIBUTES.some((key) => attributes[key] !== undefined);
+	shouldSample(
+		ctx: Context,
+		traceId: string,
+		spanName: string,
+		spanKind: SpanKind,
+		attributes: Attributes,
+		links: Link[],
+	): SamplingResult {
+		const result = this.delegate.shouldSample(ctx, traceId, spanName, spanKind, attributes, links);
+		if (result.decision !== SamplingDecision.RECORD_AND_SAMPLED) return result;
+		return { ...result, attributes: { ...result.attributes, [RETENTION_REASON_ATTR]: "head" satisfies RetentionReason } };
+	}
+
+	toString(): string {
+		return `HeadReason(${this.delegate.toString()})`;
+	}
 }
 
 /**
@@ -592,11 +652,6 @@ const RETENTION_MAX_BUFFERED_SPANS = 5_000;
 const RETENTION_SWEEP_INTERVAL_MS = 10_000;
 const RETENTION_TRACE_TTL_MS = 30_000;
 
-function spanIndicatesError(span: ReadableSpan): boolean {
-	if (span.status.code === SpanStatusCode.ERROR) return true;
-	return span.events.some((event) => event.name === "exception");
-}
-
 /** Marks spans exported by tail retention rather than head sampling. The
  * ingester uses it to keep such spans out of span-fed usage rollups —
  * erroring requests are already counted by the metrics pipeline, and at
@@ -605,8 +660,9 @@ const TAIL_RETAINED_ATTR = "autter.tail_retained";
 
 /** The batch processor only exports spans with the sampled flag, so a
  * rescued span is re-wrapped with the flag set — which is also the truth:
- * the tail decision sampled it. */
-function withSampledFlag(span: ReadableSpan): ReadableSpan {
+ * the tail decision sampled it — and with why it was kept
+ * (`autter.retention_reason`: "error" or "slow"). */
+function withSampledFlag(span: ReadableSpan, reason: RetentionReason): ReadableSpan {
 	const spanContext = {
 		...span.spanContext(),
 		traceFlags: span.spanContext().traceFlags | TraceFlags.SAMPLED,
@@ -619,7 +675,7 @@ function withSampledFlag(span: ReadableSpan): ReadableSpan {
 		startTime: span.startTime,
 		endTime: span.endTime,
 		status: span.status,
-		attributes: { ...span.attributes, [TAIL_RETAINED_ATTR]: true },
+		attributes: { ...span.attributes, [TAIL_RETAINED_ATTR]: true, [RETENTION_REASON_ATTR]: reason },
 		links: span.links,
 		events: span.events,
 		duration: span.duration,
@@ -635,17 +691,22 @@ function withSampledFlag(span: ReadableSpan): ReadableSpan {
 interface RetentionEntry {
 	spans: ReadableSpan[];
 	retained: boolean;
+	/** Why the trace was promoted (the first reason wins). */
+	reason: RetentionReason;
 	firstSeenAtMs: number;
 }
 
 /**
- * Tail retention for erroring traces. Errors export at 100% via the
- * always-on tracer while regular traces are head-sampled at ~1% — so the
- * trace that explains a retained error would almost always be gone. This
- * processor buffers the finished-but-unsampled spans of in-flight traces
- * and promotes a whole trace to export the moment it shows an error: an
- * ERROR-status span (5xx requests included), an `exception` event, or an
- * explicit captureException / captureMessage("…", "error") inside it.
+ * Tail retention for erroring and slow traces. Errors export at 100% via
+ * the always-on tracer while regular traces are head-sampled at ~1% — so
+ * the trace that explains a retained error, or a latency regression, would
+ * almost always be gone. This processor buffers the finished-but-unsampled
+ * spans of in-flight traces and promotes a whole trace to export the moment
+ * it shows an error: an ERROR-status span (5xx requests included), an
+ * `exception` event, or an explicit captureException /
+ * captureMessage("…", "error") inside it; or when its local root server
+ * span ends slow (SlowPolicy: above the route's rolling p95 and 500 ms, or
+ * a fixed `retainTracesAboveMs`, within the slow-trace budget).
  *
  * Bounded by construction: per-trace and total span caps, buffers dropped
  * as soon as the local root span ends healthy, and a TTL sweep for traces
@@ -662,7 +723,7 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 	constructor(
 		private readonly inner: SpanProcessor,
 		private readonly retainErrors = true,
-		private readonly slowThresholdMs = 0,
+		private readonly slow: SlowPolicy | null = null,
 	) {
 		this.sweeper = setInterval(() => this.sweep(), RETENTION_SWEEP_INTERVAL_MS);
 		// Never hold the process open just to babysit the buffer.
@@ -673,18 +734,26 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 
 	onEnd(span: ReadableSpan): void {
 		const ctx = span.spanContext();
+		const sampled = (ctx.traceFlags & TraceFlags.SAMPLED) !== 0;
+		const localRoot = isLocalRoot(span);
+		// Every request's duration feeds its route's estimate, head-sampled
+		// or not, so the threshold reflects all traffic.
+		const slowRoot = this.slow !== null && localRoot && span.kind === SpanKind.SERVER;
 		// Head-sampled spans already export through the regular processor.
-		if ((ctx.traceFlags & TraceFlags.SAMPLED) !== 0) return;
+		if (sampled) {
+			if (slowRoot) this.slow!.consider(requestKeyOf(span.attributes), durationMsOf(span), false);
+			return;
+		}
 
 		const entry = this.entryFor(ctx.traceId);
+		const failed = !entry.retained && this.retainErrors && spanIndicatesError(span);
+		const slow = slowRoot
+			&& this.slow!.consider(requestKeyOf(span.attributes), durationMsOf(span), !entry.retained && !failed);
 		if (entry.retained) {
-			this.forward(span);
-		} else if ((this.retainErrors && spanIndicatesError(span)) ||
-			(this.slowThresholdMs > 0 && span.kind === SpanKind.SERVER &&
-				span.duration[0] * 1000 + span.duration[1] / 1e6 >= this.slowThresholdMs)) {
-			entry.retained = true;
-			this.flush(entry);
-			this.forward(span);
+			this.forward(span, entry.reason);
+		} else if (failed || slow) {
+			this.promote(entry, failed ? "error" : "slow");
+			this.forward(span, entry.reason);
 		} else if (entry.spans.length < RETENTION_MAX_SPANS_PER_TRACE) {
 			entry.spans.push(span);
 			this.bufferedSpans++;
@@ -694,7 +763,7 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		// The local root ended: the request is over, and an error inside it
 		// would have surfaced by now. Drop a healthy trace's buffer; keep
 		// retained entries so late stragglers still export (sweep cleans up).
-		if (span.parentSpanContext === undefined && !entry.retained) {
+		if (localRoot && !entry.retained) {
 			this.drop(ctx.traceId);
 		}
 	}
@@ -706,8 +775,7 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		if (!active || (active.traceFlags & TraceFlags.SAMPLED) !== 0) return;
 		const entry = this.entryFor(active.traceId);
 		if (entry.retained) return;
-		entry.retained = true;
-		this.flush(entry);
+		this.promote(entry, "error");
 	}
 
 	forceFlush(): Promise<void> {
@@ -728,18 +796,21 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 				const oldest = this.traces.keys().next().value;
 				if (oldest) this.drop(oldest);
 			}
-			entry = { spans: [], retained: false, firstSeenAtMs: Date.now() };
+			entry = { spans: [], retained: false, reason: "error", firstSeenAtMs: Date.now() };
 			this.traces.set(traceId, entry);
 		}
 		return entry;
 	}
 
-	private forward(span: ReadableSpan): void {
-		this.inner.onEnd(withSampledFlag(span));
+	private forward(span: ReadableSpan, reason: RetentionReason): void {
+		this.inner.onEnd(withSampledFlag(span, reason));
 	}
 
-	private flush(entry: RetentionEntry): void {
-		for (const span of entry.spans) this.forward(span);
+	/** Export the trace from now on, and what it buffered so far. */
+	private promote(entry: RetentionEntry, reason: RetentionReason): void {
+		entry.retained = true;
+		entry.reason = reason;
+		for (const span of entry.spans) this.forward(span, reason);
 		this.bufferedSpans -= entry.spans.length;
 		entry.spans = [];
 	}
@@ -1037,15 +1108,26 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// Every trace exporter scrubs spans on the way out, whoever created them
 	// (see redact-exporter.ts): secrets and PII, and URL query values.
 	const queryPolicy = makeUrlQueryPolicy(options.keepQueryParams);
+	const slowPerMinute = Number.isFinite(options.retainSlowTracesPerMinute)
+		? Math.max(0, options.retainSlowTracesPerMinute!) : DEFAULT_SLOW_TRACES_PER_MINUTE;
+	// One policy for every trace exporter: LLM spans keep prompt/completion
+	// content only when they failed or were slow (tail-sampling.ts).
+	const llmContent = new LlmContentPolicy(
+		options.llmContent === "always" || options.llmContent === "never" ? options.llmContent : "slow-or-failed",
+		slowPerMinute,
+	);
 	// Outermost: a failed batch (a refused key, an unreachable ingester) is
 	// reported where it happens and never thrown (export-errors.ts).
 	const traceExporter = () =>
 		new GuardedSpanExporter(
 			new CountingExporter(
-				new RedactingSpanExporter(
-					new IngestSpanExporter(new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }), ingestTarget),
-					() => redactor,
-					queryPolicy,
+				new LlmContentExporter(
+					new RedactingSpanExporter(
+						new IngestSpanExporter(new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }), ingestTarget),
+						() => redactor,
+						queryPolicy,
+					),
+					llmContent,
 				),
 			),
 			"traces",
@@ -1097,16 +1179,21 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		remoteParentNotSampled: rootSampler,
 	});
 	const retainOnError = options.retainTracesOnError !== false;
-	const slowThresholdMs = Number.isFinite(options.retainTracesAboveMs)
-		? Math.max(0, options.retainTracesAboveMs!) : 0;
-	const retainTraces = retainOnError || slowThresholdMs > 0;
-	// Error-linked trace retention (default on): unsampled spans are still
-	// recorded in-process and briefly buffered, so a trace can be exported in
-	// full once it turns out to contain an error. Rescued spans ride their
-	// own batch processor on the errors' 2 s flush cadence.
-	let sampler: Sampler = retainTraces
-		? new RecordUnsampledSampler(headSampler)
-		: headSampler;
+	// Slow-trace retention (default on, adaptive per route): undefined →
+	// the route's rolling p95 with a 500 ms floor; a positive number → that
+	// fixed threshold; 0 / false (or a zero budget) → off.
+	const slowOption = options.retainTracesAboveMs;
+	const slowPolicy = slowPerMinute <= 0 || (slowOption !== undefined && !(typeof slowOption === "number" && slowOption > 0))
+		? null
+		: new SlowPolicy({ fixedThresholdMs: typeof slowOption === "number" ? slowOption : null, perMinute: slowPerMinute });
+	const retainTraces = retainOnError || slowPolicy !== null;
+	// Error- and slow-trace retention (both default on): unsampled spans are
+	// still recorded in-process and briefly buffered, so a trace can be
+	// exported in full once it turns out to contain an error or to be slow.
+	// Rescued spans ride their own batch processor on the errors' 2 s flush
+	// cadence. What the head sampler keeps says so ("head").
+	let sampler: Sampler = new HeadReasonSampler(headSampler);
+	if (retainTraces) sampler = new RecordUnsampledSampler(sampler);
 	// LLM tracing is on by default: gen_ai/ai.* spans emitted through the
 	// global provider (Vercel AI SDK, GenAI instrumentations) skip head
 	// sampling so every model call reaches the ingester.
@@ -1118,7 +1205,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		? new ErrorTraceRetentionProcessor(
 				new BatchSpanProcessor(traceExporter(), { scheduledDelayMillis: 2000 }),
 				retainOnError,
-				slowThresholdMs,
+				slowPolicy,
 			)
 		: null;
 

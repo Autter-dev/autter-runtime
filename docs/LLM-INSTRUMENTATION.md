@@ -114,6 +114,61 @@ For Python, Go, and other runtimes, any OTel GenAI instrumentation that emits
 on the attributes that instrumentation emits. See [OTLP setup](WITHOUT-NPM.md)
 for sending data without an Autter package.
 
+## Prompt and completion content
+
+Every LLM call is exported, whatever `traceSampleRate` is, with its model,
+provider, token counts, cost, latency and status. From `@autter/runtime-node`
+1.12.0, the prompt and completion content on those spans is exported only for
+calls that failed or were slow:
+
+| Call | Exported | `autter.llm.content` |
+| --- | --- | --- |
+| Failed (ERROR status or an `exception` event) | Everything | `error` |
+| Slow: longer than 500 ms and that model's rolling p95 | Everything | `slow` |
+| Any other call | Everything except the content | `omitted` |
+| A span with no content attributes | Unchanged | not set |
+
+"That model's rolling p95" is an estimate the process keeps per span name and
+model from every call it made in the last few minutes. Content kept for being
+slow shares the `retainSlowTracesPerMinute` budget (default 60 a minute per
+process, a sixth of it per model). Failed calls always keep their content.
+
+Content is these attributes, and the GenAI message events
+(`gen_ai.system.message`, `gen_ai.user.message`, `gen_ai.assistant.message`,
+`gen_ai.tool.message`, `gen_ai.choice`, `gen_ai.content.prompt`,
+`gen_ai.content.completion`, `gen_ai.client.inference.operation.details`):
+
+- Vercel AI SDK: `ai.prompt`, `ai.prompt.messages`, `ai.prompt.tools`,
+  `ai.prompt.system`, `ai.response.text`, `ai.response.toolCalls`,
+  `ai.response.object`, `ai.response.reasoning`,
+  `ai.response.reasoningDetails`, `ai.response.files`, `ai.response.sources`,
+  `ai.result.text` / `toolCalls` / `object`, `ai.toolCall.args` / `result` /
+  `input` / `output`, `ai.value`, `ai.values`, `ai.embedding`,
+  `ai.embeddings`.
+- OTel GenAI: `gen_ai.prompt`, `gen_ai.completion`, `gen_ai.prompt.*`,
+  `gen_ai.completion.*` (OpenLLMetry's indexed form), `gen_ai.input.messages`,
+  `gen_ai.output.messages`, `gen_ai.system_instructions`,
+  `gen_ai.tool.definitions`, `gen_ai.tool.call.arguments`,
+  `gen_ai.tool.call.result`.
+- OpenInference: `input.value`, `output.value`, `llm.input_messages.*`,
+  `llm.output_messages.*`, `llm.prompts`.
+
+Usage (`ai.usage.*`, `gen_ai.usage.*`), cost, model and provider, finish
+reasons, settings, ids and `ai.telemetry.metadata.*` always stay, so the
+ingester's usage and cost rows are the same for a call with or without its
+content.
+
+`llmContent` changes this:
+
+```ts
+initAutterServer({ ..., llmContent: "always" }); // every call keeps its content (1.11 behaviour)
+initAutterServer({ ..., llmContent: "never" });  // no call does, failed ones included
+```
+
+The decision is made per LLM span when it is exported, from the span alone. A
+call that was fast inside a request that later failed or was slow has already
+been exported without its content.
+
 ## Verify without making a model call
 
 ```ts

@@ -736,8 +736,8 @@ Span-level:
     counts every request, and it marks each request span whose data point
     got the route), or
   - carries `autter.tail_retained` on a resource with
-    `autter.metrics_wired` (runtime-node's error-linked tail retention
-    ships such spans at ~100% next to its metric feed).
+    `autter.metrics_wired` (runtime-node's tail retention of erroring
+    and slow traces ships such spans next to its metric feed).
   `adapters/python`'s `init_tracing(count_requests=True)` sends the same
   shape: a delta histogram with a point for every request (recorded from
   every HTTP server span, sampled or not), each HTTP server span marked

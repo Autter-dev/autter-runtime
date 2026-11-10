@@ -56,9 +56,11 @@ Errors are never head-sampled. Healthy traffic is.
 | --- | --- | --- |
 | Errors: `captureException`, crashes, unhandled rejections, failed outcomes, error spans | 100% | `sampleRate` (default 1) drops a share of `captureException`/error messages, never crashes; `ignoreErrors` drops matches |
 | The full trace around an error | 100% (buffered in process, then exported) | `retainTracesOnError` (default true) |
+| The full trace of a slow request (over 500 ms and its route's rolling p95) | up to 60 a minute per process (buffered, then exported) | `retainTracesAboveMs` (a fixed threshold, or `false`), `retainSlowTracesPerMinute` |
 | Regular traces (healthy requests) | 1% | `traceSampleRate` (default `0.01`) |
 | Request counts, error counts, latency histograms | 100%, as metrics | not sampled |
-| LLM calls (`gen_ai.*` spans) | 100% | `llmTracing: false` turns them off |
+| LLM calls (`gen_ai.*` spans): model, tokens, cost, latency, status | 100% | `llmTracing: false` turns them off |
+| LLM prompt and completion content | failed or slow calls only | `llmContent: "always"` or `"never"` |
 | Logs, operation and request summaries | 100% | `logging.minLevel` |
 | Browser errors | 100% | `sampleRate`, `ignoreErrors`, `denyUrls` in `@autter/runtime-browser/filters` |
 | Python and other OTel SDKs | your sampler's ratio | Errors survive only if your sampler keeps them; `adapters/python/autter_tracing.py` keeps every error |

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+Packages: `runtime-node` (next minor, 1.12.0 in the docs) and `otlp-ingester`. Not released yet; versions are unchanged. `runtime-next` picks up the new `runtime-node` through its existing range.
+
+### Changes
+
+- Slow traces are kept by default (`runtime-node`). Successful traces are head-sampled at 1%, so the trace behind an endpoint latency regression was almost never stored. The tail-retention buffer that already kept erroring traces now also keeps, whole, the local trace of any request whose root server span took longer than both 500 ms and its route's rolling p95. The SDK keeps that estimate per method and route template, in process, from every request (sampled or not; older requests count half every 5 minutes). Kept slow traces are rate limited by the new `retainSlowTracesPerMinute` (default 60 a minute per process, bursts of 20, a sixth per route); past it, slow requests fall back to head sampling. `retainTracesAboveMs` is now documented: a positive value is a fixed threshold instead of the estimate, `false` or `0` turns slow retention off. Up to 1.11 slow retention was off unless `retainTracesAboveMs` was set, and it applied to any server span; it now applies to the local root server span only.
+- Exported request spans say why they were kept (`runtime-node`): `autter.retention_reason` is `head` (random head sample), `error` or `slow` (tail retention; these also keep `autter.tail_retained = true`, so the ingester still counts no request from them).
+- LLM spans keep prompt and completion content only for failed or slow calls (`runtime-node`). Every LLM call is still exported with its model, provider, token counts, cost, latency and status. Content (`ai.prompt*`, `ai.response.text` / `toolCalls` / `object` / `reasoning`, `ai.toolCall.*`, `gen_ai.prompt*`, `gen_ai.completion*`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, OpenInference `input.value` / `output.value` / `llm.*_messages.*`, and the GenAI message events) is dropped in the process unless the call failed or took longer than both 500 ms and its model's rolling p95 (within the slow budget). Spans say which: `autter.llm.content` is `omitted`, `error` or `slow`. The new `llmContent: "always"` restores the previous behaviour; `"never"` drops content from every call. Token and cost extraction in the ingester is unchanged on stripped spans.
+- Edge request latency reaches endpoint regression detection (`otlp-ingester`). `@autter/runtime-edge` sends no histograms, so its routes had no `runtime_latency_histograms` rows. `/v1/logs` now builds them from request summaries marked `autter.request.counted_by = "summary"`, which cover every request: one point per service, environment, release, method, route and minute of a batch, with the Node SDK's bucket bounds, and a point id derived from the records so a retried batch replaces its points. `x-autter-ingest` on `/v1/logs` reports `latency_histograms=`.
+
 ## [1.15.0] - 2026-11-08
 
 Packages: no npm package changes, so nothing is re-published. New: the local development dashboard (`dashboard/` 0.1.0), published as the `ghcr.io/autter-dev/runtime-dashboard` image.

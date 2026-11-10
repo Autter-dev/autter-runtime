@@ -245,12 +245,18 @@ describe("exported: every 5xx carries its error", () => {
 			const captured = await exportedFor(`${prefix}/orders/4/already-captured`);
 			assert.equal(captured.exceptions.length, 1);
 			assert.equal(captured.occurrences.length, 1);
-			// Answered with a 4xx: nothing reported.
+			// Answered with a 4xx: nothing reported by the error handler. The
+			// trace is exported only when something keeps it (head sampling, or
+			// slow-trace retention on a cold CI runner). Express itself prints
+			// errors passed to next() with console.error outside NODE_ENV=test,
+			// and a logged Error is a caught occurrence (RF-01,
+			// captureLoggedErrors): that one is the app's log line, not a report.
 			for (const path of [`${prefix}/orders/3/not-found`, `${prefix}/billing/invoices/7/validation`]) {
 				const result = await exportedFor(path).catch(() => null);
 				if (result) {
 					assert.equal(result.exceptions.length, 0, path);
-					assert.equal(result.occurrences.length, 0, path);
+					const reported = result.occurrences.filter((o) => o.attributes?.["autter.handling"] !== "caught");
+					assert.equal(reported.length, 0, `${path}: ${JSON.stringify(result.occurrences.map((o) => o.attributes?.["autter.handling"]))}`);
 				}
 			}
 		});

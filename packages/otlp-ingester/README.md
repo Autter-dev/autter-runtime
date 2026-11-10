@@ -165,6 +165,10 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 | `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
 | `LOG_TTL_DAYS` | `14` | Retention for `runtime_logs` (request summaries are always kept, never sampled, so this is the main volume knob). Unlike the other TTLs it is also applied to **existing** tables: at boot the ingester compares it with the table's TTL and runs `ALTER TABLE … MODIFY TTL` only when they differ; a failure is logged and retried next boot |
+| `ARCHIVE_S3_URL` / `ARCHIVE_S3_NAMED_COLLECTION` | unset (off) | Tiered retention ([docs/RETENTION.md](../../docs/RETENTION.md)): days older than the hot window (the TTLs above) of occurrences, spans, logs and LLM calls are written to Parquet in this bucket (S3, GCS's S3 endpoint, MinIO, R2) before they leave ClickHouse; the archived tables then have no delete TTL and the archive job drops each day after reading its objects back. Unset: the TTLs delete as before |
+| `ARCHIVE_S3_ACCESS_KEY_ID` / `ARCHIVE_S3_SECRET_ACCESS_KEY` | unset | Keys ClickHouse uses for the bucket (HMAC keys for GCS); not needed with a named collection or ClickHouse's own credentials |
+| `ARCHIVE_RETENTION_DAYS` | `365` | Event age (30–3650) kept in the archive; match the bucket's lifecycle rule |
+| `ARCHIVE_TABLES` / `ARCHIVE_BACKSTOP_DAYS` / `ARCHIVE_INTERVAL_MINUTES` / `ARCHIVE_MAX_DAYS_PER_PASS` / `ARCHIVE_SCHEDULER` | all four / `auto` (hot window + 7 days; `0` = none) / `60` / `4` / `auto` | Which tables, the disk-guard TTL, how often and how much per pass, and which process runs the job (`auto`: Redis lease holder or the only replica) |
 | `AUTTER_REDACT_VALUE_PATTERNS` | — | JSON array of extra regex sources masked in stored/forwarded text and attribute values (built-in secret/PII patterns always apply) |
 | `AUTTER_REDACT_KEY_PATTERNS` | — | JSON array of extra regex sources for attribute keys whose values are masked wholesale |
 

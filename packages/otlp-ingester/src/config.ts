@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { archiveConfigFromEnv, type ArchiveConfig } from "./archive.js";
 import type { IngestKeyScope } from "./types.js";
 
 export const INGEST_KEY_SCOPES: readonly IngestKeyScope[] = ["server", "client", "upload"];
@@ -196,6 +197,13 @@ export interface IngesterConfig {
 	 * count (LOOP_COLLAPSE_AFTER, default 10; 0 turns it off).
 	 */
 	loopCollapseAfter?: number;
+	/**
+	 * Tiered retention (1.14.0, archive.ts): Parquet in object storage for
+	 * days older than each table's hot window (ARCHIVE_S3_URL or
+	 * ARCHIVE_S3_NAMED_COLLECTION). Null/undefined = no archive: TTLs delete
+	 * as before.
+	 */
+	archive?: ArchiveConfig | null;
 }
 
 /** LOOP_COLLAPSE_AFTER: a whole number ≥ 0 (0 = off); anything else is the default, 10. */
@@ -385,6 +393,7 @@ export function loadConfig(): IngesterConfig {
 		redactKeyPatterns: patternListEnv("AUTTER_REDACT_KEY_PATTERNS"),
 		sourceMapCacheMb: intEnv("SOURCE_MAP_CACHE_MB", 64),
 		loopCollapseAfter: loopCollapseAfterEnv(process.env.LOOP_COLLAPSE_AFTER),
+		archive: archiveConfigFromEnv(process.env),
 	};
 	// A shared outbox is on a network volume every task mounts: keep the
 	// receipts journal on the task's own disk (Redis shares receipts there).

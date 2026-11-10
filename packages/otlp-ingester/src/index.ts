@@ -3,7 +3,7 @@ import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
 
 const config = loadConfig();
-const { app, store, sink, reportIngesterInfo, drops, collapse, limits } = createIngesterApp(config);
+const { app, store, sink, reportIngesterInfo, drops, collapse, limits, archiver } = createIngesterApp(config);
 const sharingWarning = limitsWarning(config);
 if (sharingWarning) console.warn(`WARNING: ${sharingWarning}`);
 
@@ -24,6 +24,12 @@ if (store.configured) {
 		);
 	});
 }
+if (config.archive && !archiver && !store.configured) {
+	console.warn("ARCHIVE_S3_URL is set but CLICKHOUSE_URL is not: nothing to archive");
+}
+// Tiered retention (archive.ts): the first pass runs a minute after start,
+// after the schema warm-up has replaced the archived tables' delete TTL.
+archiver?.start();
 
 async function shutdown(signal: string) {
 	console.log(`${signal} received, shutting down`);
@@ -49,6 +55,7 @@ async function shutdown(signal: string) {
 				}
 			})
 			.finally(() => drops.stop())
+			.finally(() => archiver?.stop())
 			.finally(() => store.close())
 			.finally(() => limits.close())
 			.finally(() => process.exit(0));
@@ -105,4 +112,15 @@ export {
 	type IngestDrop,
 	type IngestDropRow,
 } from "./ingest-drops.js";
+export {
+	archiveConfigFromEnv,
+	archiveObjectPath,
+	ARCHIVE_TABLES,
+	orgArchiveKey,
+	planTableArchive,
+	RuntimeArchiver,
+	type ArchiveConfig,
+	type ArchiveStep,
+	type ArchiveTable,
+} from "./archive.js";
 export * from "./types.js";

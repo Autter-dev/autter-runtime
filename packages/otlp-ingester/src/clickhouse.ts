@@ -5,6 +5,14 @@ import {
 } from "@clickhouse/client";
 import type { IngesterConfig } from "./config.js";
 import {
+	ARCHIVE_TABLE_SPECS,
+	ARCHIVE_TABLES,
+	parseTtlDays,
+	retentionTtlAction,
+	type ArchiveDb,
+	type ArchiveTable,
+} from "./archive.js";
+import {
 	latencyTableDDL,
 	routeLatencyInputDDL,
 	routeLatencyTableDDL,
@@ -139,6 +147,7 @@ function chDateTime(date: Date): string {
 
 export class ClickHouseStore {
 	private client: ClickHouseClient | null = null;
+	private archiveClient: ClickHouseClient | null = null;
 	private ensurePromise: Promise<void> | null = null;
 	private schemaState: Exclude<SchemaStatus, "unconfigured"> = "pending";
 	private appliedIds: string[] = [];
@@ -351,7 +360,7 @@ export class ClickHouseStore {
 				});
 				console.log(`clickhouse migration applied: ${migration.id}`);
 			}
-			await this.applyLogTtl();
+			await this.applyRetentionTtls();
 			await this.applyDedupWindow();
 			this.appliedIds = migrations.map((migration) => migration.id);
 			this.schemaState = "ready";
@@ -367,45 +376,95 @@ export class ClickHouseStore {
 		return this.ensurePromise;
 	}
 
+	/** Hot window per archivable table (the *_TTL_DAYS settings). */
+	hotDays(): Record<ArchiveTable, number> {
+		return {
+			runtime_error_occurrences: this.config.occurrenceTtlDays,
+			runtime_spans: this.config.spanTtlDays,
+			runtime_llm_calls: this.config.llmCallTtlDays,
+			runtime_logs: this.config.logTtlDays ?? 14,
+		};
+	}
+
 	/**
-	 * Bring runtime_logs' TTL in line with LOG_TTL_DAYS. Idempotent: reads the
-	 * current TTL from system.tables and only issues `MODIFY TTL` when it
-	 * differs (MODIFY TTL rewrites TTL info for existing parts, so it must not
-	 * run on every boot). Best-effort — a failure is logged and never blocks
-	 * ingest; the next boot retries.
+	 * Bring each table's delete TTL in line with its retention: LOG_TTL_DAYS
+	 * for runtime_logs (as before), and, for the tables an archive covers
+	 * (ARCHIVE_S3_URL), the ARCHIVE_BACKSTOP_DAYS one (default hot window + 7) or none, so the TTL
+	 * never deletes a day the archiver has not exported (archive.ts). A table
+	 * whose TTL an archive removed gets its hot TTL back when the archive is
+	 * turned off. Idempotent: reads the current TTL from system.tables and
+	 * only alters when it differs (MODIFY TTL rewrites TTL info for existing
+	 * parts, so it must not run on every boot). Best-effort — a failure is
+	 * logged and never blocks ingest; the next boot retries.
 	 */
-	async applyLogTtl(): Promise<void> {
-		const days = this.config.logTtlDays ?? 14;
+	async applyRetentionTtls(): Promise<void> {
 		const db = this.config.clickhouseDatabase;
+		const archive = this.config.archive ?? null;
+		const hot = this.hotDays();
 		try {
 			const client = this.getClient();
 			const rows = await client.query({
-				query: `SELECT engine_full FROM system.tables WHERE database = {db:String} AND name = 'runtime_logs'`,
-				query_params: { db },
+				query: `SELECT name, engine_full FROM system.tables WHERE database = {db:String} AND has({names:Array(String)}, name)`,
+				query_params: { db, names: [...ARCHIVE_TABLES] },
 				format: "JSONEachRow",
 			});
-			const [table] = await rows.json<{ engine_full: string }>();
-			if (!table) return;
-			const current = /\bTTL\b[^]*?toIntervalDay\((\d+)\)/.exec(table.engine_full);
-			if (!current) {
-				console.warn(
-					"runtime_logs TTL not recognised — LOG_TTL_DAYS not applied",
+			for (const table of await rows.json<{ name: ArchiveTable; engine_full: string }>()) {
+				if (!(ARCHIVE_TABLES as readonly string[]).includes(table.name)) continue;
+				const current = parseTtlDays(table.engine_full);
+				if (current === "unrecognised") {
+					console.warn(`${table.name} TTL not recognised — retention not applied`);
+					continue;
+				}
+				const action = retentionTtlAction({
+					current,
+					hotDays: hot[table.name],
+					archived: Boolean(archive?.tables.includes(table.name)),
+					backstopDays: archive?.backstopDays ?? 0,
+					alwaysApply: table.name === "runtime_logs",
+				});
+				if (action.action === "none") continue;
+				const column = ARCHIVE_TABLE_SPECS[table.name].timeColumn;
+				await client.command({
+					query:
+						action.action === "remove"
+							? `ALTER TABLE ${db}.${table.name} REMOVE TTL`
+							: `ALTER TABLE ${db}.${table.name} MODIFY TTL toDateTime(${column}) + INTERVAL ${action.days} DAY`,
+				});
+				console.log(
+					action.action === "remove"
+						? `${table.name}: delete TTL removed — the runtime archive drops days once they are exported`
+						: `${table.name} TTL changed from ${current ?? "none"} to ${action.days} days`,
 				);
-				return;
 			}
-			if (Number(current[1]) === days) return;
-			await client.command({
-				query: `ALTER TABLE ${db}.runtime_logs MODIFY TTL toDateTime(occurred_at) + INTERVAL ${days} DAY`,
-			});
-			console.log(
-				`runtime_logs TTL changed from ${current[1]} to ${days} days (LOG_TTL_DAYS)`,
-			);
 		} catch (err) {
 			console.warn(
-				"applying LOG_TTL_DAYS to runtime_logs failed (will retry next boot):",
+				"applying retention TTLs failed (will retry next boot):",
 				err instanceof Error ? err.message : err,
 			);
 		}
+	}
+
+	/**
+	 * ClickHouse access for the archive job (archive.ts): its own client,
+	 * since an export can run far longer than an ingest request's timeout.
+	 */
+	archiveDb(): ArchiveDb {
+		if (!this.config.clickhouseUrl) throw new Error("CLICKHOUSE_URL is not configured");
+		const client = createClient({
+			url: this.config.clickhouseUrl,
+			username: this.config.clickhouseUser,
+			password: this.config.clickhousePassword,
+			application: "autter-otlp-ingester-archive",
+			request_timeout: 60 * 60_000,
+			clickhouse_settings: { max_execution_time: 3_600 },
+		});
+		this.archiveClient = client;
+		return {
+			query: async <T>(sql: string) => (await client.query({ query: sql, format: "JSONEachRow" })).json<T>(),
+			command: async (sql: string) => {
+				await client.command({ query: sql });
+			},
+		};
 	}
 
 	/**
@@ -1010,6 +1069,11 @@ export class ClickHouseStore {
 	}
 
 	async close(): Promise<void> {
+		if (this.archiveClient) {
+			const archive = this.archiveClient;
+			this.archiveClient = null;
+			await archive.close().catch(() => {});
+		}
 		if (!this.client) return;
 		const client = this.client;
 		this.client = null;

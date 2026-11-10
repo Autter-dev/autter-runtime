@@ -55,6 +55,11 @@ name its own.
 
 ## ClickHouse tables
 
+With an archive bucket configured ([RETENTION.md](RETENTION.md)), occurrences,
+spans, logs and LLM calls have no delete TTL: days older than the TTL below
+are exported to Parquet and then dropped by the archive job, which keeps its
+bookkeeping in `runtime_archive_log` and stages days in `<table>_archive_stage`.
+
 | Table | Engine | Order by | TTL |
 | --- | --- | --- | --- |
 | `runtime_error_occurrences` | MergeTree (`collapsed_count` since 0021) | `(org_id, repository_id, fingerprint, occurred_at)` | 14 d |

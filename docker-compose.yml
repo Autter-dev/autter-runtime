@@ -36,6 +36,16 @@ services:
       AUTTER_SINK_TOKEN: ${AUTTER_SINK_TOKEN:-}
       # Exposed directly (no proxy): don't trust X-Forwarded-For.
       TRUST_PROXY: 0
+      # Tiered retention against the local MinIO (docs/RETENTION.md):
+      #   ARCHIVE_S3_URL=http://minio:9000/autter-archive/runtime       #   ARCHIVE_S3_ACCESS_KEY_ID=minioadmin ARCHIVE_S3_SECRET_ACCESS_KEY=minioadmin       #   docker compose --profile archive up
+      # Unset (the default): no archive, the TTLs delete as before.
+      ARCHIVE_S3_URL: ${ARCHIVE_S3_URL:-}
+      ARCHIVE_S3_ACCESS_KEY_ID: ${ARCHIVE_S3_ACCESS_KEY_ID:-}
+      ARCHIVE_S3_SECRET_ACCESS_KEY: ${ARCHIVE_S3_SECRET_ACCESS_KEY:-}
+      ARCHIVE_RETENTION_DAYS: ${ARCHIVE_RETENTION_DAYS:-365}
+      # Short hot windows make the archive visible within a day or two locally.
+      OCCURRENCE_TTL_DAYS: ${OCCURRENCE_TTL_DAYS:-14}
+      SPAN_TTL_DAYS: ${SPAN_TTL_DAYS:-7}
     volumes:
       # Undelivered sink batches: kept across restarts and re-sent.
       - sink_outbox:/var/lib/autter/sink-outbox
@@ -64,5 +74,31 @@ services:
       clickhouse:
         condition: service_healthy
 
+  # Local object storage for the archive (profile "archive"): the console is
+  # on http://localhost:9001 (minioadmin / minioadmin).
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    profiles: ["archive"]
+    command: server /data --console-address :9001
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+
+  # Creates the archive bucket once MinIO is up.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    profiles: ["archive"]
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done;
+      mc mb --ignore-existing local/autter-archive"
+
 volumes:
   sink_outbox:
+  minio_data:

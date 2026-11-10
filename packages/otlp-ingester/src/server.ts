@@ -91,6 +91,12 @@ import {
 } from "./compat.js";
 import { MIGRATIONS } from "./migrations.js";
 import {
+	archiveSchedulerMode,
+	LocalArchiveLease,
+	RedisArchiveLease,
+	RuntimeArchiver,
+} from "./archive.js";
+import {
 	BROWSER_SDK_NAME,
 	ingesterVersion,
 	SdkVersionTracker,
@@ -120,6 +126,12 @@ export interface IngesterApp {
 	/** Tenant limits and the unknown-key budget (1.12.0); `close()` disconnects Redis. */
 	limits: RateLimits;
 	keys: KeyResolver;
+	/**
+	 * The archive job (archive.ts) when an archive is configured and this
+	 * process may run it (Redis lease, or the only replica); null otherwise.
+	 * Not started here: index.ts starts it after the schema warm-up.
+	 */
+	archiver: RuntimeArchiver | null;
 }
 
 export interface IngesterDeps {
@@ -1549,7 +1561,37 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		},
 	);
 
-	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys };
+	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys, archiver: createArchiver(config, store, redis) };
+}
+
+/**
+ * The archive job for this process, or null: no archive configured, no
+ * ClickHouse, or another process runs it (archiveSchedulerMode).
+ */
+function createArchiver(
+	config: IngesterConfig,
+	store: ClickHouseStore,
+	redis: ReturnType<typeof connectRedis> | null,
+): RuntimeArchiver | null {
+	const archive = config.archive;
+	if (!archive || !store.configured) return null;
+	const mode = archiveSchedulerMode({ scheduler: archive.scheduler, hasRedis: Boolean(redis), replicas: config.replicas ?? 1 });
+	if (mode.mode === "none") {
+		const level = archive.scheduler === "off" ? "log" : "warn";
+		console[level](`runtime archive: this process does not run the archive job (${mode.reason})`);
+		return null;
+	}
+	const lease =
+		mode.mode === "redis" && redis
+			? new RedisArchiveLease(redis, `autter:runtime-archive:${config.clickhouseDatabase}`)
+			: new LocalArchiveLease();
+	return new RuntimeArchiver({
+		db: store.archiveDb(),
+		database: config.clickhouseDatabase,
+		config: archive,
+		hotDays: store.hotDays(),
+		lease,
+	});
 }
 
 /**

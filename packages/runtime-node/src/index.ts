@@ -29,6 +29,7 @@ export {
 	type AutterExportErrorHandler,
 	type AutterFlushResult,
 } from "./server.js";
+export type { LlmContentMode, RetentionReason } from "./tail-sampling.js";
 export type {
 	AutterExportErrorKind,
 	AutterExportOperation,

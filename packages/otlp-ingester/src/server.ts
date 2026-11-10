@@ -42,6 +42,7 @@ import {
 	logPromotionCandidates,
 	promotionLookups,
 	logRollups,
+	summaryLatencyHistograms,
 } from "./log-promotion.js";
 import {
 	normalizeBrowserPayload,
@@ -1286,6 +1287,9 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		const verifyId = verifyIdOf(logsRequest, "resourceLogs");
 		// Rollups count every promoted error, collapsed or suppressed ones too.
 		const metricPoints = verifyId ? [] : logRollups(logs, promoted);
+		// Edge request summaries are the only latency feed their services
+		// have: their histogram points feed endpoint regression detection.
+		const latency = verifyId ? [] : summaryLatencyHistograms(logs);
 		const admitted = verifyId ? admitAll(promoted) : admit(ctx, req, promoted);
 		const digest = requestDigest(ctx, req.path, req.body);
 		try {
@@ -1294,6 +1298,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
 				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
+				{ table: "runtime_latency_histograms", rows: latency.length, run: (token) => store.insertLatencyHistograms(ctx, latency, token) },
 			]);
 		} catch (err) {
 			admitted.rollback();
@@ -1311,6 +1316,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			log_records: logs.length,
 			occurrences: admitted.kept.length,
 			metric_points: metricPoints.length,
+			latency_histograms: latency.length,
 			suppressed: admitted.suppressed,
 			collapsed: admitted.collapsed,
 			truncated_values: truncated,

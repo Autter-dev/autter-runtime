@@ -17,6 +17,14 @@ export interface LatencyHistogram {
 	counts: number[];
 }
 
+/** The explicit bucket bounds `@autter/runtime-node` sets on
+ * `http.server.duration` (ms, through two minutes), also used for the
+ * points built from request summaries (summaryLatencyHistograms), so the
+ * detector can merge and compare them. */
+export const SUMMARY_HISTOGRAM_BOUNDS_MS: readonly number[] = Object.freeze([
+	5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000,
+]);
+
 /**
  * Per-route latency percentiles in the 1-minute rollups (IP-02).
  *

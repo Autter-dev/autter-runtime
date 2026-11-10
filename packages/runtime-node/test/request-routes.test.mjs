@@ -186,8 +186,8 @@ test("Next.js, Express and plain requests: routes on metrics, and the request sp
 });
 
 test("the route reaches the metric when nothing is sampled or retained", async () => {
-	// No span is recorded at all here (sampling 0, retention off), so only
-	// the sampler sees Next's spans start.
+	// No span is recorded at all here (sampling 0, error and slow retention
+	// off), so only the sampler sees Next's spans start.
 	const script = `
 		import { createRequire } from "node:module";
 		import { context, trace } from "@opentelemetry/api";
@@ -195,7 +195,7 @@ test("the route reaches the metric when nothing is sampled or retained", async (
 		const require = createRequire(import.meta.url);
 		const sdk = initAutterServer({
 			apiKey: "k", service: "unsampled", endpoint: process.env.ENDPOINT, traceSampleRate: 0,
-			retainTracesOnError: false, captureGlobalErrors: false, autoFlush: false, memoryMetrics: false,
+			retainTracesOnError: false, retainTracesAboveMs: false, captureGlobalErrors: false, autoFlush: false, memoryMetrics: false,
 			compatCheck: false, metricIntervalMs: 3_600_000, logging: { console: false },
 		});
 		const http = require("http");

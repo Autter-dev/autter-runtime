@@ -210,10 +210,11 @@ Defaults (cheap by construction):
 | --- | --- |
 | Captured/unhandled exceptions | 100% (dedicated always-on tracer) |
 | Traces containing an error | 100% (tail retention, `retainTracesOnError`) |
+| Traces of slow requests (over 500 ms and the route's rolling p95) | kept whole, up to 60 a minute per process (tail retention, `retainTracesAboveMs`, `retainSlowTracesPerMinute`) |
 | `withProcessSpan` spans | 100% (same always-on tracer) |
-| LLM/GenAI call spans | 100% (`llmTracing`, on by default) |
+| LLM/GenAI call spans | 100% with model, tokens, cost, latency and status (`llmTracing`, on by default); prompt and completion content only for failed or slow calls (`llmContent`) |
 | Healthy traces | 1% head sampling (`traceSampleRate`; also for requests whose incoming `traceparent` is unsampled, such as browser fetches from `@autter/runtime-browser`) |
-| Request metrics | exported every 60 s |
+| Request metrics (`http.server.duration` histogram, every request) | exported every 60 s |
 | Logs | not collected |
 | PII in custom attributes | redacted before export (`redactAttributes`) |
 | Query strings in span URLs | parameter names only (`keepQueryParams`) |
@@ -228,6 +229,23 @@ whole trace is exported, sampling lottery notwithstanding. The buffer is
 bounded (256 spans per trace, 5 000 spans total, dropped as soon as the
 request ends healthy, 30 s TTL), degrades to plain head sampling on
 overflow, and never blocks. Disable with `retainTracesOnError: false`.
+
+**Slow-trace retention.** The same buffer keeps the whole local trace of a
+slow request: one whose root server span took longer than both 500 ms and
+its route's rolling p95. The SDK keeps that estimate per method and route
+template from every request the process served in the last few minutes
+(sampled or not), so "slow" means slow for that endpoint. Slow traces are
+rate limited: `retainSlowTracesPerMinute` (default 60) a minute per process,
+bursts of up to 20, a sixth of it per route; past that, slow requests fall
+back to head sampling. A positive `retainTracesAboveMs` is a fixed threshold
+instead of the estimate; `retainTracesAboveMs: false` (or `0`) turns it off.
+Up to 1.11 it was off unless `retainTracesAboveMs` was set.
+
+Every request span the SDK exports says why, in `autter.retention_reason`:
+`head` (the random sample), `error` or `slow` (tail retention; these also
+carry `autter.tail_retained`). Latency percentiles and endpoint regression
+detection never depend on what is kept: they read the histograms, which
+count every request. See [Endpoint regressions](../../docs/ENDPOINT-REGRESSIONS.md).
 
 Crashes are observed via `process.uncaughtExceptionMonitor`, which does
 **not** change your process's exit behaviour; the final flush is
@@ -607,6 +625,15 @@ OpenTelemetry setup, see the dedicated [LLM instrumentation guide](../../docs/LL
 `gen_ai.*` semconv attributes or the Vercel AI SDK's `ai.*` spans — bypasses
 head sampling, so **every** model call is recorded with model, tokens,
 latency, and a USD cost. Opt out with `llmTracing: false`.
+
+Prompt and completion content on those spans (`ai.prompt*`,
+`ai.response.text`, `gen_ai.input.messages`, the GenAI message events, …)
+is exported only for calls that failed or were slow (over 500 ms and the
+model's rolling p95), marked `autter.llm.content = "error"` / `"slow"`;
+other calls keep every counter and are marked `autter.llm.content =
+"omitted"`. `llmContent: "always"` keeps the content of every call (the
+behaviour up to 1.11), `llmContent: "never"` of none. Details in the
+[LLM instrumentation guide](../../docs/LLM-INSTRUMENTATION.md#prompt-and-completion-content).
 
 **Easiest: wrap the client once** — works with the OpenAI, Anthropic, and
 Google GenAI SDKs (or anything with the same call shapes), streaming

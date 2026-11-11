@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-11-11
+
+Packages: `otlp-ingester` 1.14.1. No SDK changes. If you run `otlp-ingester` 1.14.0, upgrade.
+
+### Fixes
+
+- The ingester no longer adds a delete TTL to a table that has none (`otlp-ingester`). 1.14.0 did, on its first boot, to `runtime_error_occurrences`, `runtime_spans`, `runtime_llm_calls` and `runtime_logs`, whether or not an archive was configured, and ClickHouse then deleted the rows older than the table's hot window (`OCCURRENCE_TTL_DAYS`, `SPAN_TTL_DAYS`, `LLM_CALL_TTL_DAYS`, `LOG_TTL_DAYS`). It affected deployments that had removed a TTL to keep data longer; tables that still had the TTL they were created with were not changed. With no archive configured for a table, the ingester now leaves a missing TTL alone, as 1.13 did, and logs a warning at boot with the `ALTER TABLE … MODIFY TTL` statement to run if you want one. This also applies after an archive that removed the TTL (`ARCHIVE_BACKSTOP_DAYS=0`) is turned off: the TTL is not put back for you ([docs/RETENTION.md](docs/RETENTION.md)). If 1.14.0 already added a TTL you did not want, `ALTER TABLE <table> REMOVE TTL` stops further deletes; rows it already deleted are not recoverable from ClickHouse.
+
 ## [1.16.0] - 2026-11-11
 
 Packages: `runtime-node` 1.12.0, `otlp-ingester` 1.14.0. `runtime-next` stays 1.9.0 and picks up the new `runtime-node` through its existing range. Any upgrade order works.

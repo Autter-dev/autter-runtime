@@ -375,8 +375,12 @@ export type TtlAction = { action: "none" } | { action: "modify"; days: number } 
 /**
  * The TTL a table should have. Archived: none, or a backstop past the hot
  * window, so the TTL never deletes a day the archiver has not exported.
- * Not archived: the hot window (tables other than runtime_logs keep their
- * creation-time TTL as before; one whose TTL an archive removed gets it back).
+ * Not archived: as before the archive existed. runtime_logs follows
+ * LOG_TTL_DAYS, the other tables keep their creation-time TTL, and a table
+ * with no TTL is left without one: adding it would delete every row older
+ * than the hot window at the next merge, and nothing here can tell a TTL an
+ * archive removed from one the operator removed to keep the data. The caller
+ * warns instead (noTtlWarning).
  */
 export function retentionTtlAction(input: {
 	current: number | null | "unrecognised";
@@ -392,9 +396,21 @@ export function retentionTtlAction(input: {
 		if (backstop === null) return input.current === null ? { action: "none" } : { action: "remove" };
 		return input.current === backstop ? { action: "none" } : { action: "modify", days: backstop };
 	}
-	if (input.current === input.hotDays) return { action: "none" };
-	if (input.alwaysApply || input.current === null) return { action: "modify", days: input.hotDays };
-	return { action: "none" };
+	if (input.current === null || input.current === input.hotDays) return { action: "none" };
+	return input.alwaysApply ? { action: "modify", days: input.hotDays } : { action: "none" };
+}
+
+/**
+ * What to log for a table that has no delete TTL and is not archived: the
+ * ingester leaves it alone, and this is the statement that adds one.
+ */
+export function noTtlWarning(input: { db: string; table: ArchiveTable; hotDays: number }): string {
+	const column = ARCHIVE_TABLE_SPECS[input.table].timeColumn;
+	return (
+		`${input.table} has no delete TTL and no archive is configured for it: rows stay until you delete them. ` +
+		`The ingester does not add a TTL, since that would delete rows older than it. To expire rows after ${input.hotDays} days, run: ` +
+		`ALTER TABLE ${input.db}.${input.table} MODIFY TTL toDateTime(${column}) + INTERVAL ${input.hotDays} DAY`
+	);
 }
 
 /** The backstop TTL, at least a week past the hot window; null = no TTL (ARCHIVE_BACKSTOP_DAYS=0). */

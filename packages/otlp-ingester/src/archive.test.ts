@@ -8,6 +8,7 @@ import {
 	dayFromPartitionId,
 	effectiveBackstopDays,
 	hotCutoffDay,
+	noTtlWarning,
 	overdueDays,
 	orgArchiveKey,
 	parseTtlDays,
@@ -214,9 +215,30 @@ test("TTL without an archive: as before (runtime_logs follows LOG_TTL_DAYS, othe
 	assert.deepEqual(retentionTtlAction({ ...base, current: 14, alwaysApply: true }), { action: "none" });
 	assert.deepEqual(retentionTtlAction({ ...base, current: 30, alwaysApply: true }), { action: "modify", days: 14 });
 	assert.deepEqual(retentionTtlAction({ ...base, current: 30, alwaysApply: false }), { action: "none" });
-	// An archive turned off again: the TTL it removed comes back.
-	assert.deepEqual(retentionTtlAction({ ...base, current: null, alwaysApply: false }), { action: "modify", days: 14 });
 	assert.deepEqual(retentionTtlAction({ ...base, current: "unrecognised", alwaysApply: true }), { action: "none" });
+});
+
+test("TTL without an archive: a table that has no TTL never gets one (it would delete the rows older than it)", () => {
+	// 1.14.0 added the hot-window TTL here, on the first boot after an upgrade.
+	for (const hotDays of [7, 14, 90]) {
+		for (const alwaysApply of [false, true]) {
+			for (const backstopDays of [0, 30, "auto"] as const) {
+				assert.deepEqual(
+					retentionTtlAction({ current: null, hotDays, archived: false, backstopDays, alwaysApply }),
+					{ action: "none" },
+					`hotDays ${hotDays}, alwaysApply ${alwaysApply}, backstop ${backstopDays}`,
+				);
+			}
+		}
+	}
+	// The operator is told, with the statement that adds one.
+	const warning = noTtlWarning({ db: "autter_runtime", table: "runtime_spans", hotDays: 7 });
+	assert.match(warning, /runtime_spans has no delete TTL/);
+	assert.match(warning, /ALTER TABLE autter_runtime\.runtime_spans MODIFY TTL toDateTime\(started_at\) \+ INTERVAL 7 DAY$/);
+	assert.match(
+		noTtlWarning({ db: "autter_runtime", table: "runtime_logs", hotDays: 14 }),
+		/MODIFY TTL toDateTime\(occurred_at\) \+ INTERVAL 14 DAY$/,
+	);
 });
 
 test("TTL with an archive never deletes inside hot window + export: removed, or a backstop a week past the hot window", () => {

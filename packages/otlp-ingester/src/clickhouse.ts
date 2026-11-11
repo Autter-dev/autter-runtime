@@ -7,6 +7,7 @@ import type { IngesterConfig } from "./config.js";
 import {
 	ARCHIVE_TABLE_SPECS,
 	ARCHIVE_TABLES,
+	noTtlWarning,
 	parseTtlDays,
 	retentionTtlAction,
 	type ArchiveDb,
@@ -391,8 +392,10 @@ export class ClickHouseStore {
 	 * for runtime_logs (as before), and, for the tables an archive covers
 	 * (ARCHIVE_S3_URL), the ARCHIVE_BACKSTOP_DAYS one (default hot window + 7) or none, so the TTL
 	 * never deletes a day the archiver has not exported (archive.ts). A table
-	 * whose TTL an archive removed gets its hot TTL back when the archive is
-	 * turned off. Idempotent: reads the current TTL from system.tables and
+	 * with no TTL and no archive is left without one and warned about: adding
+	 * a TTL deletes the rows older than it, so that stays the operator's call
+	 * (also after an archive that removed the TTL is turned off).
+	 * Idempotent: reads the current TTL from system.tables and
 	 * only alters when it differs (MODIFY TTL rewrites TTL info for existing
 	 * parts, so it must not run on every boot). Best-effort — a failure is
 	 * logged and never blocks ingest; the next boot retries.
@@ -415,14 +418,22 @@ export class ClickHouseStore {
 					console.warn(`${table.name} TTL not recognised — retention not applied`);
 					continue;
 				}
+				const archived = Boolean(archive?.tables.includes(table.name));
 				const action = retentionTtlAction({
 					current,
 					hotDays: hot[table.name],
-					archived: Boolean(archive?.tables.includes(table.name)),
+					archived,
 					backstopDays: archive?.backstopDays ?? 0,
 					alwaysApply: table.name === "runtime_logs",
 				});
-				if (action.action === "none") continue;
+				if (action.action === "none") {
+					// No TTL and no archive: never add one here (it would delete
+					// the rows older than it). Say so, with the statement to run.
+					if (current === null && !archived) {
+						console.warn(noTtlWarning({ db, table: table.name, hotDays: hot[table.name] }));
+					}
+					continue;
+				}
 				const column = ARCHIVE_TABLE_SPECS[table.name].timeColumn;
 				await client.command({
 					query:

@@ -113,8 +113,20 @@ ClickHouse health monitor publishes `ArchiveOverdueDays` (its alarm fires
 at 2), and after a week the backstop deletes the oldest unarchived days
 rather than let the disk fill and stop ingest. `ARCHIVE_BACKSTOP_DAYS=0`
 removes the TTL entirely: nothing is lost unarchived, but a stopped job
-then grows the tables until the disk is full. Turning the archive off puts
-the hot TTLs back at the next boot.
+then grows the tables until the disk is full.
+
+The ingester never adds a delete TTL to a table that has none unless an
+archive is configured for it. Adding one deletes every row older than it,
+so a table whose TTL you removed (or that `ARCHIVE_BACKSTOP_DAYS=0` removed
+before you turned the archive off) stays without one. Each boot logs a
+warning for such a table with the statement that adds the TTL:
+
+```sql
+ALTER TABLE autter_runtime.runtime_spans MODIFY TTL toDateTime(started_at) + INTERVAL 7 DAY;
+```
+
+Run it once every day you want to keep is archived or expendable.
+(`otlp-ingester` 1.14.0 added the TTL by itself at boot; 1.14.1 does not.)
 
 Org keys in paths are the org id when it consists of `[A-Za-z0-9_-]` (every
 Autter org id). Any other id becomes a readable form plus a 12-character

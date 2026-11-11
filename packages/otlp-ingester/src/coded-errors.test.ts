@@ -534,6 +534,49 @@ test("LOG_TTL_DAYS is applied only when it differs, and a failure never blocks t
 	}
 });
 
+test("a table with no delete TTL is left alone at boot when no archive is configured, and warned about", async () => {
+	// What an operator who removed the TTLs to keep everything has. 1.14.0
+	// added the hot-window TTL on the first boot, deleting the older rows.
+	const engines: Record<string, string> = {
+		runtime_logs: "ReplacingMergeTree PARTITION BY toDate(occurred_at) ORDER BY (org_id) SETTINGS index_granularity = 8192",
+		runtime_spans: "MergeTree PARTITION BY toDate(started_at) ORDER BY (org_id) SETTINGS index_granularity = 8192",
+		runtime_error_occurrences: "MergeTree PARTITION BY toDate(occurred_at) ORDER BY (org_id) SETTINGS index_granularity = 8192",
+		runtime_llm_calls: "MergeTree PARTITION BY toDate(started_at) ORDER BY (org_id) SETTINGS index_granularity = 8192",
+	};
+	const stub = await startStub((call) => {
+		if (call.sql.includes("system.tables")) {
+			return { body: Object.entries(engines).map(([name, engine_full]) => JSON.stringify({ name, engine_full })).join("\n") + "\n" };
+		}
+	});
+	const ttlAlters = () => stub.calls.filter((c) => /ALTER TABLE[^\n]*\bTTL\b/.test(c.sql));
+	const warnings: string[] = [];
+	const warn = console.warn;
+	console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+	try {
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url })).ensureSchema();
+		assert.deepEqual(ttlAlters().map((c) => c.sql.trim()), []);
+		for (const table of Object.keys(engines)) {
+			assert.ok(
+				warnings.some((line) => line.startsWith(`${table} has no delete TTL`) && line.includes(`ALTER TABLE autter_runtime.${table} MODIFY TTL`)),
+				`no warning for ${table}: ${warnings.join(" | ")}`,
+			);
+		}
+		// LOG_TTL_DAYS changing does not add one either.
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30 })).ensureSchema();
+		assert.deepEqual(ttlAlters().map((c) => c.sql.trim()), []);
+		// A table that still has its TTL gets no warning.
+		warnings.length = 0;
+		engines.runtime_spans += " TTL toDateTime(started_at) + toIntervalDay(7)";
+		engines.runtime_spans = engines.runtime_spans.replace(/ SETTINGS index_granularity = 8192(.*)$/, "$1 SETTINGS index_granularity = 8192");
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url })).ensureSchema();
+		assert.ok(!warnings.some((line) => line.startsWith("runtime_spans ")), warnings.join(" | "));
+		assert.deepEqual(ttlAlters().map((c) => c.sql.trim()), []);
+	} finally {
+		console.warn = warn;
+		await close(stub.server);
+	}
+});
+
 test("/v1/logs promotes logger-only errors with in-batch and ClickHouse dedupe", async () => {
 	const traceA = "a".repeat(32);
 	const traceB = "b".repeat(32);

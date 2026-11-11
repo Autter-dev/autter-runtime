@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-Packages: `runtime-node` (next minor, 1.12.0 in the docs) and `otlp-ingester`. Not released yet; versions are unchanged. `runtime-next` picks up the new `runtime-node` through its existing range.
+## [1.16.0] - 2026-11-11
+
+Packages: `runtime-node` 1.12.0, `otlp-ingester` 1.14.0. `runtime-next` stays 1.9.0 and picks up the new `runtime-node` through its existing range. Any upgrade order works.
 
 ### Features
 

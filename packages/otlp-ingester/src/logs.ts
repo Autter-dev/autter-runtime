@@ -27,6 +27,13 @@ export interface RuntimeLogRecord {
 	durationMs: number;
 	attributes: Record<string, unknown>;
 	occurredAt: Date;
+	/** Not persisted. The record carried its own time (`timeUnixNano` or
+	 * `observedTimeUnixNano`); without one `occurredAt` is the ingest time,
+	 * which a retry would not repeat. */
+	timestamped?: boolean;
+	/** Not persisted. `autter.operation.duration_ms` was a finite number ≥ 0
+	 * (`durationMs` is 0 otherwise, which is no duration to aggregate). */
+	durationValid?: boolean;
 	/**
 	 * Lifted wide-event columns (migration 0012). `kind` is "request" for
 	 * request summaries, "operation" for operation summaries (including
@@ -285,8 +292,10 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 						0,
 						Number(attributes["autter.operation.duration_ms"]) || 0,
 					),
+					durationValid: validDuration(attributes["autter.operation.duration_ms"]),
 					attributes,
 					occurredAt,
+					timestamped: nanos !== undefined,
 					kind:
 						declaredKind === "request" || declaredKind === "operation"
 							? declaredKind
@@ -322,6 +331,12 @@ function hasException(attributes: Record<string, unknown>): boolean {
 
 function stringOrNull(value: unknown): string | null {
 	return typeof value === "string" && value ? value.split(/[?#]/)[0]! : null;
+}
+
+function validDuration(value: unknown): boolean {
+	if (value === undefined || value === null || value === "" || typeof value === "boolean") return false;
+	const n = Number(value);
+	return Number.isFinite(n) && n >= 0;
 }
 
 function nonNegative(value: unknown): number {

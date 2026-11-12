@@ -230,7 +230,9 @@ const LLM_SCRIPT = `
 	};
 	call("fast");
 	call("failed", { error: true });
-	call("slow", { ms: 2000 });
+	// Over the 20 s absolute threshold: a model with few calls has no p95 yet.
+	call("slow", { ms: 25_000 });
+	call("seconds", { ms: 4000 });
 `;
 
 async function runLlm(service, options) {
@@ -278,6 +280,8 @@ test("LLM spans keep counters always and prompt/completion content only when fai
 	const slow = named("slow");
 	assert.equal(slow.attributes["autter.llm.content"], "slow");
 	assert.equal(slow.attributes["ai.response.text"], "completion slow");
+	// A few seconds is a normal LLM call, not a slow one, at low volume.
+	assert.equal(named("seconds").attributes["autter.llm.content"], "omitted");
 
 	const tracked = named("tracked");
 	assert.equal(tracked.attributes["gen_ai.input.messages"], undefined);
@@ -289,7 +293,7 @@ test("the ingester still extracts tokens and cost from LLM spans without content
 	await runLlm("llm-ingest", {});
 	const calls = bodiesOf("llm-ingest").flatMap((body) => normalizeTraces(body).llmCalls);
 	const vercel = calls.filter((c) => c.provider === "openai");
-	assert.equal(vercel.length, 3);
+	assert.equal(vercel.length, 4);
 	for (const call of vercel) {
 		assert.equal(call.inputTokens, 1000);
 		assert.equal(call.outputTokens, 200);
@@ -312,8 +316,73 @@ test('llmContent: "always" keeps every call\'s content; "never" drops it, failed
 	assert.equal(always.named("tracked").attributes["gen_ai.input.messages"], '[{"role":"user"}]');
 
 	const never = await runLlm("llm-never", { llmContent: "never" });
-	for (const name of ["fast", "failed", "slow", "tracked"]) {
+	for (const name of ["fast", "failed", "slow", "seconds", "tracked"]) {
 		assert.equal(never.named(name).attributes["autter.llm.content"], "omitted", name);
 	}
 	assert.equal(never.named("failed").attributes["ai.response.text"], undefined);
+});
+
+test("a slow request keeps all its child spans while many concurrent requests fill the buffer", async () => {
+	// One slow request starts first; while it runs, 120 concurrent requests
+	// each finish 100 child spans (12,000 buffered spans: over the buffer's
+	// budget) before any of them ends. The oldest in-flight trace, the one
+	// most likely to end slow, must not be the one evicted.
+	await runScript(`
+		import { context, trace, SpanKind } from "@opentelemetry/api";
+		import { initAutterServer } from "./dist/index.js";
+		const sdk = initAutterServer({
+			apiKey: "k", service: "tail-concurrent", endpoint: process.env.ENDPOINT,
+			captureGlobalErrors: false, autoFlush: false, memoryMetrics: false, compatCheck: false,
+			metricIntervalMs: 3_600_000, logging: { console: false }, traceSampleRate: 0,
+		});
+		const tracer = trace.getTracer("app");
+		const t0 = Date.now();
+		const request = (route, at) => tracer.startSpan("GET " + route, {
+			kind: SpanKind.SERVER, startTime: at,
+			attributes: { "http.method": "GET", "http.request.method": "GET", "http.route": route, "http.target": route },
+		});
+		const children = (root, n, label) => {
+			const ctx = trace.setSpan(context.active(), root);
+			for (let i = 0; i < n; i++) tracer.startSpan(label + " " + i, {}, ctx).end();
+		};
+		const slow = request("/report", t0);
+		children(slow, 100, "report-step");
+		const others = [];
+		for (let r = 0; r < 120; r++) {
+			const root = request("/items", t0 + 1 + r);
+			children(root, 100, "item-step");
+			others.push(root);
+		}
+		slow.end(t0 + 1500);
+		for (const root of others) root.end(t0 + 50);
+		await sdk.shutdown();
+	`);
+	const spans = spansOf("tail-concurrent");
+	const root = spans.find((s) => s.name === "GET /report");
+	assert.ok(root, "the slow request was kept");
+	assert.equal(root.attributes["autter.retention_reason"], "slow");
+	const kept = spans.filter((s) => s.traceId === root.traceId && s.name.startsWith("report-step"));
+	assert.equal(kept.length, 100, "every child span of the slow request was kept");
+	assert.equal(spans.filter((s) => s.name.startsWith("item-step")).length, 0, "fast requests are not exported");
+});
+
+test("a trace over the per-trace span cap is dropped whole, never exported in part", async () => {
+	await runScript(`
+		import { context, trace, SpanKind } from "@opentelemetry/api";
+		import { initAutterServer } from "./dist/index.js";
+		const sdk = initAutterServer({
+			apiKey: "k", service: "tail-cap", endpoint: process.env.ENDPOINT,
+			captureGlobalErrors: false, autoFlush: false, memoryMetrics: false, compatCheck: false,
+			metricIntervalMs: 3_600_000, logging: { console: false }, traceSampleRate: 0,
+		});
+		const tracer = trace.getTracer("app");
+		const t0 = Date.now();
+		const root = tracer.startSpan("GET /huge", { kind: SpanKind.SERVER, startTime: t0,
+			attributes: { "http.method": "GET", "http.route": "/huge", "http.target": "/huge" } });
+		const ctx = trace.setSpan(context.active(), root);
+		for (let i = 0; i < 600; i++) tracer.startSpan("huge-step " + i, {}, ctx).end();
+		root.end(t0 + 1500);
+		await sdk.shutdown();
+	`);
+	assert.equal(spansOf("tail-cap").length, 0);
 });

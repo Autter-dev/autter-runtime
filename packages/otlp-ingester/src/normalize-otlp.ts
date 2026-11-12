@@ -591,18 +591,32 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
  * Who counts a request, decided on its outermost server span:
  * - "metrics": the sender's metric feed. Its data point carries the route
  *   (`autter.metric_has_route` on a resource with `autter.metrics_wired` and
- *   `autter.metrics_routes`), or error-linked tail retention exported it
- *   (`autter.tail_retained`) next to a metric feed (`autter.metrics_wired`).
+ *   `autter.metrics_routes`), or tail retention exported it (isTailRetained:
+ *   an error or a slow request) next to a metric feed (`autter.metrics_wired`).
  * - "none": tail retention exported it and no metric feed counts requests
- *   (the Python retention in adapters/python): not a sample of the traffic.
+ *   (the Python retention in adapters/python, or a sender that marks only
+ *   `autter.retention_reason`): not a sample of the traffic.
  * - "spans": anything else; its server spans are the request count.
  */
 type RequestCounter = "spans" | "metrics" | "none";
 
 function countedBy(resource: ResourceInfo, attrs: Map<string, string>): RequestCounter {
 	if (resource.metricsCountRoutedRequests && attrs.get("autter.metric_has_route") === "true") return "metrics";
-	if (attrs.get("autter.tail_retained") === "true") return resource.metricsWired ? "metrics" : "none";
+	if (isTailRetained(attrs)) return resource.metricsWired ? "metrics" : "none";
 	return "spans";
+}
+
+/**
+ * Kept by tail retention, not a random sample of the traffic: marked
+ * `autter.tail_retained` (runtime-node, the Python adapter) or
+ * `autter.retention_reason` `error` / `slow` (runtime-node 1.12+). Only
+ * random samples (`head`, or no reason: older SDKs, other OTel senders)
+ * may stand for requests in counts, rates and percentiles.
+ */
+export function isTailRetained(attrs: Map<string, string>): boolean {
+	if (attrs.get("autter.tail_retained") === "true") return true;
+	const reason = attrs.get("autter.retention_reason");
+	return reason === "error" || reason === "slow";
 }
 
 interface SpanFacts {

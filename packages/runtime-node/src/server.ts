@@ -259,9 +259,13 @@ export interface AutterServerOptions {
 	/**
 	 * Keep the FULL local trace of a slow request, whatever head sampling
 	 * decided. By default (undefined) a request is slow when its root server
-	 * span takes longer than both 500 ms and its route's rolling p95: an
-	 * estimate per method + route over this process's recent requests, all
-	 * of them, sampled or not. A positive number is a fixed threshold in ms
+	 * span takes longer than both 500 ms and its route's p95 baseline: an
+	 * estimate per method + route over this process's requests, all of them,
+	 * sampled or not (older ones count half every 15 minutes). While a route
+	 * stays slower than its baseline (a fifth of its recent requests above
+	 * it) the baseline is frozen, so a sustained regression keeps a steady
+	 * sample of slow traces instead of only its first few; after an hour the
+	 * baseline adopts the new latency. A positive number is a fixed threshold in ms
 	 * instead; `0` or `false` turns slow-trace retention off. Kept traces are
 	 * rate limited (`retainSlowTracesPerMinute`) and their spans carry
 	 * `autter.retention_reason = "slow"`. Request histograms, and so p95 and
@@ -374,25 +378,35 @@ export interface AutterServerOptions {
 	debug?: boolean;
 	/**
 	 * Record LLM/GenAI spans (`gen_ai.*` semconv, Vercel AI SDK `ai.*`,
+	 * OpenInference LLM / embedding spans, OpenLLMetry `llm.request.type`,
 	 * `withLlmCall`) at 100% regardless of `traceSampleRate`, so every model
 	 * call is tracked with tokens/cost (default true). What else those spans
 	 * carry is `llmContent`.
 	 */
 	llmTracing?: boolean;
 	/**
-	 * Prompt and completion content on LLM spans (`ai.prompt*`,
-	 * `ai.response.text` / `toolCalls` / `object`, `ai.toolCall.args` /
-	 * `result`, `gen_ai.prompt*` / `gen_ai.completion*`,
-	 * `gen_ai.input.messages` / `output.messages`, the GenAI message events):
+	 * Prompt, completion and other model input/output content on LLM and AI
+	 * framework spans: Vercel AI SDK (`ai.prompt*`, `ai.response.*`,
+	 * `ai.toolCall.*`), OTel GenAI (`gen_ai.input.messages` /
+	 * `output.messages`, `gen_ai.prompt*` / `gen_ai.completion*`, system
+	 * instructions, tool definitions and calls, retrieval query and
+	 * documents, the GenAI message events), OpenInference (`input.value` /
+	 * `output.value`, `llm.*_messages.*`, prompt templates,
+	 * `llm.invocation_parameters`, `llm.tools.*`, `tool.parameters`,
+	 * documents, embedding texts) and OpenLLMetry
+	 * (`traceloop.entity.input` / `output`, `llm.request.functions.*`):
 	 * - `"slow-or-failed"` (default): exported only for a call that failed,
-	 *   or that took longer than both 500 ms and its model's rolling p95
-	 *   (within `retainSlowTracesPerMinute`), marked
+	 *   or that was slow (within `retainSlowTracesPerMinute`): over 20 s
+	 *   until its model has 50 recent calls, then over both 500 ms and the
+	 *   model's p95 baseline; marked
 	 *   `autter.llm.content = "error"` / `"slow"`. Every other call keeps
 	 *   its model, token, cost, latency and status attributes; its content
 	 *   is dropped in the process and the span marked
 	 *   `autter.llm.content = "omitted"`.
 	 * - `"always"`: every call keeps its content (the behaviour up to 1.11).
-	 * - `"never"`: no call keeps it, failed ones included.
+	 * - `"never"`: no call keeps it, failed ones included; a failed call's
+	 *   status message and exception messages are replaced by `[omitted]`
+	 *   (they can quote the completion), its exception type and frames stay.
 	 */
 	llmContent?: LlmContentMode;
 	/** Extra instrumentations (e.g. `new ExpressInstrumentation()`). */
@@ -647,10 +661,38 @@ class RecordUnsampledSampler implements Sampler {
 	}
 }
 
-const RETENTION_MAX_SPANS_PER_TRACE = 256;
-const RETENTION_MAX_BUFFERED_SPANS = 5_000;
+/** A trace with more unsampled spans than this is dropped whole. */
+const RETENTION_MAX_SPANS_PER_TRACE = 512;
+/** Buffer budget across in-flight traces: spans, and approximate bytes. */
+const RETENTION_MAX_BUFFERED_SPANS = 10_000;
+const RETENTION_MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
+/** Eviction frees down to this share of the budget, so it runs rarely. */
+const RETENTION_EVICT_TO = 0.9;
+/** Traces tracked (buffering, retained or dropped): twice the span budget,
+ * so a full map always holds entries without buffered spans to free. */
+const RETENTION_MAX_TRACES = 2 * RETENTION_MAX_BUFFERED_SPANS;
 const RETENTION_SWEEP_INTERVAL_MS = 10_000;
-const RETENTION_TRACE_TTL_MS = 30_000;
+/** A trace no span has ended in for this long is forgotten (a root span
+ * that never ends, or a retained trace's stragglers). */
+const RETENTION_TRACE_IDLE_MS = 60_000;
+
+function attributeBytes(attributes: Attributes | undefined): number {
+	let bytes = 0;
+	for (const [key, value] of Object.entries(attributes ?? {})) {
+		bytes += key.length + 16;
+		if (typeof value === "string") bytes += value.length;
+		else if (Array.isArray(value)) for (const item of value) bytes += typeof item === "string" ? item.length + 8 : 8;
+	}
+	return bytes;
+}
+
+/** Rough in-memory size of a buffered span (strings counted once per char). */
+function approxSpanBytes(span: ReadableSpan): number {
+	let bytes = 300 + span.name.length + attributeBytes(span.attributes);
+	for (const event of span.events ?? []) bytes += 40 + event.name.length + attributeBytes(event.attributes);
+	for (const link of span.links ?? []) bytes += 60 + attributeBytes(link.attributes);
+	return bytes;
+}
 
 /** Marks spans exported by tail retention rather than head sampling. The
  * ingester uses it to keep such spans out of span-fed usage rollups —
@@ -690,10 +732,17 @@ function withSampledFlag(span: ReadableSpan, reason: RetentionReason): ReadableS
 
 interface RetentionEntry {
 	spans: ReadableSpan[];
+	/** Approximate bytes of `spans`. */
+	bytes: number;
 	retained: boolean;
+	/** Dropped whole (over its span cap, or evicted for the buffer budget):
+	 * its later spans are not buffered and it can no longer be retained, so
+	 * no partial trace is ever exported. */
+	dropped: boolean;
 	/** Why the trace was promoted (the first reason wins). */
 	reason: RetentionReason;
 	firstSeenAtMs: number;
+	lastSeenAtMs: number;
 }
 
 /**
@@ -705,19 +754,25 @@ interface RetentionEntry {
  * it shows an error: an ERROR-status span (5xx requests included), an
  * `exception` event, or an explicit captureException /
  * captureMessage("…", "error") inside it; or when its local root server
- * span ends slow (SlowPolicy: above the route's rolling p95 and 500 ms, or
+ * span ends slow (SlowPolicy: above the route's p95 baseline and 500 ms, or
  * a fixed `retainTracesAboveMs`, within the slow-trace budget).
  *
- * Bounded by construction: per-trace and total span caps, buffers dropped
- * as soon as the local root span ends healthy, and a TTL sweep for traces
- * whose root is never seen. On overflow it degrades to plain head sampling
- * for the evicted traces — it never blocks and never grows unbounded.
- * Errors reported after the root span has ended keep their occurrence (the
- * always-on pipe) but can no longer rescue the request trace.
+ * Bounded by construction: a per-trace span cap, a buffer budget in spans
+ * and approximate bytes, buffers dropped as soon as the local root span
+ * ends healthy, and an idle sweep for traces whose root never ends. Over
+ * the budget it drops the NEWEST in-flight traces, whole: the oldest ones
+ * are the requests most likely to end slow, and their children (which end
+ * before their root) must still be there when it does. A dropped trace is
+ * remembered, so its later spans are not buffered and it is never exported
+ * in part; it falls back to plain head sampling. It never blocks and never
+ * grows unbounded. Errors reported after the root span has ended keep
+ * their occurrence (the always-on pipe) but can no longer rescue the
+ * request trace.
  */
 class ErrorTraceRetentionProcessor implements SpanProcessor {
 	private readonly traces = new Map<string, RetentionEntry>();
 	private bufferedSpans = 0;
+	private bufferedBytes = 0;
 	private readonly sweeper: NodeJS.Timeout;
 
 	constructor(
@@ -746,25 +801,38 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		}
 
 		const entry = this.entryFor(ctx.traceId);
-		const failed = !entry.retained && this.retainErrors && spanIndicatesError(span);
+		if (entry === null) {
+			if (slowRoot) this.slow!.consider(requestKeyOf(span.attributes), durationMsOf(span), false);
+			return;
+		}
+		entry.lastSeenAtMs = Date.now();
+		const open = !entry.retained && !entry.dropped;
+		const failed = open && this.retainErrors && spanIndicatesError(span);
 		const slow = slowRoot
-			&& this.slow!.consider(requestKeyOf(span.attributes), durationMsOf(span), !entry.retained && !failed);
+			&& this.slow!.consider(requestKeyOf(span.attributes), durationMsOf(span), open && !failed);
 		if (entry.retained) {
 			this.forward(span, entry.reason);
+		} else if (entry.dropped) {
+			// Dropped whole: neither buffered nor exported.
 		} else if (failed || slow) {
 			this.promote(entry, failed ? "error" : "slow");
 			this.forward(span, entry.reason);
-		} else if (entry.spans.length < RETENTION_MAX_SPANS_PER_TRACE) {
+		} else if (entry.spans.length >= RETENTION_MAX_SPANS_PER_TRACE) {
+			this.dropWhole(entry);
+		} else {
+			const bytes = approxSpanBytes(span);
 			entry.spans.push(span);
+			entry.bytes += bytes;
 			this.bufferedSpans++;
+			this.bufferedBytes += bytes;
 			this.evictIfOverBudget();
 		}
 
 		// The local root ended: the request is over, and an error inside it
-		// would have surfaced by now. Drop a healthy trace's buffer; keep
+		// would have surfaced by now. Forget a healthy or dropped trace; keep
 		// retained entries so late stragglers still export (sweep cleans up).
 		if (localRoot && !entry.retained) {
-			this.drop(ctx.traceId);
+			this.forget(ctx.traceId);
 		}
 	}
 
@@ -774,7 +842,7 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		// No active trace, or a head-sampled one that exports anyway.
 		if (!active || (active.traceFlags & TraceFlags.SAMPLED) !== 0) return;
 		const entry = this.entryFor(active.traceId);
-		if (entry.retained) return;
+		if (entry === null || entry.retained || entry.dropped) return;
 		this.promote(entry, "error");
 	}
 
@@ -786,20 +854,30 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 		clearInterval(this.sweeper);
 		this.traces.clear();
 		this.bufferedSpans = 0;
+		this.bufferedBytes = 0;
 		return this.inner.shutdown();
 	}
 
-	private entryFor(traceId: string): RetentionEntry {
+	private entryFor(traceId: string): RetentionEntry | null {
 		let entry = this.traces.get(traceId);
 		if (!entry) {
-			if (this.traces.size >= RETENTION_MAX_BUFFERED_SPANS) {
-				const oldest = this.traces.keys().next().value;
-				if (oldest) this.drop(oldest);
-			}
-			entry = { spans: [], retained: false, reason: "error", firstSeenAtMs: Date.now() };
+			if (this.traces.size >= RETENTION_MAX_TRACES && !this.forgetOldestIdleEntry()) return null;
+			const now = Date.now();
+			entry = { spans: [], bytes: 0, retained: false, dropped: false, reason: "error", firstSeenAtMs: now, lastSeenAtMs: now };
 			this.traces.set(traceId, entry);
 		}
 		return entry;
+	}
+
+	/** Frees a map slot: the oldest entry without buffered spans (a
+	 * retained or dropped trace's marker, or a trace with nothing buffered). */
+	private forgetOldestIdleEntry(): boolean {
+		for (const [traceId, entry] of this.traces) {
+			if (entry.spans.length > 0) continue;
+			this.traces.delete(traceId);
+			return true;
+		}
+		return false;
 	}
 
 	private forward(span: ReadableSpan, reason: RetentionReason): void {
@@ -810,35 +888,50 @@ class ErrorTraceRetentionProcessor implements SpanProcessor {
 	private promote(entry: RetentionEntry, reason: RetentionReason): void {
 		entry.retained = true;
 		entry.reason = reason;
-		for (const span of entry.spans) this.forward(span, reason);
-		this.bufferedSpans -= entry.spans.length;
-		entry.spans = [];
+		const spans = entry.spans;
+		this.release(entry);
+		for (const span of spans) this.forward(span, reason);
 	}
 
-	private drop(traceId: string): void {
+	private release(entry: RetentionEntry): void {
+		this.bufferedSpans -= entry.spans.length;
+		this.bufferedBytes -= entry.bytes;
+		entry.spans = [];
+		entry.bytes = 0;
+	}
+
+	private dropWhole(entry: RetentionEntry): void {
+		this.release(entry);
+		entry.dropped = true;
+	}
+
+	private forget(traceId: string): void {
 		const entry = this.traces.get(traceId);
 		if (!entry) return;
-		this.bufferedSpans -= entry.spans.length;
+		this.release(entry);
 		this.traces.delete(traceId);
 	}
 
 	private evictIfOverBudget(): void {
-		if (this.bufferedSpans <= RETENTION_MAX_BUFFERED_SPANS) return;
-		// Insertion order ≈ oldest trace first; evicting whole traces keeps
-		// what survives coherent instead of leaving partial traces behind.
-		// Entries without buffered spans (retained markers, drained traces)
-		// don't help the budget and keep their rescue semantics.
-		for (const [traceId, entry] of this.traces) {
+		if (this.bufferedSpans <= RETENTION_MAX_BUFFERED_SPANS && this.bufferedBytes <= RETENTION_MAX_BUFFERED_BYTES) return;
+		// Newest first (the map is in first-seen order): the oldest in-flight
+		// requests are the likeliest to end slow, and drop whole traces so
+		// what survives stays coherent.
+		const spanTarget = RETENTION_MAX_BUFFERED_SPANS * RETENTION_EVICT_TO;
+		const byteTarget = RETENTION_MAX_BUFFERED_BYTES * RETENTION_EVICT_TO;
+		const entries = [...this.traces.values()];
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i]!;
 			if (entry.spans.length === 0) continue;
-			this.drop(traceId);
-			if (this.bufferedSpans <= RETENTION_MAX_BUFFERED_SPANS) return;
+			this.dropWhole(entry);
+			if (this.bufferedSpans <= spanTarget && this.bufferedBytes <= byteTarget) return;
 		}
 	}
 
 	private sweep(): void {
-		const cutoff = Date.now() - RETENTION_TRACE_TTL_MS;
+		const cutoff = Date.now() - RETENTION_TRACE_IDLE_MS;
 		for (const [traceId, entry] of this.traces) {
-			if (entry.firstSeenAtMs <= cutoff) this.drop(traceId);
+			if (entry.lastSeenAtMs <= cutoff) this.forget(traceId);
 		}
 	}
 }

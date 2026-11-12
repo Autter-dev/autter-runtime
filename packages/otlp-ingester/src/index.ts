@@ -3,7 +3,7 @@ import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
 
 const config = loadConfig();
-const { app, store, sink, reportIngesterInfo, drops, collapse, limits, archiver, archiveStatus } = createIngesterApp(config);
+const { app, store, sink, reportIngesterInfo, drops, collapse, limits, archiver, archiveStatus, edgeLatency } = createIngesterApp(config);
 const sharingWarning = limitsWarning(config);
 if (sharingWarning) console.warn(`WARNING: ${sharingWarning}`);
 
@@ -60,6 +60,8 @@ async function shutdown(signal: string) {
 					);
 				}
 			})
+			// Write the edge latency points of the minutes still open.
+			.finally(() => edgeLatency.stop())
 			.finally(() => drops.stop())
 			.finally(() => archiveStatus?.stop())
 			.finally(() => archiver?.stop())

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixes
+
+- Two archive runners can no longer empty or hide an archived day (`otlp-ingester`). When the Redis lease was lost while its holder was still exporting, or `ARCHIVE_SCHEDULER=on` was set on two replicas, a second runner could re-export a day under the same generation after the first had dropped it, replacing the verified Parquet object with an empty one, or log it `exporting` again so readers skipped it. Each pass now holds a lock in ClickHouse (`runtime_archive_lock`, which only one runner can create), checked before every move, object write, log row and drop; a second runner skips its pass. Objects are written with `s3_truncate_on_insert = 0`, so an existing object is never replaced (only a short object of a generation not yet archived is rewritten); every org's object is read back again right before a staged day is dropped; and generations carry a per-runner offset.
+- Turning the archive on no longer deletes rows before they are archived (`otlp-ingester`). With an archive configured, a table with no TTL got the backstop TTL (hot window + 7 days) at boot, and a longer TTL was cut to it, while the first passes export 4 days an hour: older rows were deleted unarchived. A TTL that would delete rows is now set only after every day older than it is archived (the job sets it after the pass that finishes the backlog); a longer one is set at once. Every TTL change runs with `materialize_ttl_after_modify = 0`.
+- TTLs are read properly (`otlp-ingester`). The ingester took the first `toIntervalDay(N)` after `TTL`, so a `TO VOLUME` or `RECOMPRESS` rule read as a delete TTL (and a delete TTL was then added to a table that had none), `… toIntervalDay(3) TO VOLUME 'cold', … toIntervalDay(180)` read as 3 (and 180 was cut), and `toIntervalMonth(12) + toIntervalDay(1)` as 1. It now parses the TTL list: the delete rule is the one with no `TO VOLUME`/`TO DISK`/`RECOMPRESS`/`GROUP BY` action, with day, week, month and year intervals in either syntax, and anything else (a `WHERE` delete, hours, two delete rules) is left alone. Changes keep the move and recompress rules, and `ARCHIVE_BACKSTOP_DAYS=0` removes only the delete rule.
+- `LOG_TTL_DAYS` is applied to an existing `runtime_logs` only when it is set (`otlp-ingester`). Unset, a TTL you set by hand (say 90 days) was rewritten to 14 at every boot; it is now left alone. When set, a longer TTL is applied at boot and a shorter one only when no older rows would be deleted (otherwise the boot log gives the statement).
+
+### Changes
+
+- A configured archive whose job never runs is reported (`otlp-ingester`). Every ingester with an archive configured records itself in `runtime_archive_passes` hourly, each pass is recorded there, and each ingester warns hourly when no pass has finished without errors for three intervals (at least 3 hours), including when none ever ran (no Redis lease holder, every replica `ARCHIVE_SCHEDULER=off`). `/healthz` has an `archive` block with `lastSuccessfulPassAt` and `passOverdue` (readiness is unchanged).
+- The boot warning for a table left without a delete TTL after the archive is turned off gives the exact `ALTER TABLE … MODIFY TTL`, keeping move and recompress rules, and rows left in a `<table>_archive_stage` are reported with the statement that moves them back. [docs/RETENTION.md](docs/RETENTION.md) has a "Turning it off" section.
+
+### Upgrade notes
+
+- The ingester's ClickHouse user needs `CREATE TABLE` and `DROP TABLE` on the database (it already creates and drops the stage tables) for `runtime_archive_lock` and `runtime_archive_passes`.
+- If `LOG_TTL_DAYS` is unset and your `runtime_logs` TTL is not 14 days, it now stays as it is. Set `LOG_TTL_DAYS` to keep the old behaviour.
+- With an archive configured, a table whose TTL is missing or longer than the backstop keeps it until its old days are archived; the boot log says so per table.
+- A pass cut off by a crash leaves the lock for up to two hours before another process takes it over.
+
 ## [1.16.1] - 2026-11-11
 
 Packages: `otlp-ingester` 1.14.1. No SDK changes. If you run `otlp-ingester` 1.14.0, upgrade.

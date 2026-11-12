@@ -3,7 +3,14 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import type { IngesterConfig } from "./config.js";
-import { logPromotionCandidates, logRollups, summaryLatencyHistograms } from "./log-promotion.js";
+import {
+	EdgeLatencyAggregator,
+	edgeLatencySamples,
+	emptyEdgeLatencyDrops,
+	type EdgeLatencyDrops,
+} from "./edge-latency.js";
+import type { LatencyHistogram } from "./latency.js";
+import { logPromotionCandidates, logRollups } from "./log-promotion.js";
 import { normalizeLogs, type OtlpLogsRequest } from "./logs.js";
 import { createIngesterApp } from "./server.js";
 import type { RuntimeMetricPoint, RuntimeOccurrence } from "./types.js";
@@ -39,16 +46,20 @@ interface EdgeRequest {
 	outcome: string;
 	/** Captured exceptions (promoted error records). */
 	errors?: number;
-	durationMs?: number;
+	/** null: no `autter.operation.duration_ms` at all. */
+	durationMs?: number | null;
 	counted?: boolean;
 	at?: number;
+	/** No timeUnixNano / observedTimeUnixNano. */
+	untimed?: boolean;
+	requestId?: string;
 }
 
 /** The records runtime-edge sends for one request: its error records, then its summary. */
 function edgeRecords(request: EdgeRequest) {
 	const counted = request.counted !== false;
 	const base = {
-		"autter.request.id": `req-${request.route.replace(/\W/g, "")}-0001`,
+		"autter.request.id": request.requestId ?? `req-${request.route.replace(/\W/g, "")}-0001`,
 		"http.request.method": "GET",
 		"http.route": request.route,
 		...(counted ? { "autter.request.counted_by": "summary" } : {}),
@@ -68,7 +79,7 @@ function edgeRecords(request: EdgeRequest) {
 		}),
 	}));
 	const summary = {
-		timeUnixNano: nanos(at),
+		...(request.untimed ? {} : { timeUnixNano: nanos(at) }),
 		severityNumber: request.outcome === "failed" ? 17 : 9,
 		severityText: request.outcome === "failed" ? "ERROR" : "INFO",
 		body: { stringValue: `GET ${request.route}: ${request.outcome}` },
@@ -77,7 +88,7 @@ function edgeRecords(request: EdgeRequest) {
 			"autter.event.type": "operation",
 			"autter.operation.kind": "request",
 			"autter.operation.outcome": request.outcome,
-			"autter.operation.duration_ms": request.durationMs ?? 10,
+			...(request.durationMs === null ? {} : { "autter.operation.duration_ms": request.durationMs ?? 10 }),
 			"http.response.status_code": request.status,
 			"autter.request.aborted": false,
 			...(counted && (request.errors ?? 0) > 0 ? { "autter.request.error_reported": true } : {}),
@@ -231,59 +242,94 @@ test("/v1/logs writes counted edge requests to runtime_metrics_1m", async () => 
 		});
 	});
 	await new Promise<void>((resolve) => ch.listen(0, "127.0.0.1", resolve));
-	const app = createIngesterApp(config(`http://127.0.0.1:${(ch.address() as AddressInfo).port}`)).app.listen(0, "127.0.0.1");
+	const ingester = createIngesterApp(config(`http://127.0.0.1:${(ch.address() as AddressInfo).port}`));
+	const app = ingester.app.listen(0, "127.0.0.1");
 	await new Promise((resolve) => app.once("listening", resolve));
 	const now = Date.now();
+	const post = (body: string) => fetch(`http://127.0.0.1:${(app.address() as AddressInfo).port}/v1/logs`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: "Bearer server" },
+		body,
+	});
 	try {
-		const res = await fetch(`http://127.0.0.1:${(app.address() as AddressInfo).port}/v1/logs`, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: "Bearer server" },
-			body: JSON.stringify(
-				logsRequest([
-					...edgeRecords({ route: "/ok", status: 200, outcome: "succeeded", at: now }),
-					...edgeRecords({ route: "/ok", status: 500, outcome: "failed", errors: 1, at: now }),
-				]),
-			),
-		});
+		// runtime-edge exports per request: two batches, one minute.
+		const first = JSON.stringify(logsRequest(edgeRecords({ route: "/ok", status: 200, outcome: "succeeded", at: now })));
+		const res = await post(first);
 		assert.equal(res.status, 200);
+		assert.match(res.headers.get("x-autter-ingest") ?? "", / latency_summaries=1 /);
+		const second = await post(JSON.stringify(logsRequest(edgeRecords({ route: "/ok", status: 500, outcome: "failed", errors: 1, at: now }))));
+		assert.equal(second.status, 200);
+		// A retried batch adds nothing twice.
+		const retry = await post(first);
+		assert.equal(retry.status, 200);
+		assert.equal(inserted.runtime_latency_histograms, undefined, "the minute is written once it is over");
+		await ingester.edgeLatency.stop();
 		assert.equal(inserted.runtime_error_occurrences?.length, 1);
 		const metrics = inserted.runtime_metrics_1m ?? [];
 		assert.equal(metrics.reduce((n, row) => n + Number(row.request_count), 0), 2);
 		assert.equal(metrics.reduce((n, row) => n + Number(row.error_count), 0), 1);
 		assert.deepEqual([...new Set(metrics.map((row) => row.route))], ["/ok"]);
-		// …and to the latency histograms endpoint regression detection reads.
+		// …and to the latency histograms endpoint regression detection reads:
+		// one point for the minute, across both batches.
 		const histograms = inserted.runtime_latency_histograms ?? [];
 		assert.equal(histograms.length, 1);
 		assert.equal(histograms[0]!.request_count, 2);
 		assert.equal(histograms[0]!.error_count, 1);
 		assert.equal(histograms[0]!.method, "GET");
 		assert.equal(histograms[0]!.route, "/ok");
-		assert.match(res.headers.get("x-autter-ingest") ?? "", / latency_histograms=1 /);
 	} finally {
 		await close(app);
 		await close(ch);
 	}
 });
 
-test("counted edge summaries become latency histograms with runtime-node's bounds", () => {
-	const rows = normalizeLogs(
-		logsRequest(
-			[
-				...edgeRecords({ route: "/items/:id", status: 200, outcome: "succeeded", durationMs: 40 }),
-				...edgeRecords({ route: "/items/:id", status: 200, outcome: "succeeded", durationMs: 600, at: MINUTE + 2_000 }),
-				...edgeRecords({ route: "/items/:id", status: 503, outcome: "failed", durationMs: 200_000, at: MINUTE + 3_000 }),
-				// Another minute: its own point.
-				...edgeRecords({ route: "/items/:id", status: 200, outcome: "succeeded", durationMs: 5, at: MINUTE + 61_000 }),
-				// Not counted by its summary (runtime-node / runtime-next, or
-				// countRequests: false): its histogram, if any, has it already.
-				...edgeRecords({ route: "/node", status: 200, outcome: "succeeded", counted: false }),
-			],
-			{ "service.name": "edge-api", "service.version": "abc123" },
-		),
-	);
-	const points = summaryLatencyHistograms(rows).sort((a, b) => a.bucketAt.getTime() - b.bucketAt.getTime());
-	assert.equal(points.length, 2);
-	const [first, second] = points;
+const TENANT = { orgId: "org-1", repositoryId: "repo-1" } as Parameters<EdgeLatencyAggregator["add"]>[0];
+
+/** An aggregator on a fake clock that records what it writes. */
+function aggregator(options: { failWrites?: number; routesPerService?: number } = {}) {
+	const clock = { now: MINUTE + 1_000 };
+	const written: LatencyHistogram[][] = [];
+	const attempts: string[][] = [];
+	let failures = options.failWrites ?? 0;
+	const agg = new EdgeLatencyAggregator({
+		now: () => clock.now,
+		routesPerService: options.routesPerService,
+		log: () => {},
+		write: async (_ctx, points) => {
+			attempts.push(points.map((p) => p.pointId));
+			if (failures-- > 0) throw new Error("clickhouse down");
+			written.push(points.map((p) => ({ ...p, counts: [...p.counts] })));
+		},
+	});
+	const add = (records: unknown[], drops: EdgeLatencyDrops = emptyEdgeLatencyDrops(), resource?: Record<string, Value>) =>
+		agg.add(TENANT, edgeLatencySamples(normalizeLogs(logsRequest(records, resource)), drops, clock.now), drops);
+	return { agg, clock, written, attempts, add, points: () => written.flat() };
+}
+
+test("counted edge summaries become one latency point per route and minute, with runtime-node's bounds", async () => {
+	const { agg, clock, add, points } = aggregator();
+	const resource = { "service.name": "edge-api", "service.version": "abc123" };
+	// One batch per request, as runtime-edge exports.
+	for (const request of [
+		{ durationMs: 40, at: MINUTE + 1_000, requestId: "a" },
+		{ durationMs: 600, at: MINUTE + 2_000, requestId: "b" },
+		{ durationMs: 200_000, at: MINUTE + 3_000, requestId: "c", status: 503, outcome: "failed" },
+		// Another minute: its own point.
+		{ durationMs: 5, at: MINUTE + 61_000, requestId: "d" },
+	]) {
+		add(edgeRecords({ route: "/items/:id", status: 200, outcome: "succeeded", ...request }), undefined, resource);
+	}
+	// Not counted by its summary (runtime-node / runtime-next, or
+	// countRequests: false): its histogram, if any, has it already.
+	add(edgeRecords({ route: "/node", status: 200, outcome: "succeeded", counted: false }), undefined, resource);
+
+	clock.now = MINUTE + 60_000 + 14_000;
+	await agg.flush();
+	assert.equal(points().length, 0, "a minute waits for its late batches");
+	clock.now = MINUTE + 60_000 + 15_000;
+	await agg.flush();
+	assert.equal(points().length, 1);
+	const [first] = points();
 	assert.deepEqual(first!.boundsMs, [5, 10, 25, 50, 100, 250, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000, 60000, 120000]);
 	assert.equal(first!.counts.length, first!.boundsMs.length + 1);
 	assert.equal(first!.counts[3], 1, "40 ms lands in (25, 50]");
@@ -293,10 +339,84 @@ test("counted edge summaries become latency histograms with runtime-node's bound
 		[first!.requestCount, first!.errorCount, first!.durationSumMs, first!.method, first!.route, first!.release, first!.bucketAt.getTime()],
 		[3, 1, 200_640, "GET", "/items/:id", "abc123", MINUTE],
 	);
-	assert.deepEqual([second!.requestCount, second!.counts[0], second!.bucketAt.getTime()], [1, 1, MINUTE + 60_000]);
-	// A retried batch replaces its points (same id); other records do not.
-	assert.deepEqual(summaryLatencyHistograms(rows).map((p) => p.pointId).sort(), points.map((p) => p.pointId).sort());
-	assert.notEqual(first!.pointId, second!.pointId);
+	await agg.stop();
+	const second = points()[1]!;
+	assert.deepEqual([second.requestCount, second.counts[0], second.bucketAt.getTime()], [1, 1, MINUTE + 60_000]);
+	assert.notEqual(first!.pointId, second.pointId);
+});
+
+test("a record added twice counts once; a late one for a written minute is a new point", async () => {
+	const { agg, clock, add, points } = aggregator();
+	const records = edgeRecords({ route: "/a", status: 200, outcome: "succeeded", requestId: "x" });
+	add(records);
+	add(records);
+	clock.now = MINUTE + 80_000;
+	await agg.flush();
+	add(edgeRecords({ route: "/a", status: 200, outcome: "succeeded", requestId: "late" }));
+	await agg.stop();
+	assert.deepEqual(points().map((p) => [p.bucketAt.getTime(), p.requestCount]), [[MINUTE, 1], [MINUTE, 1]]);
+	assert.notEqual(points()[0]!.pointId, points()[1]!.pointId);
+});
+
+test("a failed write is retried with the same point ids", async () => {
+	const { agg, add, written, attempts } = aggregator({ failWrites: 1 });
+	add(edgeRecords({ route: "/a", status: 200, outcome: "succeeded" }));
+	await agg.flush({ all: true });
+	assert.equal(written.length, 0);
+	assert.equal(agg.size, 1, "kept for the next flush");
+	await agg.flush();
+	assert.equal(written.length, 1);
+	assert.equal(agg.size, 0);
+	assert.deepEqual(attempts[1], attempts[0], "a write that may have landed is replaced, not added to");
+});
+
+test("invalid edge summaries are left out of histograms and counted as drops", async () => {
+	const { agg, clock, add, points } = aggregator();
+	const drops = emptyEdgeLatencyDrops();
+	add([
+		...edgeRecords({ route: "/missing", status: 200, outcome: "succeeded", durationMs: null }),
+		...edgeRecords({ route: "/negative", status: 200, outcome: "succeeded", durationMs: -5 }),
+		...edgeRecords({ route: "/huge", status: 200, outcome: "succeeded", durationMs: 1e308 }),
+		...edgeRecords({ route: "/untimed", status: 200, outcome: "succeeded", untimed: true }),
+		...edgeRecords({ route: "/future", status: 200, outcome: "succeeded", at: clock.now + 60 * 60_000 }),
+		...edgeRecords({ route: "/ancient", status: 200, outcome: "succeeded", at: clock.now - 3 * 24 * 60 * 60_000 }),
+		...edgeRecords({ route: "/fine", status: 200, outcome: "succeeded", durationMs: 1e7 / 1e4 }),
+	], drops);
+	assert.deepEqual(drops, { invalid: 6, overLimit: 0 });
+	await agg.stop();
+	assert.deepEqual(points().map((p) => p.route), ["/fine"]);
+	assert.ok(points().every((p) => Number.isFinite(p.durationSumMs)));
+	// The usage rollups still count the request without a duration, with no latency.
+	const rows = normalizeLogs(logsRequest(edgeRecords({ route: "/missing", status: 200, outcome: "succeeded", durationMs: null })));
+	const [rollup] = logRollups(rows, []);
+	assert.deepEqual([rollup!.requestCount, rollup!.durationSumMs, rollup!.latency], [1, 0, undefined]);
+});
+
+test("route cardinality is capped per service", async () => {
+	const { agg, add, points } = aggregator({ routesPerService: 3 });
+	const drops = emptyEdgeLatencyDrops();
+	for (const route of ["/r1", "/r2", "/r3", "/r4", "/r5"]) add(edgeRecords({ route, status: 200, outcome: "succeeded" }), drops);
+	add(edgeRecords({ route: "/r1", status: 200, outcome: "succeeded", requestId: "again" }), drops);
+	add(edgeRecords({ route: "/r9", status: 200, outcome: "succeeded" }), drops, { "service.name": "other-service" });
+	assert.equal(drops.overLimit, 2);
+	await agg.stop();
+	assert.deepEqual(points().map((p) => `${p.service} ${p.route} ${p.requestCount}`).sort(), [
+		"edge-api /r1 2", "edge-api /r2 1", "edge-api /r3 1", "other-service /r9 1",
+	]);
+});
+
+test("a route that also reports Node histograms gets no edge points", async () => {
+	const { agg, add, points } = aggregator();
+	agg.noteNodeHistograms(TENANT, [{
+		pointId: "n", service: "edge-api", environment: "production", release: "", method: "GET", route: "/shared",
+		bucketAt: new Date(MINUTE), requestCount: 1, errorCount: 0, durationSumMs: 5, boundsMs: [5], counts: [1, 0],
+	}]);
+	add([
+		...edgeRecords({ route: "/shared", status: 200, outcome: "succeeded" }),
+		...edgeRecords({ route: "/edge-only", status: 200, outcome: "succeeded" }),
+	]);
+	await agg.stop();
+	assert.deepEqual(points().map((p) => p.route), ["/edge-only"]);
 });
 
 const close = (server: Server) =>

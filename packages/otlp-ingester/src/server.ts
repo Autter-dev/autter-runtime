@@ -4,6 +4,7 @@ import express, {
 	type Request,
 	type Response,
 } from "express";
+import { EdgeLatencyAggregator, edgeLatencySamples, emptyEdgeLatencyDrops } from "./edge-latency.js";
 import { extractKeyWithSource, KeyResolver, redactKeyFromUrl } from "./auth.js";
 import {
 	clientAddress,
@@ -42,7 +43,6 @@ import {
 	logPromotionCandidates,
 	promotionLookups,
 	logRollups,
-	summaryLatencyHistograms,
 } from "./log-promotion.js";
 import {
 	normalizeBrowserPayload,
@@ -132,6 +132,9 @@ export interface IngesterApp {
 	 * Not started here: index.ts starts it after the schema warm-up.
 	 */
 	archiver: RuntimeArchiver | null;
+	/** Edge request latency histograms (edge-latency.ts), aggregated per
+	 * minute across batches; `stop()` writes the open minutes. */
+	edgeLatency: EdgeLatencyAggregator;
 }
 
 export interface IngesterDeps {
@@ -257,6 +260,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	// or fail ingest. Without ClickHouse there is nowhere to count.
 	const drops = new IngestDropCounter((rows) => store.insertIngestDrops(rows), { enabled: store.configured });
 	drops.start();
+	// Edge latency histograms: one point per route and minute, written once
+	// the minute is over (edge-latency.ts).
+	const edgeLatency = new EdgeLatencyAggregator({
+		write: (ctx, points, token) => store.insertLatencyHistograms(ctx, points, token),
+	});
+	edgeLatency.start();
 	if (sink) {
 		sink.onDrop = (drop) => {
 			drops.record({
@@ -1288,8 +1297,12 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		// Rollups count every promoted error, collapsed or suppressed ones too.
 		const metricPoints = verifyId ? [] : logRollups(logs, promoted);
 		// Edge request summaries are the only latency feed their services
-		// have: their histogram points feed endpoint regression detection.
-		const latency = verifyId ? [] : summaryLatencyHistograms(logs);
+		// have: they are added to the minute's histogram points, which feed
+		// endpoint regression detection (edge-latency.ts). Added through the
+		// request's receipts, so a retried batch adds nothing twice.
+		const latencyDrops = emptyEdgeLatencyDrops();
+		const latency = verifyId ? [] : edgeLatencySamples(logs, latencyDrops);
+		let latencyAdded = 0;
 		const admitted = verifyId ? admitAll(promoted) : admit(ctx, req, promoted);
 		const digest = requestDigest(ctx, req.path, req.body);
 		try {
@@ -1298,7 +1311,9 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 				{ table: "runtime_error_occurrences", rows: admitted.kept.length, run: (token) => store.insertOccurrences(ctx, admitted.kept, token) },
 				{ table: "runtime_metrics_1m", rows: metricPoints.length, run: (token) => store.insertMetricPoints(ctx, metricPoints, token) },
 				{ table: "runtime_route_latency_input", rows: routeLatencyPoints(metricPoints).length, run: (token) => store.insertRouteLatency(ctx, metricPoints, token) },
-				{ table: "runtime_latency_histograms", rows: latency.length, run: (token) => store.insertLatencyHistograms(ctx, latency, token) },
+				{ table: "runtime_latency_histograms", rows: latency.length, run: async () => {
+					latencyAdded = edgeLatency.add(ctx, latency, latencyDrops);
+				} },
 			]);
 		} catch (err) {
 			admitted.rollback();
@@ -1316,7 +1331,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			log_records: logs.length,
 			occurrences: admitted.kept.length,
 			metric_points: metricPoints.length,
-			latency_histograms: latency.length,
+			latency_summaries: latencyAdded,
 			suppressed: admitted.suppressed,
 			collapsed: admitted.collapsed,
 			truncated_values: truncated,
@@ -1326,6 +1341,8 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			{ reason: "attributes_truncated", records: truncated },
 			// Every record, promoted or not (the SDK's own count records too).
 			{ reason: "caught_limited", records: caughtLimitedRecords(logs.map((row) => row.attributes)) },
+			{ reason: "latency_summary_invalid", records: latencyDrops.invalid },
+			{ reason: "latency_routes_over_limit", records: latencyDrops.overLimit },
 		]);
 	}));
 
@@ -1357,6 +1374,9 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			metricPoints = normalizeMetrics(request);
 			memorySamples = normalizeMemoryMetrics(request, memoryStats);
 			latency = normalizeLatencyHistograms(request);
+			// Routes with Node histograms get no edge points (both would
+			// count their requests).
+			edgeLatency.noteNodeHistograms(ctx, latency);
 			cumulative = cumulativeHttpHistogramPoints(request);
 		} catch {
 			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid OTLP metrics payload" }, dataPointsInRequest(request));
@@ -1561,7 +1581,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		},
 	);
 
-	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys, archiver: createArchiver(config, store, redis) };
+	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys, archiver: createArchiver(config, store, redis), edgeLatency };
 }
 
 /**

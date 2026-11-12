@@ -263,6 +263,24 @@ not `default`: `SHOW TABLES FROM autter_runtime`.
   failed, duration sum, p50/p95). The view counts every insert, so a retried
   batch can be counted twice — route stats are approximate under exporter
   retries; `runtime_logs` itself collapses duplicates.
+- **Edge latency histograms.** Request summaries marked
+  `autter.request.counted_by = "summary"` (`@autter/runtime-edge`, which
+  sends no histograms) feed `runtime_latency_histograms` for endpoint
+  regression detection. runtime-edge exports per request, so summaries are
+  added in memory to one point per service, environment, release, method,
+  route and minute across batches, written about 15 s after the minute ends
+  and at shutdown; a retried batch adds nothing twice (insert receipts). A
+  summary without its own timestamp, outside [now − 2 h, now + 5 min], or
+  with a missing, negative, non-numeric or over-15-minute duration is left
+  out (drop reason `latency_summary_invalid`); past 200 routes per service
+  and environment in 10 minutes, `latency_routes_over_limit`. A route that
+  also sends Node histograms gets no edge points. `x-autter-ingest` on
+  `/v1/logs` reports `latency_summaries=` (summaries added). A crash loses
+  the open minutes' edge points.
+- **Tail-retained spans.** Spans marked `autter.tail_retained` or
+  `autter.retention_reason` `error` / `slow` (kept because their trace failed
+  or was slow, not a random sample) never count as requests in the span-fed
+  usage rollups.
 - **Log promotion.** SDKs without a trace pipeline (logger-only mode,
   `@autter/runtime-edge`) send errors as log records with `exception.*` and
   `autter.capture.mode = "log"`. `/v1/logs` promotes those (severity ≥ error)

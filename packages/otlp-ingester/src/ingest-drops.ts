@@ -94,6 +94,10 @@ export const DROP_REASONS = {
 	events_over_limit: { kind: "dropped" },
 	/** Profile samples past the first 1000. */
 	profile_samples_over_limit: { kind: "dropped" },
+	/** Edge request summaries (stored in runtime_logs) left out of latency histograms: no timestamp of their own, a timestamp outside [now − 2 h, now + 5 min], or a duration missing, negative, not finite or over 15 minutes. */
+	latency_summary_invalid: { kind: "dropped" },
+	/** Edge request summaries (stored in runtime_logs) left out of latency histograms: past 200 routes per service and environment in 10 minutes, or 50,000 open points. */
+	latency_routes_over_limit: { kind: "dropped" },
 	// ── truncated: stored, with attribute values cut ──
 	attributes_truncated: { kind: "truncated" },
 	// ── unforwarded: stored, but the sink webhook gave up on the batch ──

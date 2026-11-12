@@ -871,11 +871,22 @@ export class ClickHouseArchiveLock implements ArchiveRunLock {
 	}
 
 	private async holder(): Promise<{ holder: string; idleSeconds: number } | null> {
+		// Ask system.tables whether the lock table exists before naming it: a
+		// query that names a missing table is refused by ClickHouse, and
+		// @clickhouse/client logs every refused query, so naming it on each pass
+		// printed an "Unknown table" error although nothing was wrong. The holder
+		// and its last heartbeat are then still read in one statement, so a
+		// takeover between two reads cannot pair one runner's name with another
+		// runner's heartbeat.
+		const [present] = await this.db.query<{ present: number }>(
+			`SELECT 1 AS present FROM system.tables WHERE database = ${chString(this.database)} AND name = ${chString(ARCHIVE_LOCK_TABLE)}`,
+		);
+		if (!present) return null;
 		const [row] = await this.db.query<{ holder: string; idle_seconds: string | number }>(
 			`SELECT comment AS holder, dateDiff('second', greatest(metadata_modification_time, (SELECT toDateTime(max(at)) FROM ${this.table})), now()) AS idle_seconds
 			FROM system.tables WHERE database = ${chString(this.database)} AND name = ${chString(ARCHIVE_LOCK_TABLE)}`,
 		).catch((err: unknown) => {
-			// No lock table (or dropped meanwhile): nobody holds it.
+			// Dropped between the two reads (released or taken over): nobody holds it.
 			if (isUnknownTable(err)) return [];
 			throw err;
 		});

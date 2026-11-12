@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixes
+
+- No more `Unknown table … runtime_archive_lock` errors in the ingester log (`otlp-ingester`). Each archive pass asked who held the lock by reading the lock table, which does not exist while nobody holds it, so ClickHouse refused the query and `@clickhouse/client` logged the refusal as an error every pass, although the pass went on normally. The pass now checks `system.tables` first and reads the lock table only when it exists; the holder and its last heartbeat are still read in one statement, so a takeover between the two reads cannot make a runner believe it still holds the lock.
+
 ## [1.17.0] - 2026-11-12
 
 Packages: `runtime-node` 1.13.0, `otlp-ingester` 1.15.0, and the local `dashboard` image. `runtime-next` stays 1.9.0 and picks up the new `runtime-node` through its existing range. Finishes slow-trace retention and tiered retention (both 1.16.0). Any upgrade order works; upgrade the ingester for edge histograms that count each request once.

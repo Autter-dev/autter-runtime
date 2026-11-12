@@ -40,7 +40,7 @@ npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, B
 | `@autter/runtime-node` | 1.13.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
 | `@autter/runtime-next` | 1.9.0 | Next.js: server + client + `/edge` for `middleware.ts` |
 | `@autter/runtime-edge` | 1.4.2 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
-| `@autter/otlp-ingester` | 1.15.0 | Self-hosted ingest — upgrade it **before** the SDKs |
+| `@autter/otlp-ingester` | 1.15.1 | Self-hosted ingest — upgrade it **before** the SDKs |
 | `@autter/runtime-cli` | 1.3.2 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
 
 Minimum versions per feature, SDK and ingester are in one table:

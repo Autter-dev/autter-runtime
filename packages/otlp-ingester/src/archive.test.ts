@@ -553,9 +553,12 @@ class FakeClickHouse implements ArchiveDb {
 			}
 			return [...latest.values()].map((e) => ({ day: e.day, generation: String(e.generation), status: e.status, rows: String(e.rows) })) as T[];
 		}
+		if ((m = /^SELECT 1 AS present FROM system\.tables WHERE database = 'db' AND name = '(\w+)'$/.exec(sql.trim()))) {
+			return (this.tables.has(m[1]!) ? [{ present: 1 }] : []) as T[];
+		}
 		if ((m = /SELECT comment AS holder[^]*FROM system\.tables\s+WHERE database = 'db' AND name = '(\w+)'/.exec(sql))) {
 			const lock = this.tables.get(m[1]!);
-			if (!lock) return [] as T[];
+			if (!lock) throw new Error(`Code: 60. DB::Exception: Table db.${m[1]} does not exist. (UNKNOWN_TABLE)`);
 			const last = lock.beats.length ? Math.max(...lock.beats) : lock.createdAt;
 			return [{ holder: lock.comment, idle_seconds: String(this.clock - last) }] as T[];
 		}
@@ -1035,14 +1038,30 @@ test("the lock reads a missing lock table as free, however ClickHouse words it",
 	assert.equal(isUnknownTable(real), true);
 	assert.equal(isUnknownTable(Object.assign(new Error("boom"), { code: "60" })), true);
 	assert.equal(isUnknownTable(new Error("Code: 241. Memory limit exceeded")), false);
+	// No lock table: system.tables has no row, and the lock table itself is
+	// never named in a query (ClickHouse would refuse it, and the client logs
+	// every refused query as an error).
 	const created: string[] = [];
+	const queried: string[] = [];
 	const db: ArchiveDb = {
 		query: async (sql) => {
-			if (/runtime_archive_lock/.test(sql)) throw real;
+			queried.push(sql);
+			if (/FROM db\.runtime_archive_lock/.test(sql)) throw real;
 			return [];
 		},
 		command: async (sql) => void created.push(sql),
 	};
 	assert.equal(await new ClickHouseArchiveLock(db, "db", "me").hold(), true);
 	assert.match(created[0]!, /^CREATE TABLE db\.runtime_archive_lock /);
+	assert.deepEqual(queried.filter((sql) => /FROM db\.runtime_archive_lock/.test(sql)), []);
+	// Listed in system.tables but dropped before it is read: free, not an error.
+	const racing: ArchiveDb = {
+		query: async (sql) => {
+			if (/FROM db\.runtime_archive_lock/.test(sql)) throw real;
+			if (/SELECT 1 AS present FROM system\.tables/.test(sql)) return [{ present: 1 }] as never[];
+			return [];
+		},
+		command: async () => {},
+	};
+	assert.equal(await new ClickHouseArchiveLock(racing, "db", "me").hold(), true);
 });

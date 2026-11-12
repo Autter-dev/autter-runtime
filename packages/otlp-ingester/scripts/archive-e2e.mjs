@@ -2,7 +2,10 @@
 /**
  * End-to-end check of tiered retention (src/archive.ts) against a real
  * ClickHouse and a real S3-compatible bucket (MinIO in CI). Skips (exit 0)
- * unless ARCHIVE_E2E_S3_URL is set: the URL as ClickHouse reaches the bucket.
+ * unless ARCHIVE_E2E_S3_URL is set: the URL as ClickHouse reaches the bucket,
+ * or ARCHIVE_E2E_NAMED_COLLECTION: a collection already defined on the
+ * server, as deploy/single-server/docker-compose.yml defines it (CI's
+ * single-server job).
  *
  *   docker network create e2e
  *   docker run -d --name ch --network e2e -p 8123:8123 -e CLICKHOUSE_PASSWORD=e2e \
@@ -32,8 +35,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const S3_URL = process.env.ARCHIVE_E2E_S3_URL?.replace(/\/$/, "");
-if (!S3_URL) {
-	console.log("archive e2e: ARCHIVE_E2E_S3_URL not set, skipping");
+// Or a named collection already defined on the server (its url a fresh
+// prefix: object paths go straight under it, not under a per-run folder).
+const NAMED_COLLECTION = process.env.ARCHIVE_E2E_NAMED_COLLECTION?.trim() || "";
+if (!S3_URL && !NAMED_COLLECTION) {
+	console.log("archive e2e: neither ARCHIVE_E2E_S3_URL nor ARCHIVE_E2E_NAMED_COLLECTION set, skipping");
 	process.exit(0);
 }
 const CH = (process.env.CLICKHOUSE_URL ?? "http://127.0.0.1:8123").replace(/\/$/, "");
@@ -41,7 +47,7 @@ const ADMIN_USER = process.env.CLICKHOUSE_ADMIN_USER ?? "default";
 const ADMIN_PASSWORD = process.env.CLICKHOUSE_ADMIN_PASSWORD ?? "";
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 const DB = `autter_archive_e2e_${Date.now()}`;
-const PREFIX = `${S3_URL}/${DB}`;
+const PREFIX = NAMED_COLLECTION ? `named_collection:${NAMED_COLLECTION}` : `${S3_URL}/${DB}`;
 
 Object.assign(process.env, {
 	CLICKHOUSE_URL: CH,
@@ -49,9 +55,10 @@ Object.assign(process.env, {
 	CLICKHOUSE_PASSWORD: ADMIN_PASSWORD,
 	CLICKHOUSE_DATABASE: DB,
 	SPAN_TTL_DAYS: "7",
-	ARCHIVE_S3_URL: PREFIX,
-	ARCHIVE_S3_ACCESS_KEY_ID: process.env.ARCHIVE_E2E_ACCESS_KEY_ID ?? "",
-	ARCHIVE_S3_SECRET_ACCESS_KEY: process.env.ARCHIVE_E2E_SECRET_ACCESS_KEY ?? "",
+	ARCHIVE_S3_URL: NAMED_COLLECTION ? "" : PREFIX,
+	ARCHIVE_S3_NAMED_COLLECTION: NAMED_COLLECTION,
+	ARCHIVE_S3_ACCESS_KEY_ID: NAMED_COLLECTION ? "" : (process.env.ARCHIVE_E2E_ACCESS_KEY_ID ?? ""),
+	ARCHIVE_S3_SECRET_ACCESS_KEY: NAMED_COLLECTION ? "" : (process.env.ARCHIVE_E2E_SECRET_ACCESS_KEY ?? ""),
 	ARCHIVE_TABLES: "runtime_spans",
 });
 
@@ -125,7 +132,7 @@ try {
 	);
 	check(log.length === 1 && log[0].status === "archived" && Number(log[0].rows) === 35 && Number(log[0].orgs) === 2, "the log says archived, 35 rows, 2 orgs", log);
 
-	const archive = { url: PREFIX, namedCollection: null, accessKeyId: config.archive.accessKeyId, secretAccessKey: config.archive.secretAccessKey };
+	const archive = config.archive;
 	const orgA = await sql(`SELECT count() AS n FROM ${s3Function(archive, `runtime_spans/org=org_a/date=${oldDay}/g*.parquet`)}`);
 	check(Number(orgA[0].n) === 30, "org_a's object has its 30 rows", orgA);
 	const structure = (await sql(`SELECT name, type FROM system.columns WHERE database = '${DB}' AND table = 'runtime_spans' ORDER BY position`))

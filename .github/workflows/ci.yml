@@ -94,6 +94,177 @@ jobs:
           CLICKHOUSE_URL: http://127.0.0.1:8123
           CLICKHOUSE_ADMIN_PASSWORD: e2e
 
+  single-server:
+    # deploy/single-server/docker-compose.yml as the production box runs it
+    # (Caddy not started; .github/single-server-ci/compose.ci.yml adds a
+    # MinIO bucket and loopback ports). First main's compose file; then this
+    # one rolled in with the deploy workflow's command, which must leave
+    # ClickHouse alone; then ClickHouse with no archive variables (healthy,
+    # no collection, nothing in its log), with them (the named collection,
+    # an archive pass by the ingester and archive-e2e through it, the key
+    # nowhere but ClickHouse's environment), and with them removed again.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      COMPOSE_FILE: docker-compose.yml:compose.ci.yml
+      COMPOSE_PROJECT_NAME: autter-runtime
+      CI_MINIO_USER: ci-archive-key
+      CI_MINIO_SECRET: ci-archive-secret-${{ github.run_id }}-${{ github.run_attempt }}
+      CH_PASSWORD: ci-clickhouse-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run build -w @autter/otlp-ingester
+      - name: Build the ingester image (INGESTER_TAG=ci)
+        run: docker build -f packages/otlp-ingester/Dockerfile -t ghcr.io/autter-dev/otlp-ingester:ci .
+      - name: The box as it runs today (main's compose file)
+        run: |
+          mkdir box
+          cp deploy/single-server/Caddyfile .github/single-server-ci/compose.ci.yml box/
+          git fetch --depth=1 origin main
+          git show FETCH_HEAD:deploy/single-server/docker-compose.yml > box/docker-compose.yml
+          cat > box/.env <<EOF
+          DOMAIN=ci.invalid
+          CLICKHOUSE_USER=default
+          CLICKHOUSE_PASSWORD=$CH_PASSWORD
+          CLICKHOUSE_DATABASE=autter_runtime
+          INGESTER_TAG=ci
+          AUTTER_INGEST_KEYS=[{"key":"autter_rt_ci_single_server","orgId":"ci","repositoryId":"ci"}]
+          EOF
+          cd box
+          docker compose version
+          docker compose up -d --wait clickhouse otlp-ingester minio
+      - name: Roll in this compose file with the deploy workflow's command
+        working-directory: box
+        run: |
+          before="$(docker compose ps -q clickhouse)"
+          cp ../deploy/single-server/docker-compose.yml docker-compose.yml
+          echo "What 'up -d otlp-ingester' without --no-deps would do:"
+          docker compose up -d --dry-run otlp-ingester 2>&1 || true
+          # deploy-single-server.yml (minus its pull: the :ci image is local)
+          docker compose up -d --no-deps otlp-ingester
+          after="$(docker compose ps -q clickhouse)"
+          if [ -z "$before" ] || [ "$before" != "$after" ]; then
+            echo "::error::the deploy command recreated ClickHouse ($before -> $after)"; exit 1
+          fi
+          echo "ClickHouse untouched: $after"
+      - name: No archive variables (every other self-hoster)
+        working-directory: box
+        run: |
+          q() { curl -sS --fail-with-body -u "default:$CH_PASSWORD" http://127.0.0.1:8123/ --data-binary "$1"; }
+          fail() { echo "::error::$*"; exit 1; }
+          start=$(date +%s)
+          docker compose up -d --wait clickhouse
+          echo "ClickHouse recreated and healthy in $(( $(date +%s) - start )) s"
+          docker compose up -d --wait otlp-ingester
+          docker compose ps
+          curl -fsS http://127.0.0.1:4318/healthz; echo
+          [ "$(q 'SELECT count() FROM system.named_collections')" = 0 ] || fail "a named collection exists"
+          docker compose exec -T clickhouse ls -l /etc/clickhouse-server/config.d /etc/clickhouse-server/users.d
+          if docker compose exec -T clickhouse ls /etc/clickhouse-server/config.d /etc/clickhouse-server/users.d | grep autter; then
+            fail "the collection files were written"
+          fi
+          logs="$(docker compose logs --no-color clickhouse; docker compose exec -T clickhouse sh -c 'cat /var/log/clickhouse-server/clickhouse-server.err.log 2>/dev/null || true')"
+          if grep -iE 'Env variable is not set|autter: archive|<(Error|Warning)>.*named.collection' <<<"$logs"; then
+            fail "ClickHouse logged something about the archive collection"
+          fi
+      - name: With the archive variables
+        working-directory: box
+        run: |
+          q() { curl -sS --fail-with-body -u "default:$CH_PASSWORD" http://127.0.0.1:8123/ --data-binary "$1"; }
+          fail() { echo "::error::$*"; exit 1; }
+          docker run --rm --network autter-runtime_default --entrypoint sh minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
+            "until mc alias set l http://minio:9000 $CI_MINIO_USER $CI_MINIO_SECRET; do sleep 1; done; mc mb --ignore-existing l/archive"
+          cat >> .env <<EOF
+          ARCHIVE_S3_NAMED_COLLECTION=autter_archive
+          ARCHIVE_S3_URL=http://minio:9000/archive/single-server
+          ARCHIVE_S3_COLLECTION_ACCESS_KEY_ID=$CI_MINIO_USER
+          ARCHIVE_S3_COLLECTION_SECRET_ACCESS_KEY=$CI_MINIO_SECRET
+          ARCHIVE_RETENTION_DAYS=365
+          EOF
+          start=$(date +%s)
+          docker compose up -d --wait clickhouse
+          echo "ClickHouse recreated and healthy in $(( $(date +%s) - start )) s"
+          docker compose up -d --wait otlp-ingester
+          docker compose ps
+          docker compose logs --no-color clickhouse | grep 'autter: archive' || fail "the entrypoint did not define the collection"
+          [ "$(q 'SELECT name FROM system.named_collections')" = autter_archive ] || fail "no autter_archive collection"
+          collection="$(q 'SELECT collection FROM system.named_collections')"
+          echo "system.named_collections: $collection"
+          grep -qF '[HIDDEN]' <<<"$collection" || fail "collection values are not hidden"
+          if grep -qF -- "$CI_MINIO_SECRET" <<<"$collection"; then fail "the secret is shown"; fi
+          probe="probe-$(date +%s).parquet"
+          q "INSERT INTO FUNCTION s3(autter_archive, filename = '$probe', format = 'Parquet') SELECT 1 AS x"
+          [ "$(q "SELECT sum(x) FROM s3(autter_archive, filename = '$probe', format = 'Parquet')")" = 1 ] || fail "probe not read back"
+          echo "probe written and read back through autter_archive"
+          # The ingester's own archive pass: wait for the boot to swap the
+          # spans TTL for the backstop, add 25 spans 10 days old, restart it
+          # (the first pass is a minute after start), wait for the pass.
+          for i in $(seq 1 30); do
+            q "SELECT engine_full FROM system.tables WHERE database = 'autter_runtime' AND name = 'runtime_spans'" | grep 'toIntervalDay(14)' >/dev/null && break
+            [ "$i" = 30 ] && fail "the spans TTL never became the 14-day backstop"; sleep 2
+          done
+          day="$(date -u -d '10 days ago' +%F)"
+          q "INSERT INTO autter_runtime.runtime_spans (org_id, repository_id, service, environment, trace_id, span_id, name, duration_ms, started_at)
+             SELECT 'ci', 'ci', 'api', 'production', concat('c', leftPad(toString(number), 30, '0')), 's', 'GET /x', 1.5, toDateTime64('$day 10:00:00', 3, 'UTC') FROM numbers(25)"
+          docker compose restart otlp-ingester
+          for i in $(seq 1 60); do
+            # runtime_archive_log appears with the first pass.
+            status="$(q "SELECT argMax(status, updated_at) FROM autter_runtime.runtime_archive_log WHERE table_name = 'runtime_spans' AND day = '$day'" 2>/dev/null || true)"
+            [ "$status" = archived ] && break
+            [ "$i" = 60 ] && { docker compose logs --no-color otlp-ingester | tail -n 50; fail "the ingester did not archive $day (status '$status')"; }
+            sleep 5
+          done
+          [ "$(q "SELECT count() FROM s3(autter_archive, filename = 'runtime_spans/org=ci/date=$day/g*.parquet', format = 'Parquet')")" = 25 ] || fail "archived spans not read back"
+          echo "the ingester archived $day through autter_archive"
+          docker compose logs --no-color otlp-ingester | grep 'runtime archive' || true
+          if docker compose logs --no-color otlp-ingester | grep 'pass stopped'; then fail "an archive pass stopped"; fi
+      - name: archive-e2e through the named collection
+        run: npm run e2e:archive -w @autter/otlp-ingester
+        env:
+          CLICKHOUSE_URL: http://127.0.0.1:8123
+          CLICKHOUSE_ADMIN_PASSWORD: ci-clickhouse-password
+          ARCHIVE_E2E_NAMED_COLLECTION: autter_archive
+      - name: The key is nowhere but ClickHouse's environment
+        working-directory: box
+        run: |
+          q() { curl -sS --fail-with-body -u "default:$CH_PASSWORD" http://127.0.0.1:8123/ --data-binary "$1"; }
+          fail() { echo "::error::$*"; exit 1; }
+          # grep reads to the end (no -q): with pipefail an early exit fails the pipe.
+          hit() { grep -F -- "$CI_MINIO_SECRET" >/dev/null; }
+          docker compose exec -T clickhouse env | hit || fail "control: the secret is not in ClickHouse's environment"
+          q 'SYSTEM FLUSH LOGS'
+          hex="$(printf %s "$CI_MINIO_SECRET" | od -An -tx1 | tr -d ' \n')"
+          [ "$(q "SELECT count() FROM system.query_log WHERE query LIKE '%autter_archive%'")" -gt 0 ] || fail "control: query_log has no archive queries"
+          [ "$(q "SELECT count() FROM system.query_log WHERE position(query, unhex('$hex')) > 0 OR position(exception, unhex('$hex')) > 0")" = 0 ] || fail "the secret is in system.query_log"
+          if [ "$(q "EXISTS TABLE system.text_log")" = 1 ]; then
+            [ "$(q "SELECT count() FROM system.text_log WHERE position(message, unhex('$hex')) > 0")" = 0 ] || fail "the secret is in system.text_log"
+          fi
+          if docker compose logs --no-color clickhouse otlp-ingester | hit; then fail "the secret is in a container log"; fi
+          if docker compose exec -T otlp-ingester env | hit; then fail "the secret is in the ingester's environment"; fi
+          found="$(docker compose exec -T clickhouse sh -c 'grep -rlF -- "$0" /etc/clickhouse-server /var/lib/clickhouse/preprocessed_configs /var/log/clickhouse-server || true' "$CI_MINIO_SECRET")"
+          [ -z "$found" ] || fail "the secret is in files: $found"
+          docker compose exec -T clickhouse ls /var/lib/clickhouse/preprocessed_configs
+          echo "secret found only in ClickHouse's environment"
+      - name: Archive variables removed again
+        working-directory: box
+        run: |
+          q() { curl -sS --fail-with-body -u "default:$CH_PASSWORD" http://127.0.0.1:8123/ --data-binary "$1"; }
+          sed -i '/^ARCHIVE_/d' .env
+          docker compose up -d --wait clickhouse otlp-ingester
+          [ "$(q 'SELECT count() FROM system.named_collections')" = 0 ] || { echo "::error::the collection outlived its variables"; exit 1; }
+          curl -fsS http://127.0.0.1:4318/healthz; echo
+      - name: compose logs
+        if: failure()
+        working-directory: box
+        run: docker compose logs --no-color clickhouse otlp-ingester | tail -n 300
+      - name: docker compose down
+        if: always()
+        working-directory: box
+        run: docker compose down -v || true
+
   examples-e2e:
     # The quickstart as a new user runs it: `docker compose up` with no .env
     # and no key step (ClickHouse 24.8 + the ingester with its built-in local

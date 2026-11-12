@@ -6,6 +6,69 @@ services:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-autter_runtime}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      # Archive bucket as a ClickHouse named collection (optional, README
+      # "Archive bucket"): with ARCHIVE_S3_NAMED_COLLECTION and ARCHIVE_S3_URL
+      # set, the entrypoint below defines that collection with this URL and
+      # these keys. The keys go to ClickHouse only, never to the ingester.
+      ARCHIVE_S3_NAMED_COLLECTION: ${ARCHIVE_S3_NAMED_COLLECTION:-}
+      ARCHIVE_S3_URL: ${ARCHIVE_S3_URL:-}
+      ARCHIVE_S3_COLLECTION_ACCESS_KEY_ID: ${ARCHIVE_S3_COLLECTION_ACCESS_KEY_ID:-}
+      ARCHIVE_S3_COLLECTION_SECRET_ACCESS_KEY: ${ARCHIVE_S3_COLLECTION_SECRET_ACCESS_KEY:-}
+    # The image's own entrypoint, after writing (or removing) two files for
+    # the collection. Without ARCHIVE_S3_NAMED_COLLECTION and ARCHIVE_S3_URL
+    # nothing is written and ClickHouse starts exactly as the plain image.
+    # With them:
+    #   config.d/zz-autter-archive-collection.xml  the collection; each value
+    #     is `from_env`, so the keys are read from this container's
+    #     environment at start and never written to a file, and
+    #     hide_in_preprocessed keeps them out of preprocessed_configs/ on the
+    #     data volume. system.named_collections shows them as [HIDDEN].
+    #   users.d/zz-autter-archive-collection.xml   named_collection_control
+    #     for CLICKHOUSE_USER (ClickHouse refuses s3(<collection>, ...) to a
+    #     users.xml user without it); not show_named_collections_secrets.
+    # A bad value is reported in `docker compose logs clickhouse` and the
+    # collection is skipped: ClickHouse still starts. ($$ is a literal $.)
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -eu
+        conf=/etc/clickhouse-server/config.d/zz-autter-archive-collection.xml
+        users=/etc/clickhouse-server/users.d/zz-autter-archive-collection.xml
+        rm -f "$$conf" "$$users"
+        name="$${ARCHIVE_S3_NAMED_COLLECTION:-}"
+        url="$${ARCHIVE_S3_URL:-}"
+        key="$${ARCHIVE_S3_COLLECTION_ACCESS_KEY_ID:-}"
+        secret="$${ARCHIVE_S3_COLLECTION_SECRET_ACCESS_KEY:-}"
+        user="$${CLICKHOUSE_USER:-default}"
+        skip() { echo "autter: archive named collection not created: $$*" >&2; }
+        if [ -z "$$name" ] || [ -z "$$url" ]; then
+          if [ -n "$$key$$secret" ]; then
+            skip "ARCHIVE_S3_COLLECTION_* keys are set but ARCHIVE_S3_NAMED_COLLECTION or ARCHIVE_S3_URL is not"
+          fi
+        elif ! [[ "$$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ ]]; then
+          skip "ARCHIVE_S3_NAMED_COLLECTION is not an identifier"
+        elif ! [[ "$$user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$$ ]]; then
+          skip "CLICKHOUSE_USER cannot be written as an XML element"
+        elif [[ -n "$$key" && -z "$$secret" || -z "$$key" && -n "$$secret" ]]; then
+          skip "set both ARCHIVE_S3_COLLECTION_ACCESS_KEY_ID and ARCHIVE_S3_COLLECTION_SECRET_ACCESS_KEY, or neither"
+        elif [[ "$$url$$key$$secret" == *'<'* || "$$url$$key$$secret" == *'&'* ]]; then
+          # from_env values are parsed as XML: these would stop ClickHouse.
+          skip "the URL or a key contains < or &"
+        else
+          {
+            echo "<clickhouse><named_collections><$$name hide_in_preprocessed=\"true\">"
+            echo "<url from_env=\"ARCHIVE_S3_URL\"/>"
+            if [ -n "$$key" ]; then
+              echo "<access_key_id from_env=\"ARCHIVE_S3_COLLECTION_ACCESS_KEY_ID\"/>"
+              echo "<secret_access_key from_env=\"ARCHIVE_S3_COLLECTION_SECRET_ACCESS_KEY\"/>"
+            fi
+            echo "</$$name></named_collections></clickhouse>"
+          } > "$$conf"
+          echo "<clickhouse><users><$$user><named_collection_control>1</named_collection_control></$$user></users></clickhouse>" > "$$users"
+          echo "autter: archive named collection $$name defined for user $$user"
+        fi
+        exec /entrypoint.sh
     ulimits:
       nofile:
         soft: 262144
@@ -51,6 +114,9 @@ services:
       # table's hot window go to Parquet in a bucket ClickHouse can write
       # (S3, GCS's S3 endpoint with HMAC keys, MinIO, R2). Unset = off, the
       # TTLs delete as before. The one ingester here runs the archive job.
+      # With ARCHIVE_S3_NAMED_COLLECTION, ClickHouse defines the collection
+      # (see the clickhouse service) and ARCHIVE_S3_ACCESS_KEY_ID/SECRET stay
+      # unset: the ingester refuses keys next to a named collection.
       OCCURRENCE_TTL_DAYS: ${OCCURRENCE_TTL_DAYS:-14}
       SPAN_TTL_DAYS: ${SPAN_TTL_DAYS:-7}
       ARCHIVE_S3_URL: ${ARCHIVE_S3_URL:-}

@@ -833,8 +833,18 @@ export interface ArchiveRunLock {
 	release(): Promise<void>;
 }
 
+/** The ClickHouse error code and type travel as properties (@clickhouse/client), not always in the message. */
+function errorText(err: unknown): string {
+	const e = err as { message?: unknown; code?: unknown; type?: unknown };
+	return [err instanceof Error ? err.message : String(err), e?.code !== undefined ? `Code: ${e.code}` : "", e?.type ?? ""].join(" ");
+}
+
 function isAlreadyExists(err: unknown): boolean {
-	return /TABLE_ALREADY_EXISTS|Code: 57\b|already exists/i.test(err instanceof Error ? err.message : String(err));
+	return /TABLE_ALREADY_EXISTS|Code: 57\b|already exists/i.test(errorText(err));
+}
+
+export function isUnknownTable(err: unknown): boolean {
+	return /UNKNOWN_TABLE|Code: 60\b|Unknown table|does not exist|doesn't exist/i.test(errorText(err));
 }
 
 /**
@@ -865,8 +875,8 @@ export class ClickHouseArchiveLock implements ArchiveRunLock {
 			`SELECT comment AS holder, dateDiff('second', greatest(metadata_modification_time, (SELECT toDateTime(max(at)) FROM ${this.table})), now()) AS idle_seconds
 			FROM system.tables WHERE database = ${chString(this.database)} AND name = ${chString(ARCHIVE_LOCK_TABLE)}`,
 		).catch((err: unknown) => {
-			// Dropped between the two reads: nobody holds it.
-			if (/UNKNOWN_TABLE|Code: 60\b|does not exist|doesn't exist/i.test(err instanceof Error ? err.message : String(err))) return [];
+			// No lock table (or dropped meanwhile): nobody holds it.
+			if (isUnknownTable(err)) return [];
 			throw err;
 		});
 		return row ? { holder: String(row.holder), idleSeconds: Number(row.idle_seconds) || 0 } : null;
@@ -1088,7 +1098,7 @@ export interface RuntimeArchiverOptions {
 
 /** An s3() INSERT refused because the object exists (objects are written once, never replaced). */
 function isObjectExists(err: unknown): boolean {
-	return /already exists/i.test(err instanceof Error ? err.message : String(err));
+	return /already exists/i.test(errorText(err));
 }
 
 export class RuntimeArchiver {

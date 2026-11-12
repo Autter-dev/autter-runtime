@@ -12,6 +12,7 @@ import {
 	dayFromPartitionId,
 	effectiveBackstopDays,
 	hotCutoffDay,
+	isUnknownTable,
 	noTtlWarning,
 	overdueDays,
 	orgArchiveKey,
@@ -1023,4 +1024,25 @@ test("archive turned off with rows still staged: they are reported with the stat
 		warnings.some((w) => w.includes("runtime_spans_archive_stage holds 3 rows of 1 day(s) (2026-10-30)") && w.endsWith("ALTER TABLE db.runtime_spans_archive_stage MOVE PARTITION ID '20261030' TO TABLE db.runtime_spans")),
 		warnings.join("\n"),
 	);
+});
+
+test("the lock reads a missing lock table as free, however ClickHouse words it", async () => {
+	// @clickhouse/client: the code and type are properties; the message is ClickHouse's text.
+	const real = Object.assign(new Error("Unknown table expression identifier 'db.runtime_archive_lock' in scope (SELECT toDateTime(max(at)) FROM db.runtime_archive_lock)."), {
+		code: "60",
+		type: "UNKNOWN_TABLE",
+	});
+	assert.equal(isUnknownTable(real), true);
+	assert.equal(isUnknownTable(Object.assign(new Error("boom"), { code: "60" })), true);
+	assert.equal(isUnknownTable(new Error("Code: 241. Memory limit exceeded")), false);
+	const created: string[] = [];
+	const db: ArchiveDb = {
+		query: async (sql) => {
+			if (/runtime_archive_lock/.test(sql)) throw real;
+			return [];
+		},
+		command: async (sql) => void created.push(sql),
+	};
+	assert.equal(await new ClickHouseArchiveLock(db, "db", "me").hold(), true);
+	assert.match(created[0]!, /^CREATE TABLE db\.runtime_archive_lock /);
 });

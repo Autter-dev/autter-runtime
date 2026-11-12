@@ -124,19 +124,38 @@ calls that failed or were slow:
 | Call | Exported | `autter.llm.content` |
 | --- | --- | --- |
 | Failed (ERROR status or an `exception` event) | Everything | `error` |
-| Slow: longer than 500 ms and that model's rolling p95 | Everything | `slow` |
+| Slow: see below | Everything | `slow` |
 | Any other call | Everything except the content | `omitted` |
 | A span with no content attributes | Unchanged | not set |
 
-"That model's rolling p95" is an estimate the process keeps per span name and
-model from every call it made in the last few minutes. Content kept for being
-slow shares the `retainSlowTracesPerMinute` budget (default 60 a minute per
-process, a sixth of it per model). Failed calls always keep their content.
+Slow means longer than 20 s until the process has seen about 50 recent calls
+of that span name and model; from then on, longer than both 500 ms and that
+model's p95 baseline (an estimate the process keeps from every call, older
+calls counting half every 15 minutes). The absolute 20 s threshold keeps a
+low-volume model, whose few calls all take seconds, from keeping the content
+of nearly every call. Content kept for being slow shares the
+`retainSlowTracesPerMinute` budget (default 60 a minute per process, a sixth
+of it per model). Failed calls always keep their content.
 
-Content is these attributes, and the GenAI message events
+The policy covers LLM call spans (Vercel AI SDK, OTel GenAI, OpenInference
+`openinference.span.kind` `LLM` / `EMBEDDING`, OpenLLMetry `llm.request.type`)
+and the AI framework spans around them that carry the same inputs and
+outputs: any OpenInference span (chains, agents, tools, retrievers,
+rerankers), Traceloop `traceloop.span.kind` workflows, tasks, agents and
+tools, and any span with `llm.*` or `gen_ai.*` attributes. Only LLM call
+spans skip head sampling.
+
+Content is these attributes (key lists checked against
+`@opentelemetry/semantic-conventions` 1.43, `@arizeai/openinference-semantic-conventions`
+and `@traceloop/ai-semantic-conventions`), the GenAI message events
 (`gen_ai.system.message`, `gen_ai.user.message`, `gen_ai.assistant.message`,
 `gen_ai.tool.message`, `gen_ai.choice`, `gen_ai.content.prompt`,
-`gen_ai.content.completion`, `gen_ai.client.inference.operation.details`):
+`gen_ai.content.completion`, `gen_ai.client.inference.operation.details`, and
+any other `gen_ai.*` event except `gen_ai.evaluation.result` and
+`gen_ai.client.operation.exception`), OpenLLMetry's `db.query.result` event,
+content keys on span links, and generic content keys (`content`, `body`,
+`text`, `message`, `input`, `output`, `prompt`, `completion`, `arguments`,
+`result`, `tool_calls`) on any other event of such a span:
 
 - Vercel AI SDK: `ai.prompt`, `ai.prompt.messages`, `ai.prompt.tools`,
   `ai.prompt.system`, `ai.response.text`, `ai.response.toolCalls`,
@@ -145,18 +164,43 @@ Content is these attributes, and the GenAI message events
   `ai.result.text` / `toolCalls` / `object`, `ai.toolCall.args` / `result` /
   `input` / `output`, `ai.value`, `ai.values`, `ai.embedding`,
   `ai.embeddings`.
-- OTel GenAI: `gen_ai.prompt`, `gen_ai.completion`, `gen_ai.prompt.*`,
-  `gen_ai.completion.*` (OpenLLMetry's indexed form), `gen_ai.input.messages`,
+- OTel GenAI: `gen_ai.prompt`, `gen_ai.completion`, `gen_ai.input.messages`,
   `gen_ai.output.messages`, `gen_ai.system_instructions`,
   `gen_ai.tool.definitions`, `gen_ai.tool.call.arguments`,
-  `gen_ai.tool.call.result`.
-- OpenInference: `input.value`, `output.value`, `llm.input_messages.*`,
-  `llm.output_messages.*`, `llm.prompts`.
+  `gen_ai.tool.call.result`, `gen_ai.retrieval.query.text`,
+  `gen_ai.retrieval.documents`, `gen_ai.evaluation.explanation`.
+- OpenLLMetry / Traceloop: `gen_ai.prompt.N.*` and `gen_ai.completion.N.*`
+  except their `role` and `finish_reason`, `llm.request.functions.*`,
+  `traceloop.entity.input`, `traceloop.entity.output`,
+  `gen_ai.guardrail.input`, `gen_ai.guardrail.output`, `mcp.response.value`,
+  `db.query.result.document`, `db.vector.query.result.N.*` except ids and
+  scores.
+- OpenInference: `input.value`, `output.value`, `input.documents` /
+  `images`, `output.documents` / `images`, `llm.input_messages.*`,
+  `llm.output_messages.*` (except message roles), `llm.prompts`,
+  `llm.prompt_template.template`, `llm.prompt_template.variables`,
+  `llm.function_call`, `llm.invocation_parameters`, `llm.tools.*`,
+  `tool.parameters`, `tool.json_schema`, `retrieval.documents.*` and
+  `reranker.input_documents.*` / `output_documents.*` (except document ids
+  and scores), `reranker.query`, `embedding.embeddings.*` (except the model
+  name), `embedding.text`, `embedding.vector`, `document.content`,
+  `message.content`, `message.contents`, `message.tool_calls`,
+  `message.function_call_arguments_json`, `tool_call.function.arguments`,
+  `message_content.*` content, `audio.transcript`.
 
-Usage (`ai.usage.*`, `gen_ai.usage.*`), cost, model and provider, finish
-reasons, settings, ids and `ai.telemetry.metadata.*` always stay, so the
-ingester's usage and cost rows are the same for a call with or without its
-content.
+Usage (`ai.usage.*`, `gen_ai.usage.*`, `llm.token_count.*`), cost
+(`llm.cost.*`), model and provider, finish reasons, roles, the prompt
+template version, settings, ids and `ai.telemetry.metadata.*` always stay, so
+the ingester's usage and cost rows are the same for a call with or without
+its content.
+
+With `llmContent: "never"`, a failed call keeps its ERROR status and its
+exception events, but its status message and the exceptions' messages (and
+the message lines of their stack traces), which can quote the completion,
+become `[omitted]`; the exception type and stack frames stay. A span the
+policy cannot read is exported without content; one that cannot even be
+stripped is dropped, never the rest of its batch. The policy never changes
+the span object other processors hold: it exports a copy.
 
 `llmContent` changes this:
 

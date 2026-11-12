@@ -24,7 +24,7 @@ What is exported for each request:
 | Trace of a request with an error | 100%, the whole local trace | `retainTracesOnError` |
 | Trace of a slow request | the whole local trace, rate limited (below) | `retainTracesAboveMs`, `retainSlowTracesPerMinute` |
 
-A request is slow when its root server span takes longer than both 500 ms and its route's rolling p95. The SDK keeps that estimate per method and route template, in the process, from every request it served in the last few minutes (sampled or not; older requests count half every 5 minutes). Until a route has about 20 recent requests, only the 500 ms floor applies. The 500 ms floor matches the detector's rule that a regression adds at least 500 ms, so no faster request could be the evidence for one.
+A request is slow when its root server span takes longer than both 500 ms and its route's p95 baseline. The SDK keeps that baseline per method and route template, in the process, from every request it served (sampled or not; older requests count half every 15 minutes). Until a route has about 20 recent requests, only the 500 ms floor applies. A regression does not absorb the baseline: when a tenth of the route's requests in the last minute or so are above it, those requests stop feeding it, and from a fifth the baseline is frozen. A route that becomes and stays slow therefore keeps a steady sample of slow traces, up to its share of the budget every minute, instead of only the first few; after an hour regressed, the baseline adopts the new latency. The baseline is per process: a process that starts already slow (a deploy that regressed) has no healthy baseline to compare with. The 500 ms floor matches the detector's rule that a regression adds at least 500 ms, so no faster request could be the evidence for one.
 
 Slow traces are rate limited so a slow incident can't flood export: at most `retainSlowTracesPerMinute` (default 60) a minute per process, in bursts of up to 20, and at most a sixth of that per route. When the budget is spent, slow requests fall back to head sampling.
 
@@ -34,7 +34,7 @@ Every exported request span says why it was kept, in `autter.retention_reason`:
 - `slow`: kept because the request was slow.
 - `error`: kept because the trace had an error.
 
-Spans kept by tail retention (`slow` and `error`) also carry `autter.tail_retained = true`. The ingester counts no request from them, because the histogram already counts each one.
+Spans kept by tail retention (`slow` and `error`) also carry `autter.tail_retained = true`. The ingester counts no request from them (either mark is enough), because the histogram already counts each one. Anything that estimates counts, rates or percentiles from stored spans must use only random samples (`head`, or no reason for other senders); the regression evidence prefers `slow` traces for the slow request.
 
 Overrides:
 
@@ -46,13 +46,13 @@ initAutterServer({ ..., retainSlowTracesPerMinute: 600 }); // a larger budget
 
 Up to 1.11, slow-trace retention was off unless `retainTracesAboveMs` was set, and it applied to any server span. It now applies to the local root server span only.
 
-The buffer has per-trace, total-span, trace-count, and time limits. Retention is best effort, not a guarantee of a complete distributed trace. It does not retain spans from another process. Requests longer than the buffer lifetime (30 s) or high traffic can produce partial traces.
+The buffer has per-trace (512 spans), total-span (10,000), byte (about 16 MB), trace-count and idle-time (60 s without a span) limits. Over its budget it drops the newest in-flight traces whole, so the oldest requests, the likeliest to end slow, keep their child spans; a dropped trace, or one over 512 spans, is never exported, not even in part. Retention is best effort, not a guarantee of a complete distributed trace. It does not retain spans from another process.
 
 The SDK adds a process instance ID and explicit request histogram bounds through two minutes. Add the required database or dependency instrumentation through the existing `instrumentations` option. HTTP instrumentation alone cannot measure every database call or connection wait.
 
 ## Edge functions
 
-`@autter/runtime-edge` sends no metrics, but its request summaries cover every request and are never sampled. The ingester builds latency histogram points from the summaries marked `autter.request.counted_by = "summary"` (the default; `countRequests: false` turns it off), one per service, environment, release, method, route and minute of a batch, with the same bucket bounds as the Node SDK. A summary needs `http.request.method` and a route. A retried batch replaces its points. Node and Next.js summaries are never used here, because their histograms already count each request.
+`@autter/runtime-edge` sends no metrics, but its request summaries cover every request and are never sampled. The ingester builds latency histogram points from the summaries marked `autter.request.counted_by = "summary"` (the default; `countRequests: false` turns it off), with the same bucket bounds as the Node SDK. runtime-edge exports once per request, so the ingester adds summaries in memory to one point per service, environment, release, method, route and minute, across batches, and writes the point about 15 seconds after the minute ends (and at shutdown). A retried batch adds nothing twice (it goes through the request's insert receipts, and a record already in an open point is skipped); a late summary for a minute already written becomes a second point for it, and readers sum a minute's points. A summary needs `http.request.method` and a route. It is left out, and counted as a `latency_summary_invalid` drop, without its own timestamp, with a timestamp more than 2 hours old or 5 minutes ahead, or with a duration that is missing, negative, not a number or over 15 minutes. Each service and environment gets at most 200 routes in 10 minutes (`latency_routes_over_limit` past that). A route of a service that also sends Node histograms for it gets no edge points, so its requests are not counted twice. Node and Next.js summaries are never used here, because their histograms already count each request. An ingester crash loses the open minutes' edge points (the summaries stay in `runtime_logs`, the request counts in `runtime_metrics_1m`).
 
 ## External OTel exporters
 

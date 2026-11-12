@@ -61,8 +61,17 @@ on the ClickHouse server instead:
 ARCHIVE_S3_NAMED_COLLECTION=autter_archive
 ```
 
-The URL in the collection must end with `/`: object paths are appended to it
-as `filename`.
+Object paths are appended to the collection's URL as `filename` (ClickHouse
+joins them with a `/`, so the URL may end with one or not). The user the
+ingester and the backend connect as needs to be allowed to use the
+collection: `named_collection_control` for a `users.xml` user, or
+`GRANT NAMED COLLECTION ON autter_archive TO …` for a SQL one.
+
+On the single server (`deploy/single-server/`) you do not write this file:
+the `clickhouse` service defines the collection from `.env`
+(`ARCHIVE_S3_NAMED_COLLECTION`, `ARCHIVE_S3_URL`,
+`ARCHIVE_S3_COLLECTION_ACCESS_KEY_ID`, `ARCHIVE_S3_COLLECTION_SECRET_ACCESS_KEY`)
+and grants it; see its README, "Archive bucket".
 
 | Variable | Default | |
 | --- | --- | --- |

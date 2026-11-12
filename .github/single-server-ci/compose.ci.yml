@@ -1,0 +1,17 @@
+# CI only (the single-server job in .github/workflows/ci.yml), layered over
+# deploy/single-server/docker-compose.yml: a MinIO bucket on the stack's
+# network, and ClickHouse and the ingester on the runner's loopback so the
+# checks can query them. Nothing else about the two services changes.
+services:
+  clickhouse:
+    ports:
+      - "127.0.0.1:8123:8123"
+  otlp-ingester:
+    ports:
+      - "127.0.0.1:4318:4318"
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${CI_MINIO_USER:?}
+      MINIO_ROOT_PASSWORD: ${CI_MINIO_SECRET:?}

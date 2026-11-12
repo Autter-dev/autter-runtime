@@ -3,9 +3,13 @@ name: Deploy ingester (single server)
 # Rolls the otlp-ingester on a self-hosted EC2/Lightsail box running
 # deploy/single-server/docker-compose.yml — SSHes in, refreshes
 # docker-compose.yml, pulls the image, and recreates the service. ClickHouse
-# and Caddy are left untouched (only the otlp-ingester service is recreated);
-# in particular the Caddyfile is never overwritten — boxes customize it with
-# extra routes, and a routine ingester roll must not clobber that.
+# and Caddy are left untouched (only the otlp-ingester service is recreated,
+# `--no-deps`: without it Compose also recreates a dependency whose
+# definition changed, e.g. ClickHouse's, restarting the database during a
+# routine roll; apply a ClickHouse change by hand, deploy/single-server/
+# README.md); in particular the Caddyfile is never overwritten — boxes
+# customize it with extra routes, and a routine ingester roll must not
+# clobber that.
 #
 # Ingester code changes deploy from workflow_run, after "Docker image (GHCR)"
 # has pushed that commit's image, and pin the box to its sha-<short> tag.
@@ -81,5 +85,5 @@ jobs:
             fi
             echo "Deploying otlp-ingester:${INGESTER_TAG:-${pinned:-latest}}"
             docker compose pull otlp-ingester
-            docker compose up -d otlp-ingester
+            docker compose up -d --no-deps otlp-ingester
             docker image prune -f

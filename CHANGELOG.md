@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-Finishes slow-trace retention and tiered retention (both 1.16.0). Packages: `runtime-node`, `otlp-ingester`, and the local `dashboard`. Any upgrade order works; upgrade the ingester for edge histograms that count each request once.
+## [1.17.0] - 2026-11-12
+
+Packages: `runtime-node` 1.13.0, `otlp-ingester` 1.15.0, and the local `dashboard` image. `runtime-next` stays 1.9.0 and picks up the new `runtime-node` through its existing range. Finishes slow-trace retention and tiered retention (both 1.16.0). Any upgrade order works; upgrade the ingester for edge histograms that count each request once.
 
 ### Fixes
 

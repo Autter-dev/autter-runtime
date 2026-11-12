@@ -211,7 +211,8 @@ jobs:
              SELECT 'ci', 'ci', 'api', 'production', concat('c', leftPad(toString(number), 30, '0')), 's', 'GET /x', 1.5, toDateTime64('$day 10:00:00', 3, 'UTC') FROM numbers(25)"
           docker compose restart otlp-ingester
           for i in $(seq 1 60); do
-            status="$(q "SELECT argMax(status, updated_at) FROM autter_runtime.runtime_archive_log WHERE table_name = 'runtime_spans' AND day = '$day'")"
+            # runtime_archive_log appears with the first pass.
+            status="$(q "SELECT argMax(status, updated_at) FROM autter_runtime.runtime_archive_log WHERE table_name = 'runtime_spans' AND day = '$day'" 2>/dev/null || true)"
             [ "$status" = archived ] && break
             [ "$i" = 60 ] && { docker compose logs --no-color otlp-ingester | tail -n 50; fail "the ingester did not archive $day (status '$status')"; }
             sleep 5

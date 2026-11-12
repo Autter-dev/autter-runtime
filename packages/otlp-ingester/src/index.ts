@@ -3,7 +3,7 @@ import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
 
 const config = loadConfig();
-const { app, store, sink, reportIngesterInfo, drops, collapse, limits, archiver, edgeLatency } = createIngesterApp(config);
+const { app, store, sink, reportIngesterInfo, drops, collapse, limits, archiver, archiveStatus, edgeLatency } = createIngesterApp(config);
 const sharingWarning = limitsWarning(config);
 if (sharingWarning) console.warn(`WARNING: ${sharingWarning}`);
 
@@ -17,12 +17,18 @@ const server = app.listen(config.port, () => {
 
 // Warm the schema at boot so the first ingest request doesn't pay for DDL.
 if (store.configured) {
-	store.ensureSchema().then(reportIngesterInfo).catch((err) => {
-		console.error(
-			"clickhouse schema bootstrap failed (will retry on first ingest):",
-			err?.message ?? err,
-		);
-	});
+	store
+		.ensureSchema()
+		.then(reportIngesterInfo)
+		.catch((err) => {
+			console.error(
+				"clickhouse schema bootstrap failed (will retry on first ingest):",
+				err?.message ?? err,
+			);
+		})
+		// Tiered retention: record that an archive is configured and warn when
+		// no pass has succeeded for a while (archive.ts), then hourly.
+		.finally(() => archiveStatus?.start());
 }
 if (config.archive && !archiver && !store.configured) {
 	console.warn("ARCHIVE_S3_URL is set but CLICKHOUSE_URL is not: nothing to archive");
@@ -57,6 +63,7 @@ async function shutdown(signal: string) {
 			// Write the edge latency points of the minutes still open.
 			.finally(() => edgeLatency.stop())
 			.finally(() => drops.stop())
+			.finally(() => archiveStatus?.stop())
 			.finally(() => archiver?.stop())
 			.finally(() => store.close())
 			.finally(() => limits.close())

@@ -92,6 +92,7 @@ import {
 import { MIGRATIONS } from "./migrations.js";
 import {
 	archiveSchedulerMode,
+	ArchiveStatusReporter,
 	LocalArchiveLease,
 	RedisArchiveLease,
 	RuntimeArchiver,
@@ -132,6 +133,12 @@ export interface IngesterApp {
 	 * Not started here: index.ts starts it after the schema warm-up.
 	 */
 	archiver: RuntimeArchiver | null;
+	/**
+	 * With an archive configured (every process, whether or not it runs the
+	 * job): records that it is configured, warns when no pass succeeded for
+	 * a while, and feeds `archive` in /healthz. index.ts starts it.
+	 */
+	archiveStatus: ArchiveStatusReporter | null;
 	/** Edge request latency histograms (edge-latency.ts), aggregated per
 	 * minute across batches; `stop()` writes the open minutes. */
 	edgeLatency: EdgeLatencyAggregator;
@@ -233,6 +240,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	// One Redis connection (AUTTER_REDIS_URL) for shared limits and shared
 	// insert receipts; tests that pass their own limit store get neither.
 	const redis = deps.sharedLimits === undefined && config.redisUrl ? connectRedis(config.redisUrl) : null;
+	const archive = createArchive(config, store, redis);
 	const limits = new RateLimits({
 		shared:
 			deps.sharedLimits !== undefined
@@ -692,6 +700,8 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 			},
 			...(sink ? { sink: sink.stats() } : {}),
 			...(collapse.enabled ? { collapse: collapse.stats() } : {}),
+			// Tiered retention: the last pass any process recorded (never affects readiness).
+			...(archive.status ? { archive: archive.status.snapshot() } : {}),
 		};
 	}
 
@@ -1581,37 +1591,41 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		},
 	);
 
-	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys, archiver: createArchiver(config, store, redis), edgeLatency };
+	return { app, store, sink, reportIngesterInfo, drops, collapse, limits, keys, archiver: archive.archiver, archiveStatus: archive.status, edgeLatency };
 }
 
 /**
- * The archive job for this process, or null: no archive configured, no
- * ClickHouse, or another process runs it (archiveSchedulerMode).
+ * The archive job for this process (null: no archive configured, no
+ * ClickHouse, or another process runs it, see archiveSchedulerMode) and,
+ * whenever an archive is configured, its status reporter.
  */
-function createArchiver(
+function createArchive(
 	config: IngesterConfig,
 	store: ClickHouseStore,
 	redis: ReturnType<typeof connectRedis> | null,
-): RuntimeArchiver | null {
+): { archiver: RuntimeArchiver | null; status: ArchiveStatusReporter | null } {
 	const archive = config.archive;
-	if (!archive || !store.configured) return null;
+	if (!archive || !store.configured) return { archiver: null, status: null };
+	const db = store.archiveDb();
 	const mode = archiveSchedulerMode({ scheduler: archive.scheduler, hasRedis: Boolean(redis), replicas: config.replicas ?? 1 });
+	const status = new ArchiveStatusReporter({ db, database: config.clickhouseDatabase, config: archive, runsJob: mode.mode !== "none" });
 	if (mode.mode === "none") {
 		const level = archive.scheduler === "off" ? "log" : "warn";
 		console[level](`runtime archive: this process does not run the archive job (${mode.reason})`);
-		return null;
+		return { archiver: null, status };
 	}
 	const lease =
 		mode.mode === "redis" && redis
 			? new RedisArchiveLease(redis, `autter:runtime-archive:${config.clickhouseDatabase}`)
 			: new LocalArchiveLease();
-	return new RuntimeArchiver({
-		db: store.archiveDb(),
+	const archiver = new RuntimeArchiver({
+		db,
 		database: config.clickhouseDatabase,
 		config: archive,
 		hotDays: store.hotDays(),
 		lease,
 	});
+	return { archiver, status };
 }
 
 /**

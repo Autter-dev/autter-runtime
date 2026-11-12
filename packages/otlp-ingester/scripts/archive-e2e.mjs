@@ -22,6 +22,11 @@
  * the stage table is empty, the log says archived, each org's object reads
  * back with its rows (also with an explicit structure, as the backend reads
  * it); then late rows for the archived day become a second generation.
+ * Then: the ClickHouse lock admits one runner; an existing object is
+ * never replaced (ClickHouse refuses the INSERT, and a rerun counts it); two
+ * runners started together on the same days archive every row exactly once;
+ * a table with no TTL and old rows gets no backstop until they are archived;
+ * a move/recompress rule survives the backstop and ARCHIVE_BACKSTOP_DAYS=0.
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -52,7 +57,9 @@ Object.assign(process.env, {
 
 const { loadConfig } = await import(pathToFileURL(join(DIST, "config.js")).href);
 const { ClickHouseStore } = await import(pathToFileURL(join(DIST, "clickhouse.js")).href);
-const { LocalArchiveLease, RuntimeArchiver, addDays, utcDay, s3Function } = await import(pathToFileURL(join(DIST, "archive.js")).href);
+const { LocalArchiveLease, RuntimeArchiver, ClickHouseArchiveLock, addDays, utcDay, s3Function, parseTtl, reconcileRetentionTtls } = await import(
+	pathToFileURL(join(DIST, "archive.js")).href
+);
 
 let failures = 0;
 function check(condition, message, detail) {
@@ -137,6 +144,64 @@ try {
 	check(Number(total[0].n) === 32, "late rows became a second generation next to the first", total);
 	const generations = await sql(`SELECT count(DISTINCT generation) AS g FROM ${DB}.runtime_archive_log`);
 	check(Number(generations[0].g) === 2, "two generations logged", generations);
+
+	// ── Two runners, the lock, write-once objects ─────────────────
+	const lockA = new ClickHouseArchiveLock(store.archiveDb(), DB, "runner-a");
+	const lockB = new ClickHouseArchiveLock(store.archiveDb(), DB, "runner-b");
+	check((await lockA.hold()) === true, "the first runner takes the ClickHouse lock");
+	check((await lockB.hold()) === false, "a second runner is refused while it is held");
+	await lockA.release();
+	check((await lockB.hold()) === true, "released, the next runner takes it");
+	await lockB.release();
+
+	const db = store.archiveDb();
+	const objectPath = `runtime_spans/org=org_a/date=${oldDay}/g1.parquet`;
+	await db.command(`INSERT INTO FUNCTION ${s3Function(archive, objectPath)} SELECT * FROM ${DB}.runtime_spans LIMIT 1 SETTINGS s3_truncate_on_insert = 0, s3_create_new_file_on_insert = 0`);
+	let refused = "";
+	try {
+		await db.command(`INSERT INTO FUNCTION ${s3Function(archive, objectPath)} SELECT * FROM ${DB}.runtime_spans LIMIT 1 SETTINGS s3_truncate_on_insert = 0, s3_create_new_file_on_insert = 0`);
+	} catch (err) {
+		refused = err instanceof Error ? err.message : String(err);
+	}
+	check(/already exists/i.test(refused), "ClickHouse refuses to replace an existing object (the archiver relies on this message)", refused.slice(0, 300));
+
+	const raceDays = [addDays(today, -9), addDays(today, -8)];
+	for (const day of raceDays) {
+		await insertSpans(day, "org_a", 20, `r${day.replaceAll("-", "")}`);
+		await insertSpans(day, "org_c", 3, `s${day.replaceAll("-", "")}`);
+	}
+	// Two runners at once, each believing it holds the Redis lease (a lost lease, or ARCHIVE_SCHEDULER=on twice).
+	const runner = () => new RuntimeArchiver({ db: store.archiveDb(), database: DB, config: config.archive, hotDays: store.hotDays(), lease: new LocalArchiveLease() });
+	const race = await Promise.all([runner().runOnce(), runner().runOnce()]);
+	check(race.filter((r) => r.skipped === "lock").length >= 1 || race.every((r) => !r.skipped), "the second runner backs off on the lock (or ran after the first)", race);
+	await runner().runOnce();
+	for (const day of raceDays) {
+		const [objects] = await sql(`SELECT count() AS n, uniqExact(trace_id) AS u FROM ${s3Function(archive, `runtime_spans/org={org_a,org_c}/date=${day}/g*.parquet`)}`);
+		const [hot] = await sql(`SELECT count() AS n FROM ${DB}.runtime_spans WHERE toDate(started_at) = '${day}'`);
+		check(Number(objects.n) === 23 && Number(objects.u) === 23 && Number(hot.n) === 0, `two runners: ${day} archived exactly once (23 rows, none left hot)`, { objects, hot });
+	}
+
+	// ── TTL changes never delete what is not archived ──────────────
+	const ttlTable = `${DB}.runtime_llm_calls`;
+	await sql(`ALTER TABLE ${ttlTable} REMOVE TTL`);
+	await sql(`INSERT INTO ${ttlTable} (org_id, repository_id, service, environment, started_at) VALUES ('org_a', 'repo', 'api', 'production', '${addDays(today, -200)} 10:00:00.000')`);
+	const llmArchive = { ...config.archive, tables: ["runtime_llm_calls"] };
+	const plans = await reconcileRetentionTtls({ db, database: DB, archive: llmArchive, hotDays: store.hotDays(), logTtlExplicit: false, now: new Date(), tables: ["runtime_llm_calls"] });
+	const [noTtl] = await sql(`SELECT engine_full FROM system.tables WHERE database = '${DB}' AND name = 'runtime_llm_calls'`);
+	check(plans[0]?.plan.action === "wait" && parseTtl(noTtl.engine_full).kind === "none", "no backstop is added while a 200-day-old row is not archived", { plans, engine: noTtl.engine_full });
+	await sql(`TRUNCATE TABLE ${ttlTable}`);
+	await sql(`ALTER TABLE ${ttlTable} MODIFY TTL toDateTime(started_at) + INTERVAL 30 DAY RECOMPRESS CODEC(ZSTD(9)), toDateTime(started_at) + INTERVAL 400 DAY`);
+	const [real] = await sql(`SELECT engine_full FROM system.tables WHERE database = '${DB}' AND name = 'runtime_llm_calls'`);
+	const parsed = parseTtl(real.engine_full);
+	check(parsed.kind === "rules" && parsed.deleteDays === 400 && parsed.rules.length === 2, "a real engine_full with RECOMPRESS + delete parses (delete 400 days)", real.engine_full);
+	await reconcileRetentionTtls({ db, database: DB, archive: llmArchive, hotDays: store.hotDays(), logTtlExplicit: false, now: new Date(), tables: ["runtime_llm_calls"] });
+	const [cut] = await sql(`SELECT engine_full FROM system.tables WHERE database = '${DB}' AND name = 'runtime_llm_calls'`);
+	const cutParsed = parseTtl(cut.engine_full);
+	check(cutParsed.kind === "rules" && cutParsed.deleteDays === 97 && /RECOMPRESS/.test(cut.engine_full), "an empty table's delete TTL moves to the backstop; RECOMPRESS kept", cut.engine_full);
+	await reconcileRetentionTtls({ db, database: DB, archive: { ...llmArchive, backstopDays: 0 }, hotDays: store.hotDays(), logTtlExplicit: false, now: new Date(), tables: ["runtime_llm_calls"] });
+	const [zero] = await sql(`SELECT engine_full FROM system.tables WHERE database = '${DB}' AND name = 'runtime_llm_calls'`);
+	const zeroParsed = parseTtl(zero.engine_full);
+	check(zeroParsed.kind === "rules" && zeroParsed.deleteDays === null && /RECOMPRESS/.test(zero.engine_full), "ARCHIVE_BACKSTOP_DAYS=0 removes only the delete rule", zero.engine_full);
 } catch (err) {
 	failures += 1;
 	console.error(`  ✖ ${err instanceof Error ? err.message : err}`);

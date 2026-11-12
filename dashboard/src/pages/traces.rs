@@ -51,10 +51,15 @@ pub async fn list(app: &App, ctx: &Ctx, p: &P) -> Result<Markup, ChError> {
              GROUP BY trace_id ORDER BY max(started_at) DESC LIMIT 100)
          GROUP BY trace_id ORDER BY t DESC LIMIT 100"
     );
+    // Counts and percentiles from random samples only: spans the SDK kept
+    // because their trace was slow or failed (`autter.retention_reason`
+    // slow / error, or `autter.tail_retained`) would skew them.
     let ops_sql = format!(
         "SELECT name, service, count() AS n, quantileTDigest(0.5)(duration_ms), quantileTDigest(0.95)(duration_ms),
                 countIf(status = 'error')
          FROM runtime_spans WHERE {w} AND kind IN ('server', 'consumer', 'internal')
+           AND JSONExtractString(attributes, 'autter.retention_reason') NOT IN ('slow', 'error')
+           AND NOT JSONExtractBool(attributes, 'autter.tail_retained')
          GROUP BY name, service ORDER BY n DESC LIMIT 15"
     );
     let (traces, ops) = tokio::try_join!(
@@ -77,7 +82,7 @@ pub async fn list(app: &App, ctx: &Ctx, p: &P) -> Result<Markup, ChError> {
             }
         }
         div.grid-main {
-            (card("Recent traces", Some(html! { span.dim { "newest 100 · traces are head-sampled upstream; error traces are kept in full" } }), html! {
+            (card("Recent traces", Some(html! { span.dim { "newest 100 · traces are head-sampled upstream; error and slow traces are kept in full" } }), html! {
                 @if traces.is_empty() { (empty("No spans match in this window.")) } @else {
                     table.t {
                         thead { tr { th { "Started" } th { "Root span" } th { "Service" } th.n { "Spans" } th.n { "Duration" } th.n { "Status" } } }
@@ -104,7 +109,7 @@ pub async fn list(app: &App, ctx: &Ctx, p: &P) -> Result<Markup, ChError> {
                     }
                 }
             }))
-            (card("Operations", Some(html! { span.dim { "by span count" } }), html! {
+            (card("Operations", Some(html! { span.dim { "by span count · random samples only" } }), html! {
                 @if ops.is_empty() { (empty("No spans.")) } @else {
                     table.t {
                         thead { tr { th { "Span" } th.n { "Count" } th.n { "p50" } th.n { "p95" } } }

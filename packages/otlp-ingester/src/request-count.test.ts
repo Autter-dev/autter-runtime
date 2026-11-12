@@ -423,6 +423,24 @@ test("tail-retained request spans add no request; their 500 is the metric feed's
 	assert.deepEqual(metricPoints, []);
 });
 
+test("a span kept for being slow is not a request sample, even without autter.tail_retained", () => {
+	// runtime-node 1.12+ marks why a span was exported. A slow request kept
+	// by tail retention must not count as a request (nor add its latency) in
+	// span-fed rollups: only head samples stand for the traffic.
+	const slow: SpanSpec = {
+		id: 1, name: "GET /report", kind: SERVER, end: 1500,
+		attributes: { "http.route": "/report", "http.status_code": 200, "autter.retention_reason": "slow" },
+	};
+	const head: SpanSpec = {
+		id: 1, name: "GET /report", kind: SERVER, end: 40,
+		attributes: { "http.route": "/report", "http.status_code": 200, "autter.retention_reason": "head" },
+	};
+	assert.deepEqual(normalizeTraces(batch([slow])).metricPoints, []);
+	assert.deepEqual(normalizeTraces(batch([head])).metricPoints.map((p) => [p.route, p.requestCount]), [["/report", 1]]);
+	const failed: SpanSpec = { ...slow, end: 40, error: true, attributes: { ...slow.attributes, "http.status_code": 500, "autter.retention_reason": "error" } };
+	assert.deepEqual(normalizeTraces(batch([failed])).metricPoints.map((p) => [p.requestCount, p.errorCount]), [[0, 1]]);
+});
+
 test("tail-retained without a metric feed (Python retention): no request, its failure once", () => {
 	// adapters/python marks the error traces it retains autter.tail_retained;
 	// nothing else counts that request, and the traffic sample excludes it.

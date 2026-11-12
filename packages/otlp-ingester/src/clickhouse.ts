@@ -5,11 +5,7 @@ import {
 } from "@clickhouse/client";
 import type { IngesterConfig } from "./config.js";
 import {
-	ARCHIVE_TABLE_SPECS,
-	ARCHIVE_TABLES,
-	noTtlWarning,
-	parseTtlDays,
-	retentionTtlAction,
+	reconcileRetentionTtls,
 	type ArchiveDb,
 	type ArchiveTable,
 } from "./archive.js";
@@ -388,71 +384,42 @@ export class ClickHouseStore {
 	}
 
 	/**
-	 * Bring each table's delete TTL in line with its retention: LOG_TTL_DAYS
-	 * for runtime_logs (as before), and, for the tables an archive covers
-	 * (ARCHIVE_S3_URL), the ARCHIVE_BACKSTOP_DAYS one (default hot window + 7) or none, so the TTL
-	 * never deletes a day the archiver has not exported (archive.ts). A table
-	 * with no TTL and no archive is left without one and warned about: adding
-	 * a TTL deletes the rows older than it, so that stays the operator's call
-	 * (also after an archive that removed the TTL is turned off).
-	 * Idempotent: reads the current TTL from system.tables and
-	 * only alters when it differs (MODIFY TTL rewrites TTL info for existing
-	 * parts, so it must not run on every boot). Best-effort — a failure is
-	 * logged and never blocks ingest; the next boot retries.
+	 * Bring each table's delete TTL in line with its retention
+	 * (archive.ts planRetentionTtl): runtime_logs follows LOG_TTL_DAYS when it
+	 * is set, and the tables an archive covers get the ARCHIVE_BACKSTOP_DAYS
+	 * backstop (default hot window + 7) or no delete rule. Only the delete
+	 * rule is touched (move and recompress rules are kept); a TTL that would
+	 * delete rows not yet archived is not set (the archive job sets it after
+	 * the pass that archives them); a table with no delete TTL and no archive
+	 * is left without one and warned about. Idempotent: alters only when the
+	 * TTL differs, with materialize_ttl_after_modify = 0. Best-effort — a
+	 * failure is logged and never blocks ingest; the next boot retries.
 	 */
 	async applyRetentionTtls(): Promise<void> {
-		const db = this.config.clickhouseDatabase;
-		const archive = this.config.archive ?? null;
-		const hot = this.hotDays();
 		try {
-			const client = this.getClient();
-			const rows = await client.query({
-				query: `SELECT name, engine_full FROM system.tables WHERE database = {db:String} AND has({names:Array(String)}, name)`,
-				query_params: { db, names: [...ARCHIVE_TABLES] },
-				format: "JSONEachRow",
+			await reconcileRetentionTtls({
+				db: this.dbFor(this.getClient()),
+				database: this.config.clickhouseDatabase,
+				archive: this.config.archive ?? null,
+				hotDays: this.hotDays(),
+				logTtlExplicit: this.config.logTtlDaysExplicit === true,
+				now: new Date(),
 			});
-			for (const table of await rows.json<{ name: ArchiveTable; engine_full: string }>()) {
-				if (!(ARCHIVE_TABLES as readonly string[]).includes(table.name)) continue;
-				const current = parseTtlDays(table.engine_full);
-				if (current === "unrecognised") {
-					console.warn(`${table.name} TTL not recognised — retention not applied`);
-					continue;
-				}
-				const archived = Boolean(archive?.tables.includes(table.name));
-				const action = retentionTtlAction({
-					current,
-					hotDays: hot[table.name],
-					archived,
-					backstopDays: archive?.backstopDays ?? 0,
-					alwaysApply: table.name === "runtime_logs",
-				});
-				if (action.action === "none") {
-					// No TTL and no archive: never add one here (it would delete
-					// the rows older than it). Say so, with the statement to run.
-					if (current === null && !archived) {
-						console.warn(noTtlWarning({ db, table: table.name, hotDays: hot[table.name] }));
-					}
-					continue;
-				}
-				const column = ARCHIVE_TABLE_SPECS[table.name].timeColumn;
-				await client.command({
-					query:
-						action.action === "remove"
-							? `ALTER TABLE ${db}.${table.name} REMOVE TTL`
-							: `ALTER TABLE ${db}.${table.name} MODIFY TTL toDateTime(${column}) + INTERVAL ${action.days} DAY`,
-				});
-				console.log(
-					action.action === "remove"
-						? `${table.name}: delete TTL removed — the runtime archive drops days once they are exported`
-						: `${table.name} TTL changed from ${current ?? "none"} to ${action.days} days`,
-				);
-			}
 		} catch (err) {
 			console.warn(
 				"applying retention TTLs failed (will retry next boot):",
 				err instanceof Error ? err.message : err,
 			);
 		}
+	}
+
+	private dbFor(client: ClickHouseClient): ArchiveDb {
+		return {
+			query: async <T>(sql: string) => (await client.query({ query: sql, format: "JSONEachRow" })).json<T>(),
+			command: async (sql: string, settings?: Record<string, string | number>) => {
+				await client.command({ query: sql, ...(settings ? { clickhouse_settings: settings as ClickHouseSettings } : {}) });
+			},
+		};
 	}
 
 	/**
@@ -470,12 +437,7 @@ export class ClickHouseStore {
 			clickhouse_settings: { max_execution_time: 3_600 },
 		});
 		this.archiveClient = client;
-		return {
-			query: async <T>(sql: string) => (await client.query({ query: sql, format: "JSONEachRow" })).json<T>(),
-			command: async (sql: string) => {
-				await client.command({ query: sql });
-			},
-		};
+		return this.dbFor(client);
 	}
 
 	/**

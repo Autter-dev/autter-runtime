@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { archiveConfigFromEnv } from "./archive.js";
 import { ClickHouseStore } from "./clickhouse.js";
-import type { IngesterConfig } from "./config.js";
+import { loadConfig, type IngesterConfig } from "./config.js";
 import { liftErrorFields } from "./error-fields.js";
 import {
 	codeFingerprint,
@@ -494,7 +494,7 @@ function config(overrides: Partial<IngesterConfig>): IngesterConfig {
 	};
 }
 
-test("LOG_TTL_DAYS is applied only when it differs, and a failure never blocks the schema", async () => {
+test("LOG_TTL_DAYS (when set) is applied only when it differs, with materialize_ttl_after_modify = 0, and a failure never blocks the schema", async () => {
 	let engine = "ReplacingMergeTree PARTITION BY toDate(occurred_at) ORDER BY (org_id) TTL toDateTime(occurred_at) + toIntervalDay(14) SETTINGS index_granularity = 8192";
 	let failTtl = false;
 	const stub = await startStub((call) => {
@@ -504,16 +504,17 @@ test("LOG_TTL_DAYS is applied only when it differs, and a failure never blocks t
 	});
 	const modifies = () => stub.calls.filter((c) => c.sql.includes("MODIFY TTL"));
 	try {
-		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 14 })).ensureSchema();
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 14, logTtlDaysExplicit: true })).ensureSchema();
 		assert.equal(modifies().length, 0);
-		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30 })).ensureSchema();
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30, logTtlDaysExplicit: true })).ensureSchema();
 		assert.equal(modifies().length, 1);
 		assert.match(modifies()[0]!.sql, /ALTER TABLE autter_runtime\.runtime_logs MODIFY TTL toDateTime\(occurred_at\) \+ INTERVAL 30 DAY/);
+		assert.equal(modifies()[0]!.params.get("materialize_ttl_after_modify"), "0");
 		engine = engine.replace("toIntervalDay(14)", "toIntervalDay(30)");
-		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30 })).ensureSchema();
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 30, logTtlDaysExplicit: true })).ensureSchema();
 		assert.equal(modifies().length, 1);
 		failTtl = true;
-		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 7 })).ensureSchema();
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 7, logTtlDaysExplicit: true })).ensureSchema();
 		assert.equal(modifies().length, 1);
 		// Fresh databases: the baseline CREATE carries the configured TTL.
 		assert.ok(stub.calls.some((c) => /runtime_logs[\s\S]*INTERVAL 7 DAY/.test(c.sql)));
@@ -530,6 +531,78 @@ test("LOG_TTL_DAYS is applied only when it differs, and a failure never blocks t
 		assert.ok(stub.calls.some((c) => c.sql.includes("ALTER TABLE autter_runtime.runtime_logs REMOVE TTL")));
 		assert.equal(modifies().length, 2);
 	} finally {
+		await close(stub.server);
+	}
+});
+
+test("LOG_TTL_DAYS unset: an existing runtime_logs TTL is left alone (an operator's 90 days stay)", async () => {
+	// 1.14.1 and earlier rewrote it to 14 at every boot when LOG_TTL_DAYS was unset.
+	const engine = "ReplacingMergeTree PARTITION BY toDate(occurred_at) ORDER BY (org_id) TTL toDateTime(occurred_at) + toIntervalDay(90) SETTINGS index_granularity = 8192";
+	const stub = await startStub((call) => {
+		if (call.sql.includes("system.tables")) return { body: JSON.stringify({ name: "runtime_logs", engine_full: engine }) + "\n" };
+	});
+	try {
+		await new ClickHouseStore(config({ clickhouseUrl: stub.url, logTtlDays: 14 })).ensureSchema();
+		assert.deepEqual(stub.calls.filter((c) => /ALTER TABLE[^\n]*\bTTL\b/.test(c.sql)).map((c) => c.sql.trim()), []);
+		// Set explicitly and shorter, with 90-day-old rows in the table: not shortened either.
+		const old = await startStub((call) => {
+			if (call.sql.includes("system.tables")) return { body: JSON.stringify({ name: "runtime_logs", engine_full: engine }) + "\n" };
+			if (call.sql.includes("system.parts")) return { body: JSON.stringify({ table: "runtime_logs", partition_id: "20200101", rows: 5 }) + "\n" };
+		});
+		try {
+			await new ClickHouseStore(config({ clickhouseUrl: old.url, logTtlDays: 14, logTtlDaysExplicit: true })).ensureSchema();
+			assert.deepEqual(old.calls.filter((c) => /ALTER TABLE[^\n]*\bTTL\b/.test(c.sql)).map((c) => c.sql.trim()), []);
+		} finally {
+			await close(old.server);
+		}
+	} finally {
+		await close(stub.server);
+	}
+});
+
+test("LOG_TTL_DAYS counts as set only when it is a valid number of days", () => {
+	const saved = process.env.LOG_TTL_DAYS;
+	try {
+		delete process.env.LOG_TTL_DAYS;
+		assert.equal(loadConfig().logTtlDaysExplicit, false);
+		process.env.LOG_TTL_DAYS = "abc";
+		assert.equal(loadConfig().logTtlDaysExplicit, false);
+		process.env.LOG_TTL_DAYS = "30";
+		assert.equal(loadConfig().logTtlDaysExplicit, true);
+		assert.equal(loadConfig().logTtlDays, 30);
+	} finally {
+		if (saved === undefined) delete process.env.LOG_TTL_DAYS;
+		else process.env.LOG_TTL_DAYS = saved;
+	}
+});
+
+test("/healthz reports the archive's last pass when an archive is configured (readiness unchanged)", async () => {
+	const stub = await startStub((call) => {
+		if (call.sql.includes("runtime_archive_passes") && /SELECT/.test(call.sql)) {
+			return { body: JSON.stringify({ last_ok_ms: "1794218400000", last_ms: "1794218400000", first_configured_ms: "1794200000000", now_ms: "1794220000000" }) + "\n" };
+		}
+	});
+	const archive = archiveConfigFromEnv({ ARCHIVE_S3_URL: "http://minio:9000/archive" });
+	const created = createIngesterApp(config({ clickhouseUrl: stub.url, archive }));
+	const app = created.app.listen(0, "127.0.0.1");
+	await new Promise((resolve) => app.once("listening", resolve));
+	try {
+		await created.archiveStatus!.report();
+		const res = await fetch(`http://127.0.0.1:${(app.address() as AddressInfo).port}/healthz`);
+		const body = (await res.json()) as { archive?: Record<string, unknown> };
+		assert.equal(body.archive?.configured, true);
+		assert.equal(body.archive?.runsJob, true);
+		assert.equal(body.archive?.lastSuccessfulPassAt, new Date(1794218400000).toISOString());
+		assert.equal(body.archive?.passOverdue, false);
+		// Without an archive there is no `archive` field.
+		const plain = createIngesterApp(config({ clickhouseUrl: stub.url }));
+		assert.equal(plain.archiveStatus, null);
+		await plain.store.close();
+		await plain.limits.close();
+	} finally {
+		app.close();
+		await created.store.close();
+		await created.limits.close();
 		await close(stub.server);
 	}
 });

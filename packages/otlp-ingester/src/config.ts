@@ -173,9 +173,16 @@ export interface IngesterConfig {
 	/**
 	 * runtime_logs retention (LOG_TTL_DAYS, default 14). Request summaries are
 	 * always kept (never sampled), so this is the main volume knob. Applied to
-	 * fresh tables by the baseline and to existing ones at boot.
+	 * fresh tables by the baseline, and to existing ones at boot only when
+	 * set (logTtlDaysExplicit).
 	 */
 	logTtlDays: number;
+	/**
+	 * LOG_TTL_DAYS was set: existing runtime_logs tables follow it at boot
+	 * (a longer TTL at once, a shorter one only when no older rows would be
+	 * deleted). Unset, an existing TTL is left as it is.
+	 */
+	logTtlDaysExplicit?: boolean;
 	/**
 	 * Extra regex sources scrubbed from stored/forwarded free text and
 	 * attribute values, and extra regex sources for sensitive attribute
@@ -389,6 +396,7 @@ export function loadConfig(): IngesterConfig {
 		// need months, and per-call volume is small next to HTTP spans.
 		llmCallTtlDays: intEnv("LLM_CALL_TTL_DAYS", 90),
 		logTtlDays: intEnv("LOG_TTL_DAYS", 14),
+		logTtlDaysExplicit: Number.parseInt(process.env.LOG_TTL_DAYS ?? "", 10) > 0,
 		redactValuePatterns: patternListEnv("AUTTER_REDACT_VALUE_PATTERNS"),
 		redactKeyPatterns: patternListEnv("AUTTER_REDACT_KEY_PATTERNS"),
 		sourceMapCacheMb: intEnv("SOURCE_MAP_CACHE_MB", 64),

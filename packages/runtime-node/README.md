@@ -661,9 +661,11 @@ completion, become `[omitted]` (its exception type and stack frames stay).
 Details in the
 [LLM instrumentation guide](../../docs/LLM-INSTRUMENTATION.md#prompt-and-completion-content).
 
-**Easiest: wrap the client once** — works with the OpenAI, Anthropic, and
-Google GenAI SDKs (or anything with the same call shapes), streaming
-included; every call through it is traced with no per-call code:
+**Easiest: wrap the client once** — works with the OpenAI, Anthropic,
+Google GenAI and Bedrock Runtime (`ConverseCommand`) SDKs, OpenRouter through
+the OpenAI SDK (or anything with the same call shapes), streaming included;
+every call through it is traced with no per-call code, prompt-cache reads
+and writes and reasoning tokens included:
 
 ```ts
 import { instrumentLlmClient } from "@autter/runtime-node";
@@ -699,8 +701,9 @@ const res = await withLlmCall(
   async (llm) => {
     const out = await openai.chat.completions.create({ ... });
     llm.setUsage({
-      inputTokens: out.usage?.prompt_tokens,
-      outputTokens: out.usage?.completion_tokens,
+      inputTokens: out.usage?.prompt_tokens, // every prompt token, cached ones included
+      outputTokens: out.usage?.completion_tokens, // reasoning included
+      cacheReadTokens: out.usage?.prompt_tokens_details?.cached_tokens,
     });
     return out;
   },
@@ -715,6 +718,10 @@ figures with `llm.setCost(usd)` (the `autter.llm.cost_usd` attribute).
 Where wrapping is awkward (queues, callbacks, batch results), report after
 the fact with
 `trackLlmCall({ provider, model, inputTokens, outputTokens, durationMs })`.
+`inputTokens` is the total prompt including cache reads and writes; pass
+`cacheReadTokens`, `cacheWriteTokens`, `cacheWriteLongTtlTokens` and
+`reasoningTokens` so the cost accounts for prompt caching
+([token usage and prompt caching](../../docs/LLM-INSTRUMENTATION.md#token-usage-and-prompt-caching)).
 
 To verify the pipe end-to-end without calling a real model:
 

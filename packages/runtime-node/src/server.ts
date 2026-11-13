@@ -117,6 +117,13 @@ import {
 } from "./caught-errors.js";
 import { configureCompatCheck, noteCompatFeature, SDK_IDENTITY } from "./compat.js";
 import {
+	LLM_CACHE_TOKENS_FEATURE,
+	USAGE_CONVENTION,
+	USAGE_CONVENTION_ATTR,
+	usageContractAttributes,
+	type NormalizedUsage,
+} from "./llm-usage.js";
+import {
 	installUnhandledRejectionCapture,
 	recordedAsRejection,
 } from "./unhandled-rejections.js";
@@ -428,17 +435,41 @@ export interface AutterServerOptions {
 
 export type AutterSeverity = "fatal" | "error" | "warning" | "info";
 
-/** Token usage (and optionally exact cost) of one LLM call. */
+/**
+ * Token usage (and optionally exact cost) of one LLM call, in the "total"
+ * convention: `inputTokens` counts every prompt token, cached or not, and
+ * `outputTokens` every output token, reasoning included; the cache and
+ * reasoning fields are the parts of those totals that the provider bills at
+ * other rates.
+ */
 export interface LlmUsage {
+	/**
+	 * All prompt tokens, including cache reads and cache writes. OpenAI's
+	 * `prompt_tokens` / `input_tokens` and Gemini's `promptTokenCount` already
+	 * are; for Anthropic pass `input_tokens + cache_read_input_tokens +
+	 * cache_creation_input_tokens` (Bedrock: `inputTokens +
+	 * cacheReadInputTokens + cacheWriteInputTokens`). A value smaller than
+	 * the cache reads plus writes is taken to exclude them and added up.
+	 */
 	inputTokens?: number;
+	/** All output tokens, including reasoning (Gemini: candidates + thoughts). */
 	outputTokens?: number;
 	/**
 	 * Exact cost in USD, if the provider reports it. Overrides Autter's
 	 * built-in per-model price estimate.
 	 */
 	costUsd?: number;
-	/** Prompt tokens served from the provider cache (rolled into `autter.operation.ai`). */
+	/** Prompt tokens read from the provider cache (part of `inputTokens`). */
 	cacheReadTokens?: number;
+	/** Prompt tokens written to the provider cache (part of `inputTokens`). */
+	cacheWriteTokens?: number;
+	/**
+	 * The part of `cacheWriteTokens` written at the provider's long TTL
+	 * (Anthropic 1 h, OpenAI 12 h), billed higher than the default.
+	 */
+	cacheWriteLongTtlTokens?: number;
+	/** Reasoning/thinking tokens (part of `outputTokens`). */
+	reasoningTokens?: number;
 }
 
 export interface LlmCallInfo {
@@ -944,6 +975,7 @@ function llmBaseAttributes(info: LlmCallInfo): Attributes {
 		"gen_ai.provider.name": info.provider,
 		"gen_ai.system": info.provider,
 		"gen_ai.request.model": info.model,
+		[USAGE_CONVENTION_ATTR]: USAGE_CONVENTION,
 		...(info.userId ? { "autter.user_id": info.userId } : {}),
 		...(info.sessionId ? { "autter.session_id": info.sessionId } : {}),
 		// Caller-supplied extras go through redaction like every other
@@ -952,21 +984,47 @@ function llmBaseAttributes(info: LlmCallInfo): Attributes {
 	};
 }
 
+/**
+ * Manual usage in the "total" convention. Callers written before the cache
+ * fields were documented may pass Anthropic's uncached `input_tokens`: when
+ * the input is smaller than its own cache subsets, it cannot be a total, so
+ * the cache counts are added to it.
+ */
+function normalizeManualUsage(usage: LlmUsage): NormalizedUsage {
+	const cached = (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+	const inputTokens =
+		usage.inputTokens !== undefined && usage.inputTokens < cached
+			? usage.inputTokens + cached
+			: usage.inputTokens;
+	return {
+		...(inputTokens !== undefined ? { inputTokens } : {}),
+		...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+		...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+		...(usage.cacheWriteTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+		...(usage.cacheWriteLongTtlTokens !== undefined
+			? { cacheWriteLongTtlTokens: usage.cacheWriteLongTtlTokens }
+			: {}),
+		...(usage.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
+		...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
+	};
+}
+
 function usageAttributes(usage: LlmUsage): Attributes {
-	const attrs: Attributes = {};
-	if (usage.inputTokens !== undefined) {
-		attrs["gen_ai.usage.input_tokens"] = Math.max(0, Math.round(usage.inputTokens));
-	}
-	if (usage.outputTokens !== undefined) {
-		attrs["gen_ai.usage.output_tokens"] = Math.max(
-			0,
-			Math.round(usage.outputTokens),
-		);
-	}
-	if (usage.costUsd !== undefined) {
-		attrs["autter.llm.cost_usd"] = usage.costUsd;
-	}
+	const attrs = usageContractAttributes(normalizeManualUsage(usage));
+	if (Object.keys(attrs).length) noteCompatFeature(LLM_CACHE_TOKENS_FEATURE);
 	return attrs;
+}
+
+/** The operation rollup's share of one manual call (same totals as the span). */
+function rollupUsage(usage: LlmUsage): LlmUsage {
+	const normalized = normalizeManualUsage(usage);
+	return {
+		...(normalized.inputTokens !== undefined ? { inputTokens: normalized.inputTokens } : {}),
+		...(normalized.outputTokens !== undefined ? { outputTokens: normalized.outputTokens } : {}),
+		...(normalized.cacheReadTokens !== undefined ? { cacheReadTokens: normalized.cacheReadTokens } : {}),
+		...(normalized.cacheWriteTokens !== undefined ? { cacheWriteTokens: normalized.cacheWriteTokens } : {}),
+		...(normalized.costUsd !== undefined ? { costUsd: normalized.costUsd } : {}),
+	};
 }
 
 async function runLlmSpan<T>(
@@ -987,7 +1045,9 @@ async function runLlmSpan<T>(
 	const handle: LlmCallHandle = {
 		setUsage: (next) => {
 			Object.assign(usage, next);
-			span.setAttributes(usageAttributes(next));
+			// From the merged usage: a later call can add the cache counts
+			// that decide how an earlier input count is read.
+			span.setAttributes(usageAttributes(usage));
 		},
 		setCost: (usd) => {
 			usage.costUsd = usd;
@@ -1010,12 +1070,12 @@ async function runLlmSpan<T>(
 		throw err;
 	} finally {
 		span.end();
-		recordOperationAiUsage({ ...usage, model: responseModel ?? info.model });
+		recordOperationAiUsage({ ...rollupUsage(usage), model: responseModel ?? info.model });
 	}
 }
 
 function recordLlmCall(tracer: Tracer, call: TrackedLlmCall): void {
-	recordOperationAiUsage({ ...call, model: call.model });
+	recordOperationAiUsage({ ...rollupUsage(call), model: call.model });
 	const durationMs = Math.max(0, call.durationMs ?? 0);
 	const endTime = new Date();
 	const startTime = new Date(endTime.getTime() - durationMs);

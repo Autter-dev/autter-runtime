@@ -379,3 +379,44 @@ test("custom key and value patterns ignore g/y flags", () => {
 	const values = redactAttributes({ note: "id CUST-123 and CUST-456" }, { additionalValuePatterns: [/CUST-\d+/y] });
 	assert.equal(values.note, `id ${MASK} and ${MASK}`);
 });
+
+test("cache and reasoning usage counts survive redaction (contract, semconv, OpenInference, Vercel AI)", () => {
+	const keys = [
+		"gen_ai.usage.cache_read.input_tokens",
+		"gen_ai.usage.cache_creation.input_tokens",
+		"gen_ai.usage.reasoning.output_tokens",
+		"autter.llm.cache_creation.long_ttl_tokens",
+		"gen_ai.usage.cache_read_input_tokens",
+		"gen_ai.usage.cache_creation_input_tokens",
+		"gen_ai.usage.reasoning_tokens",
+		"llm.token_count.prompt",
+		"llm.token_count.completion",
+		"llm.token_count.prompt_details.cache_read",
+		"llm.token_count.prompt_details.cache_write",
+		"llm.token_count.completion_details.reasoning",
+		"llm.usage.total_tokens",
+		"ai.usage.promptTokens",
+		"ai.usage.completionTokens",
+		"ai.usage.cachedInputTokens",
+		"ai.usage.reasoningTokens",
+		"cache_write_tokens",
+	];
+	const out = redactAttributes(Object.fromEntries(keys.map((key) => [key, 9000])));
+	for (const key of keys) assert.equal(out[key], 9000, key);
+	// The operation rollup is nested: its counts survive too.
+	const nested = redactAttributes({ "autter.operation.ai": { cache_read_tokens: 4, cache_write_tokens: 5 } });
+	assert.deepEqual(nested["autter.operation.ai"], { cache_read_tokens: 4, cache_write_tokens: 5 });
+});
+
+test("cache usage keys still mask anything that is not a count", () => {
+	const out = redactAttributes({
+		"gen_ai.usage.cache_read.input_tokens": "9000",
+		"llm.token_count.prompt": -1,
+		"llm.token_count.secret.extra.deep": 3,
+		"ai.usage.promptTokens": "sk-abc",
+	});
+	assert.equal(out["gen_ai.usage.cache_read.input_tokens"], MASK);
+	assert.equal(out["llm.token_count.prompt"], MASK);
+	assert.equal(out["llm.token_count.secret.extra.deep"], MASK);
+	assert.equal(out["ai.usage.promptTokens"], MASK);
+});

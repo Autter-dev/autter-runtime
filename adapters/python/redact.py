@@ -86,8 +86,19 @@ _SENSITIVE_KEYS = [
         r"recovery[-_.]?code|\botp\b|magic[-_.]?link",
     )
 ]
-# Numeric GenAI usage counters keep their value even though "token" matches.
-_USAGE_KEY = re.compile(r"(^|\.)(input|output|total|prompt|completion)_?tokens$|token_count$", re.I)
+# Numeric GenAI usage counters keep their value even though "token" matches:
+# input/output/total counts, the cache and reasoning subsets (Autter's
+# "total" usage contract, OTel GenAI semconv, OpenLLMetry spellings such as
+# gen_ai.usage.cache_read_input_tokens), OpenInference llm.token_count.* and
+# Vercel AI SDK ai.usage.*Tokens.
+_USAGE_KEY = re.compile(
+    r"(^|[._])(input|output|total|prompt|completion|cached|cache_read|cache_creation|cache_write"
+    r"|reasoning|thinking|long_ttl)_?tokens$"
+    r"|token_count$"
+    r"|^llm\.token_count\.[a-z_]+(\.[a-z_]+)?$"
+    r"|^ai\.usage\.[a-z]*tokens$",
+    re.I,
+)
 
 _extra_values: list[re.Pattern[str]] = []
 _extra_keys: list[re.Pattern[str]] = []

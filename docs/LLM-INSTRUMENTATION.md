@@ -10,9 +10,16 @@ below to the same runtime endpoint.
 
 ### Wrap a supported client
 
-`instrumentLlmClient` wraps OpenAI, Anthropic, Google GenAI, and compatible
-clients. It records model, provider, duration, token usage, and errors, including
-streaming calls when usage is present in the final stream chunks.
+`instrumentLlmClient` wraps OpenAI, Anthropic, Google GenAI, AWS Bedrock
+Runtime (`client.send(new ConverseCommand(...))` and `ConverseStreamCommand`),
+OpenRouter through the OpenAI SDK, and compatible clients. It records model,
+provider, duration, token usage (prompt-cache reads and writes and reasoning
+tokens included, see [token usage and prompt caching](#token-usage-and-prompt-caching)),
+and errors, including streaming calls when usage is present in the stream.
+The SDKs' stream helpers (`anthropic.messages.stream()`,
+`openai.chat.completions.stream()`, `openai.responses.stream()`) are recorded
+whether you iterate them or only `await stream.finalMessage()` /
+`finalChatCompletion()` / `finalResponse()`.
 
 ```ts
 import OpenAI from "openai";
@@ -25,8 +32,12 @@ const response = await openai.chat.completions.create({
 });
 ```
 
-For OpenAI streaming usage, set `stream_options: { include_usage: true }`.
-Provider detection can be overridden with the wrapper's second argument:
+For OpenAI Chat Completions streaming usage, set
+`stream_options: { include_usage: true }` (the Responses API always sends it,
+on `response.completed`). The provider is detected from the client's base URL
+first (`openrouter.ai` → `openrouter`, `api.groq.com` → `groq`, …), then from
+its class name (`BedrockRuntimeClient` → `aws.bedrock`). Override it with the
+wrapper's second argument:
 `instrumentLlmClient(client, { provider: "openai", userId: "user-123" })`.
 
 ### Wrap a call manually with `withLlmCall`
@@ -50,7 +61,13 @@ const result = await withLlmCall(
       method: "POST",
     });
     const body = await response.json();
-    llm.setUsage({ inputTokens: body.usage.prompt_tokens, outputTokens: body.usage.completion_tokens });
+    llm.setUsage({
+      inputTokens: body.usage.prompt_tokens, // all prompt tokens, cached ones included
+      outputTokens: body.usage.completion_tokens, // reasoning included
+      cacheReadTokens: body.usage.prompt_tokens_details?.cached_tokens,
+      cacheWriteTokens: body.usage.prompt_tokens_details?.cache_write_tokens,
+      reasoningTokens: body.usage.completion_tokens_details?.reasoning_tokens,
+    });
     llm.setResponseModel(body.model); // when the provider reports a served model
     llm.setCost(body.cost_usd); // optional exact USD; otherwise ingester estimates
     return body;
@@ -70,10 +87,13 @@ can be passed in `error`.
 ```ts
 import { trackLlmCall } from "@autter/runtime-node";
 
+// Anthropic usage: input_tokens leaves the cache out, so add it back.
 trackLlmCall({
   provider: "anthropic",
   model: "claude-sonnet-4",
-  inputTokens: 820,
+  inputTokens: 820 + 9000 + 0, // input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+  cacheReadTokens: 9000,
+  cacheWriteTokens: 0,
   outputTokens: 145,
   durationMs: 932,
   userId: "user-123",
@@ -84,6 +104,75 @@ trackLlmCall({
 `initAutterServer` also recognises Vercel AI SDK telemetry when
 `experimental_telemetry.isEnabled` is true. The runtime-next integration uses
 the same Node runtime, so these options apply there too.
+
+## Token usage and prompt caching
+
+Prompt caching changes what a call costs: cache reads are billed below the
+input price, and cache writes, where the provider charges for them, above it
+(Anthropic: 1.25x for the 5-minute TTL, 2x for 1 hour).
+Every LLM span from `@autter/runtime-node` 1.14.0 reports the parts, in one
+convention whatever the provider, so the ingester can price each part:
+
+| Attribute | Meaning |
+| --- | --- |
+| `gen_ai.usage.input_tokens` | **All** prompt tokens: uncached, cache reads and cache writes |
+| `gen_ai.usage.cache_read.input_tokens` | Prompt tokens read from the cache (part of input) |
+| `gen_ai.usage.cache_creation.input_tokens` | Prompt tokens written to the cache (part of input) |
+| `autter.llm.cache_creation.long_ttl_tokens` | Cache writes at the long TTL (Anthropic 1 h, OpenAI 12 h), when the provider reports the split (part of the writes) |
+| `gen_ai.usage.output_tokens` | **All** output tokens, reasoning included |
+| `gen_ai.usage.reasoning.output_tokens` | Reasoning/thinking tokens (part of output) |
+| `autter.llm.usage_convention` | `"total"`: the two totals above already include their parts; set on every Autter LLM span |
+| `autter.llm.cost_usd` | Cost the provider reported in USD (OpenRouter's `usage.cost`), or yours from `setCost` |
+
+How each provider's response maps to it:
+
+| Provider | Input total | Cache read | Cache write (long TTL) | Output total (reasoning) |
+| --- | --- | --- | --- | --- |
+| OpenAI Chat Completions, OpenRouter, Groq, Mistral | `prompt_tokens` (already the total) | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` | `completion_tokens` (`completion_tokens_details.reasoning_tokens`) |
+| OpenAI Responses (plain and `response.completed`) | `input_tokens` (already the total) | `input_tokens_details.cached_tokens` | `input_tokens_details.cache_write_tokens` (`cache_write_tokens_details.ttl_12h_tokens`) | `output_tokens` (`output_tokens_details.reasoning_tokens`) |
+| Anthropic (plain, `message_start` + `message_delta`) | `input_tokens` **+** `cache_read_input_tokens` **+** `cache_creation_input_tokens` | `cache_read_input_tokens` | `cache_creation_input_tokens` (`cache_creation.ephemeral_1h_input_tokens`) | `output_tokens` (`output_tokens_details.thinking_tokens`) |
+| Gemini (Google GenAI) | `promptTokenCount` + `toolUsePromptTokenCount` | `cachedContentTokenCount` | not reported | `candidatesTokenCount` **+** `thoughtsTokenCount` (`thoughtsTokenCount`) |
+| Bedrock Converse / ConverseStream | `inputTokens` **+** `cacheReadInputTokens` **+** `cacheWriteInputTokens` | `cacheReadInputTokens` | `cacheWriteInputTokens` (`cacheDetails` with `ttl: "1h"`) | `outputTokens` |
+
+OpenRouter's `usage.cost` is in credits, whose base currency is the US
+dollar ([OpenRouter FAQ](https://openrouter.ai/docs/faq)), so it is reported
+as `autter.llm.cost_usd`. For a BYOK request (`is_byok: true`) `cost` is only
+OpenRouter's fee, so `cost_details.upstream_inference_cost` is added
+([usage accounting](https://openrouter.ai/docs/use-cases/usage-accounting)).
+A `cost` field from any other gateway is ignored: its unit is unknown.
+
+With `withLlmCall` / `trackLlmCall`, pass the same convention:
+`inputTokens` is the total including cache reads and writes, `outputTokens`
+the total including reasoning, and `cacheReadTokens`, `cacheWriteTokens`,
+`cacheWriteLongTtlTokens` and `reasoningTokens` the parts. Code written
+before these fields existed keeps working; an `inputTokens` smaller than its
+own `cacheReadTokens + cacheWriteTokens` cannot be a total, so it is read as
+Anthropic's uncached count and the cache counts are added to it.
+
+### Costs change after upgrading
+
+Before 1.14.0 the SDK sent one input count and the ingester priced all of it
+at the full input rate:
+
+- **Anthropic and Bedrock costs go up.** Their `input_tokens` leave the cache
+  out, so cache reads and writes were not counted at all. They are now in
+  `input_tokens` and priced at the cache rates.
+- **OpenAI and Gemini costs go down.** Their input already included cached
+  tokens, which were priced at the full input rate; they are now priced at
+  the cache-read rate. OpenRouter calls use the cost OpenRouter reports.
+- **Gemini output goes up** by the thinking tokens, which are billed as
+  output but were missing from `candidatesTokenCount`.
+
+The old numbers were wrong in both directions; history is not rewritten.
+
+### Upgrade the ingester first
+
+Upgrade `@autter/otlp-ingester` before `@autter/runtime-node` 1.14.0. An
+older ingester does not read the cache counts or the convention marker: it
+prices the whole Anthropic and Bedrock input, cache reads and writes
+included, at the full input rate, overstating those calls until it is
+upgraded. The SDK's compatibility check (`llm_cache_tokens`) and
+`npx @autter/runtime-node doctor` warn when the ingester is too old.
 
 ## Semantic-convention fields
 
@@ -97,8 +186,13 @@ legacy aliases from other OTel libraries, shown in the final column.
 | `gen_ai.system` | Compatibility alias for provider | `provider` |
 | `gen_ai.request.model` | Requested model | `model` |
 | `gen_ai.response.model` | Model actually served, when reported | `setResponseModel` / `setModel` |
-| `gen_ai.usage.input_tokens` | Input token count | `inputTokens`; ingester also accepts `gen_ai.usage.prompt_tokens` |
-| `gen_ai.usage.output_tokens` | Output token count | `outputTokens`; ingester also accepts `gen_ai.usage.completion_tokens` |
+| `gen_ai.usage.input_tokens` | All input tokens, cache reads and writes included | `inputTokens`; ingester also accepts `gen_ai.usage.prompt_tokens` |
+| `gen_ai.usage.output_tokens` | All output tokens, reasoning included | `outputTokens`; ingester also accepts `gen_ai.usage.completion_tokens` |
+| `gen_ai.usage.cache_read.input_tokens` | Input tokens read from the provider cache | `cacheReadTokens` |
+| `gen_ai.usage.cache_creation.input_tokens` | Input tokens written to the provider cache | `cacheWriteTokens` |
+| `autter.llm.cache_creation.long_ttl_tokens` | Cache writes at the long TTL | `cacheWriteLongTtlTokens` |
+| `gen_ai.usage.reasoning.output_tokens` | Reasoning tokens | `reasoningTokens` |
+| `autter.llm.usage_convention` | `"total"` on every Autter LLM span | Set by the SDK |
 | `autter.llm.cost_usd` | Exact call cost in USD, if known | `costUsd` / `setCost` |
 | `autter.user_id` | Opaque user identifier for attribution | `userId` |
 | `autter.session_id` | Opaque session identifier | `sessionId` |

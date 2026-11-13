@@ -1,6 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveConfigFromEnv, type ArchiveConfig } from "./archive.js";
+import { loadLlmPriceOverrides, type LlmPriceOverrides } from "./llm-pricing.js";
 import type { IngestKeyScope } from "./types.js";
 
 export const INGEST_KEY_SCOPES: readonly IngestKeyScope[] = ["server", "client", "upload"];
@@ -170,6 +171,12 @@ export interface IngesterConfig {
 	spanTtlDays: number;
 	metricsTtlDays: number;
 	llmCallTtlDays: number;
+	/**
+	 * LLM prices merged over the built-in table (AUTTER_LLM_PRICES_FILE, a
+	 * JSON file; see llm-pricing.ts). Read and validated at startup: an
+	 * invalid file stops the ingester. Null: the built-in table only.
+	 */
+	llmPriceOverrides?: LlmPriceOverrides | null;
 	/**
 	 * runtime_logs retention (LOG_TTL_DAYS, default 14). Request summaries are
 	 * always kept (never sampled), so this is the main volume knob. Applied to
@@ -395,6 +402,9 @@ export function loadConfig(): IngesterConfig {
 		// LLM calls keep the metrics horizon, not the span one — cost trends
 		// need months, and per-call volume is small next to HTTP spans.
 		llmCallTtlDays: intEnv("LLM_CALL_TTL_DAYS", 90),
+		llmPriceOverrides: process.env.AUTTER_LLM_PRICES_FILE
+			? loadLlmPriceOverrides(process.env.AUTTER_LLM_PRICES_FILE)
+			: null,
 		logTtlDays: intEnv("LOG_TTL_DAYS", 14),
 		logTtlDaysExplicit: Number.parseInt(process.env.LOG_TTL_DAYS ?? "", 10) > 0,
 		redactValuePatterns: patternListEnv("AUTTER_REDACT_VALUE_PATTERNS"),

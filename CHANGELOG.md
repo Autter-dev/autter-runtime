@@ -2,15 +2,26 @@
 
 ## [Unreleased]
 
-Packages: `runtime-node` 1.14.0. Release after the ingester that prices cache tokens (`llm_cache_tokens`); see the upgrade notes.
+Packages: `otlp-ingester` 1.16.0, `runtime-node` 1.14.0, and the local `dashboard` image. Release the ingester before `runtime-node` 1.14.0 (`llm_cache_tokens`); see the upgrade notes.
 
 ### Fixes
 
+- LLM costs account for prompt caching (`otlp-ingester`). The estimate priced every input token at the full input rate: cache hits were overcharged (10x on GPT-5 and Gemini 2.5, 2x on GPT-4o) and cache writes were charged no premium. Cache reads are now priced at each model's cache-read rate and cache writes at its cache-write rate (Anthropic 1.25x for 5 minutes and 2x for 1 hour, OpenAI GPT-5.6+ 1.25x for 30 minutes and 2.5x for 12 hours), with long-TTL writes from `autter.llm.cache_creation.long_ttl_tokens`. A model without a cache rate is charged the input rate for those tokens. Cache tokens are read from the GenAI semconv (`gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`), OpenLLMetry (`gen_ai.usage.cache_read_input_tokens`, `…cache_creation_input_tokens`), the Vercel AI SDK (`ai.usage.cachedInputTokens`) and OpenInference (`llm.token_count.prompt_details.cache_read` / `cache_write`), reasoning tokens likewise. Input is stored as the total prompt: spans marked `autter.llm.usage_convention = "total"` are taken as they are; for others, cache counts above the input mean the input left them out (Anthropic's API) and they are added ([docs/LLM-INSTRUMENTATION.md](docs/LLM-INSTRUMENTATION.md#prompt-caching-and-cost) has the remaining ambiguous case).
+- Model ids match on a version boundary (`otlp-ingester`). Prefix matching priced `gpt-5.5` and `gpt-5-pro` as `gpt-5`, Claude Opus 4.6 / 4.7 as Opus 4, and Sonnet 5 / 5.5 and Haiku 5.5 at the generic Sonnet and Haiku rates; `gpt-6.x`, `claude-opus-5-5`, `claude-fable-5-2` and Gemini 3.x / 4 had no price. The table now has an entry per model, read from the OpenAI, Anthropic and Google pricing pages on 2026-11-14, and a snapshot suffix (`-20250929`, `-2025-08-07`, `@20251101`, `-v1:0`, `-latest`) still matches. A Bedrock `global.` inference-profile prefix is stripped, and gateway ids such as `anthropic/claude-sonnet-4.5` match. A model without an entry stays unpriced (`cost_source = 'none'`); ids that only matched a family before (`claude-sonnet`, `gpt-5-codex`, `llama-3.1-70b-instruct`) are now unpriced, and can be priced with an override file.
+- OpenInference spans produce LLM rows (`otlp-ingester`): `LLM` and `EMBEDDING` spans with `llm.model_name`, `llm.token_count.*` and a reported `llm.cost.total`; agent, chain and tool spans are not counted. An in-process `invoke_agent` / `invoke_workflow` span (kind INTERNAL) is no longer counted along with its `chat` children, and `execute_tool` / `create_agent` spans no longer make empty rows.
+- Token counts under the usage keys of the GenAI semconv, OpenLLMetry, the Vercel AI SDK and OpenInference, and the operation rollup's `cache_write_tokens`, are no longer stored as `[redacted]` in span and occurrence attributes (`otlp-ingester`).
 - LLM token counts account for prompt caching (`runtime-node`). `instrumentLlmClient` sent one input count, as the provider reported it: Anthropic's `input_tokens` leaves cache reads and writes out, so a call that read 9,000 cached tokens was recorded with 1,000 input tokens, while OpenAI's and Gemini's input includes cached tokens, which were then priced at the full input rate. Every LLM span now reports all prompt tokens in `gen_ai.usage.input_tokens` and the cached parts in `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens` (with the long-TTL writes in `autter.llm.cache_creation.long_ttl_tokens`), all output in `gen_ai.usage.output_tokens` and the reasoning part in `gen_ai.usage.reasoning.output_tokens`, and is marked `autter.llm.usage_convention = "total"`. Read from OpenAI Chat and Responses, Anthropic, Gemini, OpenRouter and Bedrock responses, streamed or not ([docs/LLM-INSTRUMENTATION.md](docs/LLM-INSTRUMENTATION.md#token-usage-and-prompt-caching)).
 - Gemini thinking tokens count as output (`runtime-node`). They are billed as output but are not part of `candidatesTokenCount`, so output was under-counted for thinking models.
 - Streamed OpenAI Responses calls record their usage (`runtime-node`), from the `response.completed` event, and streamed Anthropic calls their served model (`gen_ai.response.model`, from `message_start`).
 - `anthropic.messages.stream()`, `openai.chat.completions.stream()` and `openai.responses.stream()` end their span when the stream ends, also when the stream is only awaited (`await stream.finalMessage()`) and never iterated; the span stayed open before. The helper is returned untouched, and no `error` listener is added, so an unhandled stream error still surfaces as before.
 - Cache and reasoning counts are no longer masked as secrets (`runtime-node`, Python adapter). The redactor masks keys containing "token" unless they are known usage counts; `gen_ai.usage.cache_read.input_tokens`, the other contract keys, the OTel GenAI and OpenLLMetry cache/reasoning keys, OpenInference `llm.token_count.*` and Vercel AI SDK `ai.usage.*Tokens` were exported as `[redacted]`. Non-numeric values under these keys are still masked.
+
+### Features
+
+- `runtime_llm_calls` has `cache_read_tokens`, `cache_write_tokens`, `cache_write_long_tokens`, `reasoning_tokens` and `pricing_version` (migration `0024-llm-cache-tokens`), and the sink payload's `llmCalls` the same fields (`cacheReadTokens`, …, `pricingVersion`; payload `version` stays 1). `pricing_version` is the price table's as-of day for an estimated cost.
+- `AUTTER_LLM_PRICES_FILE` (`otlp-ingester`): a JSON file of prices merged over the built-in table, for negotiated rates, your own models or a price change before the next release. It is validated at startup; an invalid file stops the ingester with every problem named.
+- Dated prices: a price can take effect on a day (`effectiveFrom`), so Gemini 4 Carbon and Argon calls are priced at the new rates from 2026-12-01.
+- The local dashboard's LLM page shows cached input, its share of input and cache writes per model and per call, labels each cost "estimated", "reported", "estimated before cache pricing" or "unpriced", and says which prices estimated costs use ("prices as of 2026-11-14"). The overview's LLM spend shows the cache share and the cost basis.
 
 ### Changes
 
@@ -21,8 +32,12 @@ Packages: `runtime-node` 1.14.0. Release after the ingester that prices cache to
 
 ### Upgrade notes
 
+- Upgrade the ingester first, then `runtime-node` 1.14.0. The migration adds columns with defaults, so older replicas keep inserting during a rolling deploy.
+- Expect LLM costs to move, because the old ones were wrong: OpenAI and Gemini costs go down (cached input was priced at the full input rate), and once `runtime-node` 1.14.0 reports Anthropic's cache tokens, Anthropic and Bedrock costs go up (cache reads and writes were not counted at all). Rows already stored are not re-priced; an estimated row with an empty `pricing_version` was priced before cache pricing.
+- Not modelled: long-context, batch, flex and priority tiers, regional uplifts, Bedrock and Vertex partner prices, and Gemini cache storage. Use `AUTTER_LLM_PRICES_FILE` where they matter.
 - Upgrade `otlp-ingester` first. An older ingester prices the whole Anthropic and Bedrock input, cache reads and writes now included, at the full input rate. The compatibility check and `doctor` report it (`llm_cache_tokens`).
 - Expect LLM costs to move after upgrading, because the old ones were wrong: Anthropic and Bedrock costs go up (cache reads and writes were not counted), OpenAI and Gemini costs go down (cached tokens were priced at the full input rate), Gemini output goes up by the thinking tokens. Earlier calls are not recomputed.
+
 
 ## [1.17.1] - 2026-11-12
 

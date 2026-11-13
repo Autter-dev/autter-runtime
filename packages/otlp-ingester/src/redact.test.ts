@@ -4,8 +4,9 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import type { IngesterConfig } from "./config.js";
-import { sanitizeRuntimeContext } from "./context.js";
-import { configureRedaction, scrubText } from "./redact.js";
+import { decodeOtlpAttributes, sanitizeRuntimeContext } from "./context.js";
+import { configureRedaction, isUsageCountKey, scrubText } from "./redact.js";
+import { extractLlmCall } from "./llm.js";
 import { createIngesterApp } from "./server.js";
 
 /**
@@ -215,4 +216,106 @@ test("secrets from an unscrubbing OTLP sender never reach ClickHouse or the sink
 	assert.ok(everything.includes("stripe rejected [redacted] for [redacted]"));
 	assert.ok(everything.includes('File \\"/app/pay.py\\", line 9, in charge'));
 	assert.match(everything, /321/);
+});
+
+// The LLM usage contract (1.16.0): token counts under these keys are usage,
+// not secrets, wherever span attributes are stored (runtime_spans,
+// occurrence attributes, the runtime_llm_calls drill-down).
+const USAGE_CONTRACT_KEYS = [
+	"gen_ai.usage.input_tokens",
+	"gen_ai.usage.output_tokens",
+	"gen_ai.usage.cache_read.input_tokens",
+	"gen_ai.usage.cache_creation.input_tokens",
+	"gen_ai.usage.reasoning.output_tokens",
+	"autter.llm.cache_creation.long_ttl_tokens",
+	// OpenLLMetry
+	"gen_ai.usage.cache_read_input_tokens",
+	"gen_ai.usage.cache_creation_input_tokens",
+	"gen_ai.usage.reasoning_tokens",
+	// Vercel AI SDK
+	"ai.usage.cachedInputTokens",
+	"ai.usage.reasoningTokens",
+	"ai.usage.inputTokens",
+	// OpenInference
+	"llm.token_count.prompt",
+	"llm.token_count.completion",
+	"llm.token_count.prompt_details.cache_read",
+	"llm.token_count.prompt_details.cache_write",
+	"llm.token_count.completion_details.reasoning",
+];
+
+test("usage contract keys keep their token counts in stored span attributes; autter.llm.usage_convention passes", () => {
+	const decoded = decodeOtlpAttributes([
+		...USAGE_CONTRACT_KEYS.map((key, i) => ({ key, value: { intValue: String(100 + i) } })),
+		{ key: "autter.llm.usage_convention", value: { stringValue: "total" } },
+	]);
+	for (const [i, key] of USAGE_CONTRACT_KEYS.entries()) {
+		assert.ok(isUsageCountKey(key), key);
+		assert.equal(decoded[key], 100 + i, key);
+	}
+	assert.equal(decoded["autter.llm.usage_convention"], "total");
+});
+
+test("the SDK's AI rollup keeps cache_write_tokens (and the other counts) unmasked", () => {
+	const out = sanitizeRuntimeContext({
+		"autter.operation.ai": JSON.stringify({
+			calls: 2,
+			cost_usd: 0.01,
+			input_tokens: 900,
+			output_tokens: 40,
+			cache_read_tokens: 500,
+			cache_write_tokens: 300,
+			cache_write_long_tokens: 100,
+			reasoning_tokens: 20,
+		}),
+	});
+	assert.deepEqual(out["autter.operation.ai"], {
+		calls: 2,
+		cost_usd: 0.01,
+		input_tokens: 900,
+		output_tokens: 40,
+		cache_read_tokens: 500,
+		cache_write_tokens: 300,
+		cache_write_long_tokens: 100,
+		reasoning_tokens: 20,
+	});
+});
+
+test("only numeric counts are exempt: a string under a usage key, and other token keys, are still masked", () => {
+	const out = sanitizeRuntimeContext({
+		"gen_ai.usage.cache_read.input_tokens": "sk-live-abcdefghijklmnop",
+		"api_token": 12345678,
+		"gen_ai.request.api_token": 42,
+		cache_write_tokens: -1,
+	});
+	assert.equal(out["gen_ai.usage.cache_read.input_tokens"], "[redacted]");
+	assert.equal(out.api_token, "[redacted]");
+	assert.equal(out["gen_ai.request.api_token"], "[redacted]");
+	assert.equal(out.cache_write_tokens, "[redacted]");
+});
+
+test("the runtime_llm_calls drill-down keeps every contract key's count", () => {
+	const attrs = new Map<string, string>([
+		["gen_ai.provider.name", "openai"],
+		["gen_ai.request.model", "gpt-5"],
+		...USAGE_CONTRACT_KEYS.map((key, i): [string, string] => [key, String(100 + i)]),
+		["autter.llm.usage_convention", "total"],
+	]);
+	const call = extractLlmCall(attrs, {
+		name: "chat gpt-5",
+		traceId: "t",
+		spanId: "s",
+		isError: false,
+		exceptionType: null,
+		durationMs: 1,
+		startedAt: new Date("2026-11-14T00:00:00Z"),
+		service: "api",
+		environment: "production",
+		release: null,
+	});
+	for (const [i, key] of USAGE_CONTRACT_KEYS.entries()) {
+		// The drill-down keeps only gen_ai.*, ai.*, autter.llm.* and OpenInference usage keys.
+		assert.equal(call?.attributes?.[key], String(100 + i), key);
+	}
+	assert.equal(call?.attributes?.["autter.llm.usage_convention"], "total");
 });

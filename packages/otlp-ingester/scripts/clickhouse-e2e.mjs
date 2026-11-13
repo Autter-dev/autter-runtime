@@ -22,6 +22,8 @@
  *   3. a partial failure, the ingester killed, restarted, and the retry;
  *   4. a dropped table the ingester may not recreate, and a wrong
  *      password: /healthz unready (and ready again once the table is back);
+ *   5. cache-aware LLM cost: migration 0024's columns and defaults, an
+ *      insert that does not name them, and a GenAI span with cache tokens;
  *   6. `verify` (Node CLI and Python compat.py): a tagged test event read
  *      back through GET /v1/verify from the real tables, with no rollup row;
  *      against the wrong-password ingester it stops at "storage".
@@ -247,6 +249,89 @@ async function checkOneCopy(exp, baseline, label) {
 	);
 }
 
+/**
+ * Migration 0024: the cache columns exist with their defaults, an insert
+ * that does not name them (an older replica during a rolling deploy) reads
+ * 0 and '', and a real GenAI span is stored with its cache tokens and a
+ * cache-aware estimate.
+ */
+async function checkLlmCacheColumns(ingester, migrations) {
+	check(migrations.includes("0024-llm-cache-tokens"), "migration 0024 applied", migrations.slice(-3));
+	const columns = await sql(
+		`SELECT name, type, default_expression FROM system.columns WHERE database = '${DB}' AND table = 'runtime_llm_calls'
+		 AND name IN ('cache_read_tokens', 'cache_write_tokens', 'cache_write_long_tokens', 'reasoning_tokens', 'pricing_version') ORDER BY name`,
+	);
+	check(
+		JSON.stringify(columns.map((c) => [c.name, c.type, c.default_expression])) ===
+			JSON.stringify([
+				["cache_read_tokens", "UInt64", "0"],
+				["cache_write_long_tokens", "UInt64", "0"],
+				["cache_write_tokens", "UInt64", "0"],
+				["pricing_version", "LowCardinality(String)", "''"],
+				["reasoning_tokens", "UInt64", "0"],
+			]),
+		"runtime_llm_calls has the cache columns with their defaults",
+		columns,
+	);
+	await sql(
+		`INSERT INTO ${DB}.runtime_llm_calls (org_id, repository_id, service, environment, model, input_tokens, output_tokens, cost_usd, cost_source, started_at)
+		 VALUES ('e2e-old-shape', 'r', 's', 'e', 'gpt-4o', 10, 3, 0.000055, 'estimated', now64(3))`,
+	);
+	const [old] = await sql(
+		`SELECT cache_read_tokens AS r, cache_write_tokens AS w, cache_write_long_tokens AS l, reasoning_tokens AS x, pricing_version AS v
+		 FROM ${DB}.runtime_llm_calls WHERE org_id = 'e2e-old-shape'`,
+	);
+	check(
+		Number(old.r) === 0 && Number(old.w) === 0 && Number(old.l) === 0 && Number(old.x) === 0 && old.v === "",
+		"an insert that does not name the cache columns (an older replica) reads 0 and ''",
+		old,
+	);
+	const start = BigInt(Date.now()) * 1_000_000n;
+	const traceId = Buffer.from(`${RUN}-llm`.padEnd(16, "0").slice(0, 16)).toString("hex");
+	const attr = (key, value) => (typeof value === "number" ? { key, value: { intValue: String(value) } } : { key, value: { stringValue: value } });
+	const res = await fetch(`${ingester.url}/v1/traces`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+		body: JSON.stringify({
+			resourceSpans: [{
+				resource: { attributes: [attr("service.name", `e2e-${RUN}-llm`)] },
+				scopeSpans: [{
+					spans: [{
+						traceId,
+						spanId: "c7ad6b7169203331",
+						name: "chat gpt-5",
+						kind: 3,
+						startTimeUnixNano: String(start),
+						endTimeUnixNano: String(start + 900_000_000n),
+						attributes: [
+							attr("gen_ai.provider.name", "openai"),
+							attr("gen_ai.operation.name", "chat"),
+							attr("gen_ai.request.model", "gpt-5"),
+							attr("gen_ai.usage.input_tokens", 10_000),
+							attr("gen_ai.usage.cache_read.input_tokens", 9_000),
+							attr("gen_ai.usage.output_tokens", 500),
+							attr("gen_ai.usage.reasoning.output_tokens", 200),
+						],
+					}],
+				}],
+			}],
+		}),
+	});
+	await res.text();
+	check(res.status === 200, "a GenAI span with cache tokens is accepted", res.status);
+	const [row] = await sql(
+		`SELECT input_tokens AS i, cache_read_tokens AS r, reasoning_tokens AS x, cost_usd AS c, cost_source AS s, pricing_version AS v
+		 FROM ${DB}.runtime_llm_calls WHERE trace_id = '${traceId}'`,
+	);
+	// gpt-5: 1,000 uncached at $1.25, 9,000 cached at $0.125, 500 out at $10 per 1M.
+	const expected = (1_000 * 1.25 + 9_000 * 0.125 + 500 * 10) / 1e6;
+	check(
+		row && Number(row.i) === 10_000 && Number(row.r) === 9_000 && Number(row.x) === 200 && row.s === "estimated" && /^\d{4}-\d{2}-\d{2}$/.test(row.v) && Math.abs(Number(row.c) - expected) < 1e-9,
+		"the call is stored with its cache tokens, a cache-aware estimate and the price table's version",
+		row,
+	);
+}
+
 async function main() {
 	console.log(`ClickHouse ${CH}, database ${DB}, user ${USER}`);
 	const [{ v: serverVersion }] = await sql("SELECT version() AS v");
@@ -275,6 +360,9 @@ async function main() {
 	);
 	const [beat] = await sql(`SELECT count() AS n FROM ${DB}.runtime_ingester_heartbeat`);
 	check(Number(beat.n) >= 1, "the readiness probe wrote a heartbeat row");
+
+	console.log("\n— cache-aware LLM cost (migration 0024)");
+	await checkLlmCacheColumns(ingester, migrations);
 
 	console.log("\n— 1. the same export sent twice (retry after a lost response)");
 	const e1 = exportFor("lost-response");

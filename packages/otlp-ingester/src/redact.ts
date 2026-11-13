@@ -60,6 +60,24 @@ export function configureRedaction(options: {
 	);
 }
 
+/**
+ * Keys whose NUMERIC values are LLM token counts, not secrets, although
+ * the key says "token": the shared usage contract (`gen_ai.usage.input_tokens`,
+ * `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`,
+ * `gen_ai.usage.reasoning.output_tokens`, `autter.llm.cache_creation.long_ttl_tokens`),
+ * its aliases (OpenLLMetry `gen_ai.usage.cache_read_input_tokens`, Vercel
+ * `ai.usage.cachedInputTokens` / `reasoningTokens`, OpenInference
+ * `llm.token_count.*`), and the SDK's AI rollup keys (`cache_read_tokens`,
+ * `cache_write_tokens`, …). Callers still require a non-negative number:
+ * a string under such a key is masked like any other.
+ */
+export const USAGE_COUNT_KEY_RE =
+	/(?:^|[._])(?:input|output|total|prompt|completion|cache_read|cache_creation|cache_write|cache_write_long|long_ttl|reasoning|cached_?input)_?tokens$|^(?:gen_ai\.usage|ai\.usage|llm\.usage|llm\.token_count)\./i;
+
+export function isUsageCountKey(key: string): boolean {
+	return USAGE_COUNT_KEY_RE.test(key);
+}
+
 export function isSensitiveKey(key: string): boolean {
 	return SENSITIVE_KEY_RE.test(key) || extraKeyPatterns.some((re) => re.test(key));
 }

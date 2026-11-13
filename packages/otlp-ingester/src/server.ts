@@ -84,6 +84,7 @@ import type { SinkDeadLetterRow } from "./sink-dead-letters.js";
 import { LoopCollapser } from "./loop-collapse.js";
 import { applySuppression } from "./suppression.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
+import { configureLlmPricing } from "./llm-pricing.js";
 import {
 	buildCompatReport,
 	evaluateCompat,
@@ -218,6 +219,9 @@ const INGESTER_INFO_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {}): IngesterApp {
 	configureRedaction(config);
+	// LLM prices: the built-in table, with a self-hosted override file
+	// (AUTTER_LLM_PRICES_FILE, validated by loadConfig) merged over it.
+	configureLlmPricing(config);
 	const store = new ClickHouseStore(config);
 	// Browser, Node and edge JS frames are resolved through uploaded source
 	// maps before they are fingerprinted (frames-v3), with parsed maps cached

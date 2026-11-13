@@ -155,6 +155,7 @@ SDKs you have installed and the ingester you point it at.
 | Per-route p95 and p99 latency in the 1-minute rollups (`route_percentiles`) | 1.11.0+ | – | – | – | – |  | `0022-route-latency-1m` |
 | Server bundles symbolicated, with source context lines (`server_source_maps`) | 1.11.0+ | 1.9.0+ | 1.9.0+ | – | 1.4.0+ | `/v1/sourcemaps` |  |
 | Wrapped errors grouped with their root cause (cause-v1) (`cause_fingerprint`) | 1.11.0+ | 1.9.0+ | 1.9.0+ | – | 1.4.0+ |  |  |
+| Cache-aware LLM cost (prompt-cache reads and writes) (`llm_cache_tokens`) | 1.16.0+ | 1.14.0+ | – | – | – |  | `0024-llm-cache-tokens` |
 <!-- compat-table:end -->
 
 Notes:
@@ -190,6 +191,13 @@ Notes:
   by `@autter/runtime-cli` (1.2.0: `sourcemaps setup` and `verify`), a build
   tool that reports no SDK version to the ingester. Older CLIs already send
   `autter_rtu_…` keys; only the ingester decides whether they work.
+- `llm_cache_tokens` (ingester 1.16.0, migration `0024-llm-cache-tokens`)
+  prices prompt-cache reads and writes, from any sender that reports them
+  ([LLM instrumentation](LLM-INSTRUMENTATION.md#prompt-caching-and-cost)).
+  `runtime-node` 1.14.0 reports Anthropic's cache tokens as part of the input
+  total; an older ingester prices all of that input at the full input rate,
+  so upgrade the ingester before the SDK. An older ingester also drops the
+  cache columns from the sink payload's `llmCalls`.
 - Upgrade order: ingester first (its migrations run at boot), then SDKs.
 
 ## Adding a feature

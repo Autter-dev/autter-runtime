@@ -1,4 +1,4 @@
-import { isSensitiveKey, scrubText } from "./redact.js";
+import { isSensitiveKey, isUsageCountKey, scrubText } from "./redact.js";
 import { BREADCRUMBS_ATTRIBUTE } from "./breadcrumbs.js";
 
 /**
@@ -42,9 +42,10 @@ export function sanitizeRuntimeContext(
 		}
 		if (/__proto__|constructor|prototype/i.test(key)) return undefined;
 		const usage =
-			// Numeric token COUNTS (incl. the AI rollup's cache_read_tokens) are
+			// Numeric token COUNTS (the GenAI usage contract and its aliases,
+			// the AI rollup's cache_read_tokens / cache_write_tokens) are
 			// usage, not secrets.
-			/(?:^|\.)(?:input|output|total|prompt|completion|cache_read|cache_creation)_?tokens$/i.test(key) &&
+			isUsageCountKey(key) &&
 			typeof value === "number" &&
 			Number.isFinite(value) &&
 			value >= 0;

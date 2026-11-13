@@ -111,6 +111,24 @@ export const OCCURRENCE_FRAME_RESOLUTION_COLUMNS: string[] = [
  */
 export const OCCURRENCE_COLLAPSE_COLUMNS: string[] = ["collapsed_count UInt32 DEFAULT 0"];
 
+/**
+ * Migration 0024 columns — shared with the baseline DDL in clickhouse.ts.
+ * Cache-aware LLM cost (1.16.0, llm.ts / llm-pricing.ts): prompt-cache
+ * reads and writes (subsets of `input_tokens`, which is the total prompt
+ * from 1.16.0), long-TTL writes (a subset of writes), reasoning (a subset
+ * of `output_tokens`), and the price table that estimated `cost_usd`.
+ * Rows written before 0024, and by older replicas during a rolling deploy,
+ * read 0 and '': an estimated row with `pricing_version = ''` was priced
+ * before cache pricing. Metadata-only ALTERs with constant defaults.
+ */
+export const LLM_CACHE_COLUMNS: string[] = [
+	"cache_read_tokens UInt64 DEFAULT 0",
+	"cache_write_tokens UInt64 DEFAULT 0",
+	"cache_write_long_tokens UInt64 DEFAULT 0",
+	"reasoning_tokens UInt64 DEFAULT 0",
+	"pricing_version LowCardinality(String) DEFAULT ''",
+];
+
 export interface Migration {
 	/** Unique, ordered id: "<serial>-<slug>". Never reuse or reorder. */
 	id: string;
@@ -311,6 +329,14 @@ export const MIGRATIONS: Migration[] = [
 	{
 		id: "0023-readiness-and-sink-dead-letters",
 		statements: [heartbeatTableDDL("{db}"), sinkDeadLettersTableDDL("{db}")],
+	},
+	// Cache-aware LLM cost (1.16.0): cache read/write/long-TTL write and
+	// reasoning token counts, and the price table version, per call.
+	{
+		id: "0024-llm-cache-tokens",
+		statements: LLM_CACHE_COLUMNS.map(
+			(column) => `ALTER TABLE {db}.runtime_llm_calls ADD COLUMN IF NOT EXISTS ${column}`,
+		),
 	},
 ];
 

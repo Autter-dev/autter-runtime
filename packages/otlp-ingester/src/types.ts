@@ -243,11 +243,28 @@ export interface RuntimeLlmCall {
 	model: string;
 	/** gen_ai.operation.name — "chat", "embeddings", "generateText", … */
 	operation: string;
+	/** Total prompt tokens, cache reads and cache writes included (1.16.0+; see llm.ts for the convention). */
 	inputTokens: number;
+	/** Total output tokens, reasoning included. */
 	outputTokens: number;
+	/** Subset of inputTokens read from the provider's prompt cache. Absent before 1.16.0 (read 0). */
+	cacheReadTokens?: number;
+	/** Subset of inputTokens written to the prompt cache, every TTL. */
+	cacheWriteTokens?: number;
+	/** Subset of cacheWriteTokens written at the long TTL (Anthropic 1 h, OpenAI 12 h). */
+	cacheWriteLongTokens?: number;
+	/** Subset of outputTokens spent on reasoning. */
+	reasoningTokens?: number;
 	costUsd: number;
 	/** reported = SDK sent the exact cost; estimated = built-in pricing table. */
 	costSource: "reported" | "estimated" | "none";
+	/**
+	 * The price table that produced an estimated cost: its as-of day
+	 * ("2026-11-14") or `override:<asOf>`; "" for reported and unpriced
+	 * calls. An estimated row with "" was priced before cache pricing
+	 * (ingester < 1.16.0).
+	 */
+	pricingVersion?: string;
 	durationMs: number;
 	status: "ok" | "error";
 	/** Provider exception type for failed calls ("RateLimitError", …); "" when ok. */

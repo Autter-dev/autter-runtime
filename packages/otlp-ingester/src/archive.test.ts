@@ -32,6 +32,7 @@ import {
 	type ArchiveTable,
 	type PartitionRows,
 } from "./archive.js";
+import { LLM_CACHE_COLUMNS } from "./migrations.js";
 
 /**
  * Tiered retention (archive.ts): partition planning, the "never drop a day
@@ -440,6 +441,8 @@ class FakeClickHouse implements ArchiveDb {
 	passes: Array<{ kind: string; ok: number; at: number }> = [];
 	/** engine_full per table (system.tables); a table not listed has no TTL. */
 	engines: Record<string, string> = {};
+	/** Column signature per table (system.columns); a table not listed has none. */
+	columns: Record<string, string> = {};
 	/** Seconds on the fake server clock (lock heartbeats). */
 	clock = 0;
 	/** Throw on the first statement matching this (crash injection). */
@@ -500,8 +503,11 @@ class FakeClickHouse implements ArchiveDb {
 			this.passes.push({ kind: m[2]!, ok: m[1] ? Number(m[3]) : 0, at: this.clock });
 			return;
 		}
-		if ((m = /CREATE TABLE (?:IF NOT EXISTS )?db\.(\w+) AS db\.\w+/.exec(sql))) {
-			if (!this.parts.has(m[1]!)) this.parts.set(m[1]!, new Map());
+		if ((m = /CREATE TABLE (IF NOT EXISTS )?db\.(\w+) AS db\.(\w+)/.exec(sql))) {
+			if (!this.parts.has(m[2]!)) this.parts.set(m[2]!, new Map());
+			if (!m[1] || this.columns[m[2]!] === undefined) {
+				if (this.columns[m[3]!] !== undefined) this.columns[m[2]!] = this.columns[m[3]!]!;
+			}
 			return;
 		}
 		if ((m = /ALTER TABLE db\.(\w+) MOVE PARTITION ID '(\d+)' TO TABLE db\.(\w+)/.exec(sql))) {
@@ -526,6 +532,10 @@ class FakeClickHouse implements ArchiveDb {
 			}
 			const rows = (this.parts.get(m[2]!)?.get(FakeClickHouse.day(m[3]!)) ?? []).filter((r) => r.org_id === m![4]);
 			this.objects.set(m[1]!, this.corruptWrites ? rows.slice(1) : [...rows]);
+			return;
+		}
+		if ((m = /^DROP TABLE IF EXISTS db\.(\w+_archive_stage)/.exec(trimmed))) {
+			delete this.columns[m[1]!];
 			return;
 		}
 		if (/^DROP TABLE/.test(trimmed)) return;
@@ -570,7 +580,10 @@ class FakeClickHouse implements ArchiveDb {
 					.map(([day, rows]) => ({ table, partition_id: day.replaceAll("-", ""), rows: String(rows.length) })),
 			) as T[];
 		}
-		if (/FROM system\.columns/.test(sql)) return [] as T[];
+		if ((m = /FROM system\.columns\s+WHERE database = 'db' AND table IN \(([^)]*)\)/.exec(sql))) {
+			const names = m[1]!.split(",").map((n) => n.trim().replace(/'/g, ""));
+			return names.filter((table) => this.columns[table] !== undefined).map((table) => ({ table, sig: this.columns[table] })) as T[];
+		}
 		if ((m = /SELECT (?:name, )?engine_full FROM system\.tables WHERE database = 'db' AND name (?:= '(\w+)'|IN \(([^)]*)\))/.exec(sql))) {
 			const names = m[1] ? [m[1]] : m[2]!.split(",").map((n) => n.trim().replace(/'/g, ""));
 			return names.map((name) => ({ name, engine_full: this.engines[name] ?? "MergeTree ORDER BY x" })) as T[];
@@ -653,6 +666,29 @@ test("archive pass: old days go to one object per org, the hot window stays, the
 	// A second pass has nothing to do.
 	const again = await archiver(fake).runOnce();
 	assert.equal(again.tables[0]?.steps, 0);
+});
+
+test("archive pass: after migration 0024 adds the LLM cache columns, the empty stage is recreated to match before a day moves", async (t) => {
+	t.mock.method(console, "log", () => {});
+	const fake = new FakeClickHouse();
+	const before = "org_id String, input_tokens UInt64, cost_usd Float64, started_at DateTime64(3, 'UTC')";
+	fake.columns.runtime_llm_calls = before;
+	fake.columns.runtime_llm_calls_archive_stage = before;
+	// The migration ran on the hot table only.
+	fake.columns.runtime_llm_calls = `${before}, ${LLM_CACHE_COLUMNS.join(", ")}`;
+	fake.add("runtime_llm_calls", "2026-07-01", { org_a: 2 });
+	const result = await archiver(fake, undefined, NOW, { ...ARCHIVE, tables: ["runtime_llm_calls"] }).runOnce();
+	const drop = fake.statements.findIndex((sql) => /DROP TABLE IF EXISTS db\.runtime_llm_calls_archive_stage SYNC/.test(sql));
+	const create = fake.statements.findIndex((sql) => /^CREATE TABLE db\.runtime_llm_calls_archive_stage AS db\.runtime_llm_calls$/.test(sql.trim()));
+	const move = fake.statements.findIndex((sql) => /runtime_llm_calls MOVE PARTITION/.test(sql));
+	assert.ok(drop >= 0 && create > drop && move > create, "stage dropped and recreated before the first MOVE PARTITION");
+	assert.equal(fake.columns.runtime_llm_calls_archive_stage, fake.columns.runtime_llm_calls);
+	assert.deepEqual(result.tables[0]?.archivedDays, ["2026-07-01"]);
+	assert.equal(archivedRows(fake, "2026-07-01"), 2);
+	// A second pass finds the structures equal and leaves the stage alone.
+	const statements = fake.statements.length;
+	await archiver(fake, undefined, NOW, { ...ARCHIVE, tables: ["runtime_llm_calls"] }).runOnce();
+	assert.ok(!fake.statements.slice(statements).some((sql) => /DROP TABLE IF EXISTS db\.runtime_llm_calls_archive_stage/.test(sql)));
 });
 
 test("archive pass: a failure after the move keeps the staged rows; the next pass resumes with the same objects", async () => {

@@ -1,9 +1,15 @@
 import { limitsWarning, loadConfig } from "./config.js";
 import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
+import { llmPricesAsOf } from "./llm-pricing.js";
 
 const config = loadConfig();
 const { app, store, sink, reportIngesterInfo, drops, collapse, limits, archiver, archiveStatus, edgeLatency } = createIngesterApp(config);
+if (config.llmPriceOverrides) {
+	console.log(
+		`LLM prices: built-in table as of ${llmPricesAsOf()}, ${config.llmPriceOverrides.models.length} model price(s) from AUTTER_LLM_PRICES_FILE (as of ${config.llmPriceOverrides.asOf})`,
+	);
+}
 const sharingWarning = limitsWarning(config);
 if (sharingWarning) console.warn(`WARNING: ${sharingWarning}`);
 

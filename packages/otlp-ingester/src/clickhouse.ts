@@ -43,6 +43,7 @@ import { sinkDeadLettersTableDDL, type SinkDeadLetterRow } from "./sink-dead-let
 import { inAppFrameResolution } from "./symbolicate.js";
 import type { SchemaStatus } from "./compat.js";
 import {
+	LLM_CACHE_COLUMNS,
 	MIGRATIONS,
 	OCCURRENCE_CODE_COLUMNS,
 	OCCURRENCE_COLLAPSE_COLUMNS,
@@ -308,7 +309,8 @@ export class ClickHouseStore {
 				session_id      String DEFAULT '',
 				attributes      String DEFAULT '{}' CODEC(ZSTD(1)),
 				started_at      DateTime64(3, 'UTC'),
-				ingested_at     DateTime64(3, 'UTC') DEFAULT now64(3)
+				ingested_at     DateTime64(3, 'UTC') DEFAULT now64(3),
+				${LLM_CACHE_COLUMNS.join(",\n\t\t\t\t")}
 			)
 			ENGINE = MergeTree
 			PARTITION BY toDate(started_at)
@@ -955,6 +957,11 @@ export class ClickHouseStore {
 				operation: c.operation,
 				input_tokens: Math.max(0, Math.round(c.inputTokens)),
 				output_tokens: Math.max(0, Math.round(c.outputTokens)),
+				cache_read_tokens: Math.max(0, Math.round(c.cacheReadTokens ?? 0)),
+				cache_write_tokens: Math.max(0, Math.round(c.cacheWriteTokens ?? 0)),
+				cache_write_long_tokens: Math.max(0, Math.round(c.cacheWriteLongTokens ?? 0)),
+				reasoning_tokens: Math.max(0, Math.round(c.reasoningTokens ?? 0)),
+				pricing_version: c.pricingVersion ?? "",
 				cost_usd: c.costUsd,
 				cost_source: c.costSource,
 				duration_ms: c.durationMs,

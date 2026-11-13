@@ -344,6 +344,17 @@ MANIFEST: dict[str, Any] = json.loads(
                 "@autter/runtime-edge": "1.4.0",
                 "@autter/runtime-next": "1.9.0"
             }
+        },
+        {
+            "id": "llm_cache_tokens",
+            "title": "Cache-aware LLM cost (prompt-cache reads and writes)",
+            "ingester": "1.16.0",
+            "migrations": [
+                "0024-llm-cache-tokens"
+            ],
+            "sdks": {
+                "@autter/runtime-node": "1.14.0"
+            }
         }
     ]
 }

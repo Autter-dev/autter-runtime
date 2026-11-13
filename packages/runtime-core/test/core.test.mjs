@@ -193,12 +193,13 @@ test("inline logs are bounded at 50 and track the highest level", () => {
 test("AI rollup accumulates usage and distinct models", () => {
 	let ai = addAiUsage(undefined, { model: "gpt-5-mini", inputTokens: 10, outputTokens: 5, costUsd: 0.001 });
 	ai = addAiUsage(ai, { model: "gpt-5-mini", inputTokens: 1, cacheReadTokens: 4, costUsd: 0.002 });
-	ai = addAiUsage(ai, { model: "claude-sonnet-4" });
+	ai = addAiUsage(ai, { model: "claude-sonnet-4", inputTokens: 900, cacheWriteTokens: 800 });
 	assert.deepEqual(ai, {
 		calls: 3,
-		input_tokens: 11,
+		input_tokens: 911,
 		output_tokens: 5,
 		cache_read_tokens: 4,
+		cache_write_tokens: 800,
 		cost_usd: 0.003,
 		models: ["gpt-5-mini", "claude-sonnet-4"],
 	});

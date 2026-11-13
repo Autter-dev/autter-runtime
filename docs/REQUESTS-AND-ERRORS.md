@@ -243,11 +243,16 @@ to the producer span. Malformed carriers are ignored.
 
 `withLlmCall`, `trackLlmCall` and `instrumentLlmClient` also add each call to
 the current operation's `autter.operation.ai`:
-`{ calls, input_tokens, output_tokens, cache_read_tokens, cost_usd, models[] }`.
-`cost_usd` sums the costs you report (`setCost`, `costUsd`); per-call spans still
-get the ingester's price-table estimate. Cache reads come from
-`setUsage({ cacheReadTokens })` or the provider response (OpenAI
-`prompt_tokens_details.cached_tokens`, Anthropic `cache_read_input_tokens`).
+`{ calls, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, models[] }`.
+`cost_usd` sums the costs you report (`setCost`, `costUsd`, OpenRouter's
+`usage.cost`); per-call spans still get the ingester's price-table estimate.
+`input_tokens` counts every prompt token, cache reads and writes included
+(from `@autter/runtime-node` 1.14.0 also for Anthropic and Bedrock, whose
+`input_tokens` leave the cache out), and `cache_read_tokens` /
+`cache_write_tokens` are the parts of it served from or written to the
+provider cache. They come from `setUsage({ cacheReadTokens, cacheWriteTokens })`
+or the provider response; see
+[token usage and prompt caching](LLM-INSTRUMENTATION.md#token-usage-and-prompt-caching).
 The rollup is per operation (not added to ancestors), so totals never double count.
 
 ## `waitUntil` (serverless)

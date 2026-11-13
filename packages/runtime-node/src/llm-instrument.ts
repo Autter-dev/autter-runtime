@@ -6,17 +6,32 @@ import {
 } from "@opentelemetry/api";
 import { autterLlmTracer, recordError, redactWithActive } from "./server.js";
 import { recordOperationAiUsage } from "./logger.js";
+import { noteCompatFeature } from "./compat.js";
+import {
+	extractRawUsage,
+	finalizeUsage,
+	LLM_CACHE_TOKENS_FEATURE,
+	mergeRawUsage,
+	USAGE_CONVENTION,
+	USAGE_CONVENTION_ATTR,
+	usageContractAttributes,
+	type NormalizedUsage,
+	type RawUsage,
+} from "./llm-usage.js";
 
 /**
  * One-line LLM client auto-instrumentation:
  *
  *   const openai = instrumentLlmClient(new OpenAI());
  *
- * Wraps a provider SDK instance (OpenAI, Anthropic, Google GenAI, or any
- * client with the same call shapes) in a deep proxy. Every model invocation —
- * a method like `create`/`stream`/`generateContent` called with an object
- * argument carrying a `model` — is recorded as a gen_ai span on the
- * always-recorded pipe: model, tokens, latency, errors, and (ingester-side)
+ * Wraps a provider SDK instance (OpenAI, Anthropic, Google GenAI, Bedrock
+ * Runtime, OpenRouter through the OpenAI SDK, or any client with the same
+ * call shapes) in a deep proxy. Every model invocation — a method like
+ * `create`/`stream`/`generateContent` called with an object argument
+ * carrying a `model`, or `send(new ConverseCommand({ modelId }))` — is
+ * recorded as a gen_ai span on the always-recorded pipe: model, tokens
+ * (cache reads, cache writes and reasoning included, normalised to the
+ * "total" convention in llm-usage.ts), latency, errors, and (ingester-side)
  * USD cost. Streaming responses are supported: the span stays open until the
  * stream is consumed, picking up usage from the final chunks.
  *
@@ -39,7 +54,7 @@ export interface InstrumentLlmOptions {
 // method elsewhere on the client doesn't produce junk spans.
 const CALL_METHODS = new Set([
 	"create", // openai chat/completions/embeddings/responses, anthropic messages
-	"stream", // anthropic messages.stream
+	"stream", // anthropic messages.stream, openai chat.completions.stream / responses.stream
 	"generateContent",
 	"generateContentStream", // google genai
 	"embedContent",
@@ -47,90 +62,66 @@ const CALL_METHODS = new Set([
 	"parse", // openai beta structured outputs
 ]);
 
+// AWS SDK v3 Bedrock Runtime: `client.send(new ConverseCommand({ modelId }))`.
+const BEDROCK_COMMANDS = /^Converse(Stream)?Command$/;
+
+// Base-URL hosts win over the constructor name: an OpenAI SDK client pointed
+// at OpenRouter (or Groq, Mistral, …) is that provider, not "openai".
+const HOST_PROVIDERS: [RegExp, string][] = [
+	[/(^|\.)openrouter\.ai$/, "openrouter"],
+	[/(^|\.)groq\.com$/, "groq"],
+	[/(^|\.)mistral\.ai$/, "mistral"],
+	[/(^|\.)deepseek\.com$/, "deepseek"],
+	[/(^|\.)anthropic\.com$/, "anthropic"],
+	[/googleapis\.com$/, "google"],
+	[/openai/, "openai"],
+];
+
 function detectProvider(client: object): string {
-	const name = client.constructor?.name?.toLowerCase() ?? "";
-	for (const known of ["openai", "anthropic", "mistral", "groq", "cohere"]) {
-		if (name.includes(known)) return known;
-	}
-	if (name.includes("google") || name.includes("genai")) return "google";
 	const baseUrl = String(
 		(client as { baseURL?: unknown; baseUrl?: unknown }).baseURL ??
 			(client as { baseUrl?: unknown }).baseUrl ??
 			"",
 	);
-	const host = baseUrl.match(/https?:\/\/([^/]+)/)?.[1] ?? "";
-	if (host.includes("openai")) return "openai";
-	if (host.includes("anthropic")) return "anthropic";
-	if (host.includes("googleapis")) return "google";
-	if (host.includes("mistral")) return "mistral";
-	if (host.includes("groq")) return "groq";
+	const host = baseUrl.match(/https?:\/\/([^/:]+)/)?.[1]?.toLowerCase() ?? "";
+	if (host) {
+		for (const [pattern, provider] of HOST_PROVIDERS) {
+			if (pattern.test(host)) return provider;
+		}
+	}
+	const name = client.constructor?.name?.toLowerCase() ?? "";
+	if (name.includes("bedrockruntime")) return "aws.bedrock";
+	for (const known of ["openai", "anthropic", "mistral", "groq", "cohere"]) {
+		if (name.includes(known)) return known;
+	}
+	if (name.includes("google") || name.includes("genai")) return "google";
 	return "unknown";
 }
 
-interface UsageShape {
-	inputTokens: number | undefined;
-	outputTokens: number | undefined;
-	cacheReadTokens?: number | undefined;
-	responseModel: string | undefined;
-}
-
-/** Probe the known usage shapes: OpenAI chat + responses, Anthropic, Google. */
-function extractUsage(result: unknown): UsageShape {
-	const r = result as {
-		usage?: Record<string, number>;
-		usageMetadata?: Record<string, number>;
-		message?: { usage?: Record<string, number> };
-		model?: unknown;
-		modelVersion?: unknown;
-	} | null;
-	const usage = r?.usage ?? r?.message?.usage;
-	const meta = r?.usageMetadata;
-	const details = (usage as { prompt_tokens_details?: { cached_tokens?: unknown } } | undefined)
-		?.prompt_tokens_details;
-	const cached =
-		usage?.cache_read_input_tokens ??
-		(typeof details?.cached_tokens === "number" ? details.cached_tokens : undefined) ??
-		meta?.cachedContentTokenCount;
-	const input =
-		usage?.prompt_tokens ??
-		usage?.input_tokens ??
-		meta?.promptTokenCount ??
-		undefined;
-	const output =
-		usage?.completion_tokens ??
-		usage?.output_tokens ??
-		meta?.candidatesTokenCount ??
-		undefined;
-	const responseModel = r?.model ?? r?.modelVersion;
-	return {
-		inputTokens: typeof input === "number" ? input : undefined,
-		outputTokens: typeof output === "number" ? output : undefined,
-		cacheReadTokens: typeof cached === "number" ? cached : undefined,
-		responseModel:
-			typeof responseModel === "string" ? responseModel : undefined,
-	};
+/** Set the usage contract (see llm-usage.ts) and the served model on the span. */
+function applyUsage(span: Span, raw: RawUsage): NormalizedUsage {
+	const usage = finalizeUsage(raw);
+	const attributes = usageContractAttributes(usage);
+	if (Object.keys(attributes).length) {
+		span.setAttributes(attributes);
+		noteCompatFeature(LLM_CACHE_TOKENS_FEATURE);
+	}
+	if (raw.responseModel) {
+		span.setAttribute("gen_ai.response.model", raw.responseModel);
+	}
+	return usage;
 }
 
 /** Fold one finished call into the current operation's `autter.operation.ai`. */
-function rollUp(model: string, usage: UsageShape): void {
+function rollUp(model: string, raw: RawUsage, usage: NormalizedUsage): void {
 	recordOperationAiUsage({
-		model: usage.responseModel ?? model,
+		model: raw.responseModel ?? model,
 		...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
 		...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
 		...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+		...(usage.cacheWriteTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+		...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
 	});
-}
-
-function applyUsage(span: Span, usage: UsageShape): void {
-	if (usage.inputTokens !== undefined) {
-		span.setAttribute("gen_ai.usage.input_tokens", usage.inputTokens);
-	}
-	if (usage.outputTokens !== undefined) {
-		span.setAttribute("gen_ai.usage.output_tokens", usage.outputTokens);
-	}
-	if (usage.responseModel) {
-		span.setAttribute("gen_ai.response.model", usage.responseModel);
-	}
 }
 
 function endWithError(span: Span, err: unknown): void {
@@ -140,32 +131,42 @@ function endWithError(span: Span, err: unknown): void {
 	span.end();
 }
 
-/**
- * Wrap a streaming result so the span ends when the stream finishes (or
- * errors), accumulating usage from the chunks that carry it: OpenAI's final
- * chunk (with `stream_options: { include_usage: true }`), Anthropic's
- * message_start/message_delta events, Google's per-chunk usageMetadata.
- */
-function wrapStream<T extends object>(stream: T, span: Span, model: string): T {
+/** One-shot finisher shared by the stream wrappers. */
+function streamFinisher(span: Span, model: string, seen: RawUsage) {
 	let ended = false;
-	const seen: UsageShape = {
-		inputTokens: undefined,
-		outputTokens: undefined,
-		responseModel: undefined,
-	};
-	const finish = (err?: unknown) => {
+	return (outcome?: { error: unknown } | { failed: true }) => {
 		if (ended) return;
 		ended = true;
-		applyUsage(span, seen);
-		rollUp(model, seen);
+		const usage = applyUsage(span, seen);
+		rollUp(model, seen, usage);
 		span.setAttribute("autter.llm.streamed", true);
-		if (err !== undefined) {
-			endWithError(span, err);
+		if (outcome && "error" in outcome) {
+			endWithError(span, outcome.error);
+		} else if (outcome) {
+			span.setStatus({ code: SpanStatusCode.ERROR, message: "LLM stream failed" });
+			span.end();
 		} else {
 			span.setStatus({ code: SpanStatusCode.OK });
 			span.end();
 		}
 	};
+}
+
+/**
+ * Wrap a streaming result so the span ends when the stream finishes (or
+ * errors), accumulating usage from the chunks that carry it: OpenAI's final
+ * chunk (with `stream_options: { include_usage: true }`), OpenAI Responses'
+ * `response.completed`, Anthropic's message_start/message_delta events,
+ * Google's per-chunk usageMetadata, Bedrock's ConverseStream `metadata`.
+ */
+function wrapStream<T extends object>(
+	stream: T,
+	span: Span,
+	model: string,
+	provider: string,
+): T {
+	const seen: RawUsage = {};
+	const finish = streamFinisher(span, model, seen);
 	return new Proxy(stream, {
 		get(target, prop, receiver) {
 			if (prop === Symbol.asyncIterator) {
@@ -178,17 +179,13 @@ function wrapStream<T extends object>(stream: T, span: Span, model: string): T {
 							try {
 								const step = await inner.next();
 								if (!step.done) {
-									const usage = extractUsage(step.value);
-									if (usage.inputTokens !== undefined) seen.inputTokens = usage.inputTokens;
-									if (usage.outputTokens !== undefined) seen.outputTokens = usage.outputTokens;
-									if (usage.cacheReadTokens !== undefined) seen.cacheReadTokens = usage.cacheReadTokens;
-									if (usage.responseModel) seen.responseModel = usage.responseModel;
+									mergeRawUsage(seen, extractRawUsage(step.value, provider));
 								} else {
 									finish();
 								}
 								return step;
 							} catch (err) {
-								finish(err);
+								finish({ error: err });
 								throw err;
 							}
 						},
@@ -199,7 +196,7 @@ function wrapStream<T extends object>(stream: T, span: Span, model: string): T {
 								: { done: true, value: undefined };
 						},
 						async throw(err?: unknown): Promise<IteratorResult<unknown>> {
-							finish(err);
+							finish({ error: err });
 							if (inner.throw) return inner.throw(err);
 							throw err;
 						},
@@ -210,6 +207,82 @@ function wrapStream<T extends object>(stream: T, span: Span, model: string): T {
 			return typeof value === "function" ? value.bind(target) : value;
 		},
 	});
+}
+
+interface EventStreamHelper {
+	on(event: string, listener: (...args: unknown[]) => void): unknown;
+	done(): Promise<void>;
+	errored?: boolean;
+	finalMessage?: unknown;
+	finalChatCompletion?: unknown;
+	finalResponse?: unknown;
+}
+
+/**
+ * The SDKs' stream helpers (Anthropic `messages.stream()` → MessageStream,
+ * OpenAI `chat.completions.stream()` → ChatCompletionStream,
+ * `responses.stream()` → ResponseStream) read the HTTP stream eagerly from
+ * the moment they are created, and are often consumed only through
+ * `await stream.finalMessage()` / `.finalResponse()` / `.on("text", …)`,
+ * never iterated, so an iterator wrapper would never end the span.
+ */
+function isEventStreamHelper(value: unknown): value is EventStreamHelper {
+	const v = value as Partial<Record<string, unknown>> | null;
+	return (
+		!!v &&
+		typeof v.on === "function" &&
+		typeof v.done === "function" &&
+		(typeof v.finalMessage === "function" ||
+			typeof v.finalChatCompletion === "function" ||
+			typeof v.finalResponse === "function")
+	);
+}
+
+/**
+ * Follow a stream helper through its own events and end the span on its
+ * `end` event, which both SDKs emit after success, error and abort. No
+ * `error`/`abort` listener is added: either would change the SDK's
+ * behaviour (an unhandled stream error stops surfacing as an unhandled
+ * rejection), so a failure is read from `stream.errored` instead. The
+ * stream is returned untouched.
+ */
+function followEventStream<T extends EventStreamHelper>(
+	stream: T,
+	span: Span,
+	model: string,
+	provider: string,
+): T {
+	const seen: RawUsage = {};
+	const finish = streamFinisher(span, model, seen);
+	const absorb = (event: unknown) => {
+		try {
+			mergeRawUsage(seen, extractRawUsage(event, provider));
+		} catch {
+			/* never break the caller's stream */
+		}
+	};
+	const events: string[] = [];
+	if (typeof stream.finalMessage === "function") events.push("streamEvent", "finalMessage");
+	if (typeof stream.finalChatCompletion === "function") events.push("chunk", "finalChatCompletion");
+	if (typeof stream.finalResponse === "function") events.push("event");
+	try {
+		for (const event of events) stream.on(event, absorb);
+		stream.on("end", () => {
+			try {
+				finish(stream.errored ? { failed: true } : undefined);
+			} catch {
+				/* never break the caller's stream */
+			}
+		});
+	} catch {
+		// An `on` we don't understand: fall back to the iterator wrapper.
+		return wrapStream(stream, span, model, provider);
+	}
+	return stream;
+}
+
+function isAsyncIterable(value: unknown): value is object {
+	return !!value && typeof value === "object" && Symbol.asyncIterator in value;
 }
 
 export function instrumentLlmClient<T extends object>(
@@ -225,22 +298,49 @@ export function instrumentLlmClient<T extends object>(
 			: options?.userId;
 	}
 
+	/** Record a non-stream result (or route a stream to its wrapper). */
+	function settle(result: unknown, span: Span, model: string, bedrock: boolean): unknown {
+		if (isEventStreamHelper(result)) {
+			return followEventStream(result, span, model, provider);
+		}
+		if (isAsyncIterable(result)) {
+			return wrapStream(result, span, model, provider);
+		}
+		// Bedrock ConverseStream: `{ stream: AsyncIterable<event>, $metadata }`.
+		const bedrockStream = (result as { stream?: unknown } | null)?.stream;
+		if (bedrock && isAsyncIterable(bedrockStream)) {
+			return {
+				...(result as object),
+				stream: wrapStream(bedrockStream, span, model, provider),
+			};
+		}
+		const raw = extractRawUsage(result, provider);
+		const usage = applyUsage(span, raw);
+		rollUp(model, raw, usage);
+		span.setStatus({ code: SpanStatusCode.OK });
+		span.end();
+		return result;
+	}
+
 	function traceCall(
 		fn: (...args: unknown[]) => unknown,
 		self: object,
 		callPath: string,
 		args: unknown[],
+		model: string,
 	): unknown {
-		const request = args[0] as { model: string; stream?: unknown };
+		// Only `send` with a Converse command gets here (see callModel).
+		const bedrock = callPath === "send" || callPath.endsWith(".send");
 		const operation = /embed/i.test(callPath) ? "embeddings" : "chat";
 		const userId = resolveUserId();
-		const span = autterLlmTracer().startSpan(`${operation} ${request.model}`, {
+		const span = autterLlmTracer().startSpan(`${operation} ${model}`, {
 			kind: SpanKind.CLIENT,
 			attributes: {
 				"gen_ai.operation.name": operation,
 				"gen_ai.provider.name": provider,
 				"gen_ai.system": provider,
-				"gen_ai.request.model": request.model,
+				"gen_ai.request.model": model,
+				[USAGE_CONVENTION_ATTR]: USAGE_CONVENTION,
 				...(userId ? { "autter.user_id": userId } : {}),
 				...redactWithActive(options?.attributes),
 			},
@@ -253,38 +353,36 @@ export function instrumentLlmClient<T extends object>(
 			throw err;
 		}
 		if (!(result instanceof Promise)) {
-			// Anthropic's .stream() returns a MessageStream synchronously.
-			if (result && typeof result === "object" && Symbol.asyncIterator in result) {
-				return wrapStream(result, span, request.model);
-			}
-			const usage = extractUsage(result);
-			applyUsage(span, usage);
-			rollUp(request.model, usage);
-			span.setStatus({ code: SpanStatusCode.OK });
-			span.end();
-			return result;
+			// Anthropic's .stream() and OpenAI's .stream() helpers return
+			// synchronously.
+			return settle(result, span, model, bedrock);
 		}
 		return result.then(
-			(resolved) => {
-				if (
-					resolved &&
-					typeof resolved === "object" &&
-					Symbol.asyncIterator in resolved
-				) {
-					return wrapStream(resolved, span, request.model);
-				}
-				const usage = extractUsage(resolved);
-				applyUsage(span, usage);
-				rollUp(request.model, usage);
-				span.setStatus({ code: SpanStatusCode.OK });
-				span.end();
-				return resolved;
-			},
+			(resolved) => settle(resolved, span, model, bedrock),
 			(err) => {
 				endWithError(span, err);
 				throw err;
 			},
 		);
+	}
+
+	/** The model a call is for, or undefined when it isn't a model call. */
+	function callModel(prop: string, args: unknown[]): string | undefined {
+		const first = args[0] as
+			| { model?: unknown; input?: { modelId?: unknown } }
+			| undefined;
+		if (!first || typeof first !== "object") return undefined;
+		if (CALL_METHODS.has(prop)) {
+			return typeof first.model === "string" ? first.model : undefined;
+		}
+		if (
+			prop === "send" &&
+			BEDROCK_COMMANDS.test(first.constructor?.name ?? "") &&
+			typeof first.input?.modelId === "string"
+		) {
+			return first.input.modelId;
+		}
+		return undefined;
 	}
 
 	function deepProxy<O extends object>(target: O, path = ""): O {
@@ -296,10 +394,10 @@ export function instrumentLlmClient<T extends object>(
 				if (typeof prop === "symbol") return value;
 				const propPath = path ? `${path}.${prop}` : prop;
 				if (typeof value === "function") {
-					if (CALL_METHODS.has(prop)) {
+					if (CALL_METHODS.has(prop) || prop === "send") {
 						return (...args: unknown[]) => {
-							const first = args[0] as { model?: unknown } | undefined;
-							if (first && typeof first === "object" && typeof first.model === "string") {
+							const model = callModel(prop, args);
+							if (model !== undefined) {
 								// Invoke with the RAW object as `this` — SDK classes use
 								// private fields, which break under a proxied receiver.
 								return traceCall(
@@ -307,6 +405,7 @@ export function instrumentLlmClient<T extends object>(
 									t,
 									propPath,
 									args,
+									model,
 								);
 							}
 							return (value as (...a: unknown[]) => unknown).apply(t, args);

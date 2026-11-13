@@ -373,7 +373,30 @@ const USAGE_TOKEN_KEYS = new Set([
         "gen_ai.usage.completion_tokens",
         "gen_ai.usage.total_tokens",
         "gen_ai.usage.token_count",
+        // Cache and reasoning counts: the Autter "total" usage contract
+        // (subsets of input/output), the OTel GenAI semconv names and the
+        // older OpenLLMetry spellings.
+        "cache_write_tokens",
+        "gen_ai.usage.cache_read.input_tokens",
+        "gen_ai.usage.cache_creation.input_tokens",
+        "gen_ai.usage.reasoning.output_tokens",
+        "gen_ai.usage.cache_read_input_tokens",
+        "gen_ai.usage.cache_creation_input_tokens",
+        "gen_ai.usage.reasoning_tokens",
+        "autter.llm.cache_creation.long_ttl_tokens",
+        "llm.usage.total_tokens",
+        // Vercel AI SDK telemetry (compared lower-cased).
+        "ai.usage.prompttokens",
+        "ai.usage.completiontokens",
+        "ai.usage.inputtokens",
+        "ai.usage.outputtokens",
+        "ai.usage.totaltokens",
+        "ai.usage.cachedinputtokens",
+        "ai.usage.reasoningtokens",
 ]);
+
+/** OpenInference counts: `llm.token_count.prompt`, `….prompt_details.cache_read`, … */
+const OPENINFERENCE_TOKEN_COUNT = /^llm\.token_count\.[a-z_]+(?:\.[a-z_]+)?$/;
 
 function isSensitiveKey(
         key: string,
@@ -384,7 +407,10 @@ function isSensitiveKey(
 
         // Canonical GenAI usage attributes are safe when they contain
         // valid non-negative numeric counts.
-        if (USAGE_TOKEN_KEYS.has(lowered)) {
+        if (
+                USAGE_TOKEN_KEYS.has(lowered) ||
+                OPENINFERENCE_TOKEN_COUNT.test(lowered)
+        ) {
                 return !(
                         typeof value === "number" &&
                         Number.isFinite(value) &&

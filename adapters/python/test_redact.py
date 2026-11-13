@@ -61,6 +61,47 @@ class Attributes(unittest.TestCase):
         self.assertEqual(out["max_tokens"], MASK)
         self.assertEqual(out["note"], f"contact {MASK}")
 
+    def test_cache_and_reasoning_counters_survive(self):
+        keys = [
+            "gen_ai.usage.input_tokens",
+            "gen_ai.usage.output_tokens",
+            "gen_ai.usage.cache_read.input_tokens",
+            "gen_ai.usage.cache_creation.input_tokens",
+            "gen_ai.usage.reasoning.output_tokens",
+            "gen_ai.usage.cache_read_input_tokens",
+            "gen_ai.usage.cache_creation_input_tokens",
+            "gen_ai.usage.reasoning_tokens",
+            "autter.llm.cache_creation.long_ttl_tokens",
+            "llm.token_count.prompt",
+            "llm.token_count.completion",
+            "llm.token_count.total",
+            "llm.token_count.prompt_details.cache_read",
+            "llm.token_count.prompt_details.cache_write",
+            "llm.token_count.completion_details.reasoning",
+            "ai.usage.promptTokens",
+            "ai.usage.cachedInputTokens",
+            "ai.usage.reasoningTokens",
+            "cache_write_tokens",
+        ]
+        out = redact_attributes({key: 9000 for key in keys})
+        for key in keys:
+            with self.subTest(key):
+                self.assertEqual(out[key], 9000)
+
+    def test_usage_keys_still_mask_non_counts(self):
+        out = redact_attributes(
+            {
+                "gen_ai.usage.cache_read.input_tokens": "9000",
+                "llm.token_count.prompt": -1,
+                "access_token": 12345,
+                "max_tokens": 100,
+            }
+        )
+        self.assertEqual(out["gen_ai.usage.cache_read.input_tokens"], MASK)
+        self.assertEqual(out["llm.token_count.prompt"], MASK)
+        self.assertEqual(out["access_token"], MASK)
+        self.assertEqual(out["max_tokens"], MASK)
+
     def test_does_not_mutate_input(self):
         original = {"password": "x", "nested": {"token": "y"}}
         redact_attributes(original)

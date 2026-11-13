@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+Packages: `runtime-node` 1.14.0. Release after the ingester that prices cache tokens (`llm_cache_tokens`); see the upgrade notes.
+
+### Fixes
+
+- LLM token counts account for prompt caching (`runtime-node`). `instrumentLlmClient` sent one input count, as the provider reported it: Anthropic's `input_tokens` leaves cache reads and writes out, so a call that read 9,000 cached tokens was recorded with 1,000 input tokens, while OpenAI's and Gemini's input includes cached tokens, which were then priced at the full input rate. Every LLM span now reports all prompt tokens in `gen_ai.usage.input_tokens` and the cached parts in `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens` (with the long-TTL writes in `autter.llm.cache_creation.long_ttl_tokens`), all output in `gen_ai.usage.output_tokens` and the reasoning part in `gen_ai.usage.reasoning.output_tokens`, and is marked `autter.llm.usage_convention = "total"`. Read from OpenAI Chat and Responses, Anthropic, Gemini, OpenRouter and Bedrock responses, streamed or not ([docs/LLM-INSTRUMENTATION.md](docs/LLM-INSTRUMENTATION.md#token-usage-and-prompt-caching)).
+- Gemini thinking tokens count as output (`runtime-node`). They are billed as output but are not part of `candidatesTokenCount`, so output was under-counted for thinking models.
+- Streamed OpenAI Responses calls record their usage (`runtime-node`), from the `response.completed` event, and streamed Anthropic calls their served model (`gen_ai.response.model`, from `message_start`).
+- `anthropic.messages.stream()`, `openai.chat.completions.stream()` and `openai.responses.stream()` end their span when the stream ends, also when the stream is only awaited (`await stream.finalMessage()`) and never iterated; the span stayed open before. The helper is returned untouched, and no `error` listener is added, so an unhandled stream error still surfaces as before.
+- Cache and reasoning counts are no longer masked as secrets (`runtime-node`, Python adapter). The redactor masks keys containing "token" unless they are known usage counts; `gen_ai.usage.cache_read.input_tokens`, the other contract keys, the OTel GenAI and OpenLLMetry cache/reasoning keys, OpenInference `llm.token_count.*` and Vercel AI SDK `ai.usage.*Tokens` were exported as `[redacted]`. Non-numeric values under these keys are still masked.
+
+### Changes
+
+- OpenRouter is detected by its base URL (`runtime-node`): an OpenAI SDK client pointed at `openrouter.ai` reports `gen_ai.provider.name = "openrouter"`, not `openai`, and its `usage.cost` (USD; plus `upstream_inference_cost` for BYOK) is reported as `autter.llm.cost_usd`. The base URL now wins over the class name for every provider, so an OpenAI SDK client pointed at Groq, Mistral or DeepSeek reports that provider.
+- Bedrock Runtime is instrumented (`runtime-node`): `instrumentLlmClient(new BedrockRuntimeClient())` records `send(new ConverseCommand(...))` and `ConverseStreamCommand` calls (`gen_ai.provider.name = "aws.bedrock"`).
+- `LlmUsage` (`withLlmCall`'s `setUsage`, `trackLlmCall`) takes `cacheWriteTokens`, `cacheWriteLongTtlTokens` and `reasoningTokens`; `inputTokens` is documented as the total including cache reads and writes, `outputTokens` as the total including reasoning. Existing callers keep working: an `inputTokens` smaller than its own cache counts is read as Anthropic's uncached count and the cache counts are added.
+- The operation rollup `autter.operation.ai` has `cache_write_tokens`, and its `input_tokens` is the cache-inclusive total for every provider.
+
+### Upgrade notes
+
+- Upgrade `otlp-ingester` first. An older ingester prices the whole Anthropic and Bedrock input, cache reads and writes now included, at the full input rate. The compatibility check and `doctor` report it (`llm_cache_tokens`).
+- Expect LLM costs to move after upgrading, because the old ones were wrong: Anthropic and Bedrock costs go up (cache reads and writes were not counted), OpenAI and Gemini costs go down (cached tokens were priced at the full input rate), Gemini output goes up by the thinking tokens. Earlier calls are not recomputed.
+
 ## [1.17.1] - 2026-11-12
 
 Packages: `otlp-ingester` 1.15.1. No SDK changes.

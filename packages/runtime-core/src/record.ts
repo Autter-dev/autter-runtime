@@ -37,6 +37,8 @@ export interface AiRollup {
 	input_tokens: number;
 	output_tokens: number;
 	cache_read_tokens: number;
+	/** Prompt tokens written to the provider cache (a subset of input_tokens). */
+	cache_write_tokens: number;
 	cost_usd: number;
 	models: string[];
 }
@@ -46,6 +48,7 @@ export interface AiUsageInput {
 	inputTokens?: number;
 	outputTokens?: number;
 	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
 	costUsd?: number;
 }
 
@@ -125,6 +128,7 @@ export function addAiUsage(
 		input_tokens: 0,
 		output_tokens: 0,
 		cache_read_tokens: 0,
+		cache_write_tokens: 0,
 		cost_usd: 0,
 		models: [],
 	};
@@ -136,6 +140,7 @@ export function addAiUsage(
 	next.input_tokens += count(usage.inputTokens);
 	next.output_tokens += count(usage.outputTokens);
 	next.cache_read_tokens += count(usage.cacheReadTokens);
+	next.cache_write_tokens += count(usage.cacheWriteTokens);
 	if (
 		typeof usage.costUsd === "number" &&
 		Number.isFinite(usage.costUsd) &&

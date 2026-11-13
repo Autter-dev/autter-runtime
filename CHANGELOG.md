@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-11-14
+
 Packages: `otlp-ingester` 1.16.0, `runtime-node` 1.14.0, and the local `dashboard` image. Release the ingester before `runtime-node` 1.14.0 (`llm_cache_tokens`); see the upgrade notes.
 
 ### Fixes

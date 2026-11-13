@@ -464,6 +464,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					service: resource.service,
 					environment: resource.environment,
 					release: resource.release,
+					spanKind: kind,
 				});
 				if (llmCall) llmCalls.push(llmCall);
 			}

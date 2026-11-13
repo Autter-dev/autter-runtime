@@ -4,6 +4,21 @@ use crate::ch::ChError;
 use crate::ctx::{App, Ctx, bucket, dense, scope};
 use crate::fmt;
 use crate::layout::{card, chart, empty, kpi, sev, when};
+use crate::pages::llm;
+
+/// "120 calls · 64% cached · estimated": call count, the share of input
+/// tokens served from the prompt cache, and how the spend was priced.
+pub fn llm_spend_sub(calls: u64, input: u64, cached: u64, basis: &llm::Basis) -> String {
+    let mut parts = vec![format!("{} calls", fmt::compact(calls))];
+    if input > 0 {
+        parts.push(format!("{} cached", llm::cache_share(cached, input)));
+    }
+    let label = basis.label();
+    if !label.is_empty() {
+        parts.push(label);
+    }
+    parts.join(" · ")
+}
 
 pub async fn render(app: &App, ctx: &Ctx) -> Result<Markup, ChError> {
     let p = ctx.params();
@@ -53,7 +68,9 @@ pub async fn render(app: &App, ctx: &Ctx) -> Result<Markup, ChError> {
         w = scope("occurred_at")
     );
     let llm_sql = format!(
-        "SELECT count(), sum(cost_usd) FROM runtime_llm_calls WHERE {w}",
+        "SELECT count(), sum(cost_usd), sum(input_tokens), sum(cache_read_tokens), {basis}
+         FROM runtime_llm_calls WHERE {w}",
+        basis = llm::BASIS_COLUMNS,
         w = scope("started_at")
     );
 
@@ -79,7 +96,11 @@ pub async fn render(app: &App, ctx: &Ctx) -> Result<Markup, ChError> {
     let occ_total = es[0].iter().sum::<f64>() as u64;
     let occ_err = es[1].iter().sum::<f64>() as u64;
     let (p95v, timed) = p95.first().map(|r| (r.f(0), r.u(1))).unwrap_or((0.0, 0));
-    let (llm_calls, llm_cost) = llm.first().map(|r| (r.u(0), r.f(1))).unwrap_or((0, 0.0));
+    let (llm_calls, llm_cost, llm_in, llm_cached, llm_basis) = llm
+        .first()
+        .map(|r| (r.u(0), r.f(1), r.u(2), r.u(3), llm::Basis::from_row(&r, 4)))
+        .unwrap_or_default();
+    let llm_sub = llm_spend_sub(llm_calls, llm_in, llm_cached, &llm_basis);
     let avg = if reqs > 0 { dur / reqs as f64 } else { 0.0 };
 
     let req_tone = if reqs > 0 && req_errs * 100 >= reqs * 5 {
@@ -95,7 +116,7 @@ pub async fn render(app: &App, ctx: &Ctx) -> Result<Markup, ChError> {
             (kpi("Failure rate", &fmt::pct(req_errs, reqs), Some(&format!("{} failed", fmt::compact(req_errs))), req_tone))
             (kpi("Avg latency", &fmt::ms(avg), Some(&if timed > 0 { format!("p95 {}", fmt::ms(p95v)) } else { "no latency data yet".into() }), ""))
             (kpi("Errors", &fmt::compact(occ_err), Some(&format!("{} incl. warnings", fmt::compact(occ_total))), err_tone))
-            (kpi("LLM spend", &fmt::usd(llm_cost), Some(&format!("{} calls", fmt::compact(llm_calls))), ""))
+            (kpi("LLM spend", &fmt::usd(llm_cost), Some(&llm_sub), ""))
         }
         div.grid2 {
             (card("Requests", None, chart(ctx, &[("Requests", &hs[0]), ("Failed", &hs[1])], "")))
@@ -146,4 +167,30 @@ pub async fn render(app: &App, ctx: &Ctx) -> Result<Markup, ChError> {
             }))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_spend_sub_says_calls_cache_share_and_basis() {
+        let estimated = llm::Basis {
+            estimated: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            llm_spend_sub(120, 10_000, 6_400, &estimated),
+            "120 calls · 64% cached · estimated"
+        );
+        assert_eq!(llm_spend_sub(0, 0, 0, &llm::Basis::default()), "0 calls");
+        let legacy = llm::Basis {
+            legacy: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            llm_spend_sub(1, 10, 0, &legacy),
+            "1 calls · 0% cached · estimated before cache pricing"
+        );
+    }
 }

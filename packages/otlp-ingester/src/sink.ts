@@ -433,10 +433,7 @@ export class SinkForwarder {
 				...p,
 				bucketAt: p.bucketAt.toISOString(),
 			})),
-			llmCalls: llmCalls.map((c) => ({
-				...c,
-				startedAt: c.startedAt.toISOString(),
-			})),
+			llmCalls: llmCalls.map(sinkLlmCall),
 		});
 		const range = signalRange(occurrences, metricPoints, llmCalls);
 		return {
@@ -643,6 +640,27 @@ export class SinkForwarder {
 		this.enforceBounds();
 		this.scheduleWake();
 	}
+}
+
+/**
+ * One LLM call on the sink payload. The cache fields (1.16.0) are additive
+ * to payload version 1 and always present from this ingester: input is the
+ * total prompt, `cacheReadTokens` / `cacheWriteTokens` /
+ * `cacheWriteLongTokens` are subsets of it, `reasoningTokens` a subset of
+ * output, and `pricingVersion` names the price table behind an estimated
+ * cost ("" for reported and unpriced calls). Batches from older ingesters
+ * lack them.
+ */
+export function sinkLlmCall(c: RuntimeLlmCall): Record<string, unknown> {
+	return {
+		...c,
+		cacheReadTokens: c.cacheReadTokens ?? 0,
+		cacheWriteTokens: c.cacheWriteTokens ?? 0,
+		cacheWriteLongTokens: c.cacheWriteLongTokens ?? 0,
+		reasoningTokens: c.reasoningTokens ?? 0,
+		pricingVersion: c.pricingVersion ?? "",
+		startedAt: c.startedAt.toISOString(),
+	};
 }
 
 /**

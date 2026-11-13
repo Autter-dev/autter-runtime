@@ -1,9 +1,9 @@
-import { estimateLlmCostUsd } from "./llm-pricing.js";
-import { isSensitiveKey, scrubText } from "./redact.js";
+import { estimateLlmCost } from "./llm-pricing.js";
+import { isSensitiveKey, isUsageCountKey, scrubText } from "./redact.js";
 import type { RuntimeLlmCall } from "./types.js";
 
 /**
- * LLM-call extraction from OTLP spans. Three attribute families are
+ * LLM-call extraction from OTLP spans. Four attribute families are
  * recognised, so most stacks work with zero Autter-specific code:
  *
  * 1. OpenTelemetry GenAI semantic conventions (`gen_ai.*`) — emitted by
@@ -13,11 +13,27 @@ import type { RuntimeLlmCall } from "./types.js";
  *    Only the provider-level `.doGenerate`/`.doStream`/`.doEmbed` spans
  *    become calls — the umbrella `ai.generateText` span aggregates its
  *    children's usage and would double-count.
- * 3. Autter extension attributes (`autter.llm.cost_usd`, `autter.user_id`,
- *    `autter.session_id`) for exact costs and user attribution.
+ * 3. OpenInference (`llm.model_name`, `llm.token_count.*`, `llm.cost.total`;
+ *    Arize Phoenix and its instrumentations). Only `LLM` and `EMBEDDING`
+ *    spans become calls: agent, chain and tool spans wrap them.
+ * 4. Autter extension attributes (`autter.llm.cost_usd`, `autter.user_id`,
+ *    `autter.session_id`, `autter.llm.usage_convention`,
+ *    `autter.llm.cache_creation.long_ttl_tokens`).
  *
- * Cost precedence: reported (`autter.llm.cost_usd`/`gen_ai.usage.cost`) →
- * estimated from the built-in pricing table → 0 with costSource "none".
+ * Token contract (shared with the Autter SDKs): input is the TOTAL prompt,
+ * cache reads and cache writes included, and cache reads / writes / long-TTL
+ * writes are subsets of it; output is the total, reasoning included, and
+ * reasoning is a subset. `autter.llm.usage_convention = "total"` (set by
+ * Autter SDKs) says input already is the total. Without it the span is read
+ * as the OTel semconv says (inclusive) unless cache read + cache write
+ * exceed input, which only an exclusive count can produce (Anthropic's API
+ * and instrumentations that copy it): then the total is input + read +
+ * write. An exclusive count whose cache tokens do not exceed its uncached
+ * input cannot be told apart and is read as inclusive (it under-counts).
+ *
+ * Cost precedence: reported (`autter.llm.cost_usd` → `gen_ai.usage.cost` →
+ * `ai.usage.cost` → `llm.cost.total`) → estimated, cache-aware, from the
+ * price table (llm-pricing.ts) → 0 with costSource "none".
  */
 
 const VERCEL_PROVIDER_CALL = /\.do(Generate|Stream|Embed)$/;
@@ -64,6 +80,35 @@ export interface LlmSpanFacts {
 	service: string;
 	environment: string;
 	release: string | null;
+	/** OTLP span kind, lowercased ("internal", "client", …); absent = unknown. */
+	spanKind?: string;
+}
+
+/** OpenInference span kinds that are model calls; the others (AGENT, CHAIN, TOOL, …) wrap them. */
+const OPENINFERENCE_CALL_KINDS = new Set(["LLM", "EMBEDDING"]);
+
+/**
+ * GenAI semconv operations that are never a model call of their own:
+ * running a tool, and creating an agent. (`invoke_*` is handled apart:
+ * see isAggregateAgentSpan.)
+ */
+const NON_CALL_OPERATIONS = new Set(["execute_tool", "create_agent"]);
+
+/**
+ * An in-process agent, workflow or framework entrypoint (`invoke_agent`,
+ * `invoke_workflow`, `invoke_<entrypoint>`, span kind INTERNAL). Its usage,
+ * when present, sums the model calls it made, and those are their own
+ * `chat` / `text_completion` child spans: counting both doubles the tokens
+ * and the cost. A CLIENT `invoke_agent` span is a call to a remote agent
+ * service, whose model calls are not in the trace, so it stays a row.
+ */
+function isAggregateAgentSpan(operation: string | null, spanKind: string | undefined): boolean {
+	return operation !== null && operation.startsWith("invoke_") && spanKind === "internal";
+}
+
+/** A non-negative whole token count. */
+function tokens(value: number | null): number {
+	return value !== null && value > 0 ? Math.round(value) : 0;
 }
 
 /**
@@ -79,6 +124,11 @@ export function extractLlmCall(
 	// Umbrella Vercel spans (ai.generateText, ai.streamText, ai.toolCall, …)
 	// are skipped: usage lives on (and aggregates) their .do* children.
 	if (isVercelSpan && !VERCEL_PROVIDER_CALL.test(facts.name)) return null;
+	const openInferenceKind = strAttr(attrs, "openinference.span.kind")?.toUpperCase() ?? null;
+	if (openInferenceKind !== null && !OPENINFERENCE_CALL_KINDS.has(openInferenceKind)) return null;
+	const semconvOperation = strAttr(attrs, "gen_ai.operation.name");
+	if (semconvOperation !== null && NON_CALL_OPERATIONS.has(semconvOperation)) return null;
+	if (isAggregateAgentSpan(semconvOperation, facts.spanKind)) return null;
 
 	const model = strAttr(
 		attrs,
@@ -86,59 +136,112 @@ export function extractLlmCall(
 		"gen_ai.request.model",
 		"ai.response.model",
 		"ai.model.id",
+		"llm.model_name",
 	);
 	// gen_ai.provider.name is the current semconv key, gen_ai.system the
 	// pre-1.37 one. Vercel's ai.model.provider looks like "openai.chat" —
 	// keep the provider segment, the mode is already in `operation`.
+	// OpenInference: llm.provider ("openai", "azure") or llm.system.
 	const provider =
 		strAttr(attrs, "gen_ai.provider.name", "gen_ai.system") ??
 		strAttr(attrs, "ai.model.provider")?.toLowerCase().split(".")[0] ??
+		strAttr(attrs, "llm.provider", "llm.system") ??
 		null;
 	// A call must identify at least a model or a provider system — this is
 	// what keeps ordinary spans (HTTP, DB, tool calls) out of the table.
 	if (!model && !provider) return null;
 
-	const inputTokens =
+	const reportedInput = tokens(
 		numAttr(
 			attrs,
 			"gen_ai.usage.input_tokens",
 			"gen_ai.usage.prompt_tokens",
 			"ai.usage.promptTokens",
 			"ai.usage.inputTokens",
+			"llm.token_count.prompt",
 			// Vercel .doEmbed spans report a single total under ai.usage.tokens.
 			"ai.usage.tokens",
-		) ?? 0;
-	const outputTokens =
+		),
+	);
+	const outputTokens = tokens(
 		numAttr(
 			attrs,
 			"gen_ai.usage.output_tokens",
 			"gen_ai.usage.completion_tokens",
 			"ai.usage.completionTokens",
 			"ai.usage.outputTokens",
-		) ?? 0;
+			"llm.token_count.completion",
+		),
+	);
+	const cacheReadTokens = tokens(
+		numAttr(
+			attrs,
+			"gen_ai.usage.cache_read.input_tokens",
+			"gen_ai.usage.cache_read_input_tokens", // OpenLLMetry
+			"ai.usage.cachedInputTokens", // Vercel AI SDK
+			"llm.token_count.prompt_details.cache_read", // OpenInference
+		),
+	);
+	const cacheWriteTokens = tokens(
+		numAttr(
+			attrs,
+			"gen_ai.usage.cache_creation.input_tokens",
+			"gen_ai.usage.cache_creation_input_tokens", // OpenLLMetry
+			"llm.token_count.prompt_details.cache_write", // OpenInference
+		),
+	);
+	const cacheWriteLongTokens = Math.min(
+		tokens(numAttr(attrs, "autter.llm.cache_creation.long_ttl_tokens")),
+		cacheWriteTokens,
+	);
+	const reasoningTokens = tokens(
+		numAttr(
+			attrs,
+			"gen_ai.usage.reasoning.output_tokens",
+			"gen_ai.usage.reasoning_tokens",
+			"ai.usage.reasoningTokens",
+			"llm.token_count.completion_details.reasoning",
+		),
+	);
+	const inputTokens = totalInputTokens(
+		reportedInput,
+		cacheReadTokens,
+		cacheWriteTokens,
+		strAttr(attrs, "autter.llm.usage_convention"),
+	);
 
 	const reportedCost = numAttr(
 		attrs,
 		"autter.llm.cost_usd",
 		"gen_ai.usage.cost",
 		"ai.usage.cost",
+		"llm.cost.total",
 	);
 	let costUsd = 0;
 	let costSource: RuntimeLlmCall["costSource"] = "none";
+	let pricingVersion = "";
 	if (reportedCost !== null && reportedCost >= 0) {
 		costUsd = reportedCost;
 		costSource = "reported";
 	} else {
-		const estimated = estimateLlmCostUsd(model ?? "", inputTokens, outputTokens);
+		const estimated = estimateLlmCost(
+			model ?? "",
+			{ inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, cacheWriteLongTokens },
+			facts.startedAt,
+		);
 		if (estimated !== null) {
-			costUsd = estimated;
+			costUsd = estimated.costUsd;
 			costSource = "estimated";
+			pricingVersion = estimated.pricingVersion;
 		}
 	}
 
 	const operation =
-		strAttr(attrs, "gen_ai.operation.name") ??
-		(isVercelSpan ? vercelOperation(facts.name) : "");
+		semconvOperation ??
+		(isVercelSpan ? vercelOperation(facts.name) : null) ??
+		strAttr(attrs, "llm.request.type") ??
+		openInferenceKind?.toLowerCase() ??
+		"";
 
 	return {
 		service: facts.service,
@@ -149,10 +252,15 @@ export function extractLlmCall(
 		provider: (provider ?? "").slice(0, 100),
 		model: (model ?? "").slice(0, 200),
 		operation: operation.slice(0, 100),
-		inputTokens: Math.max(0, Math.round(inputTokens)),
-		outputTokens: Math.max(0, Math.round(outputTokens)),
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		cacheWriteLongTokens,
+		reasoningTokens,
 		costUsd,
 		costSource,
+		pricingVersion,
 		durationMs: facts.durationMs,
 		status: facts.isError ? "error" : "ok",
 		errorType: facts.isError
@@ -184,11 +292,35 @@ export function extractLlmCall(
 	};
 }
 
-/** Numeric token/usage counters are kept even though their keys contain
- * "token" — cost tracking depends on them. */
-function isUsageCount(key: string, value: string): boolean {
-	return /tokens?$|token_?count$|usage/i.test(key) && /^\d+(\.\d+)?$/.test(value);
+/**
+ * Total prompt tokens under the shared contract. `"total"` (Autter SDKs):
+ * input is already the total. Otherwise inclusive (OTel semconv), unless the
+ * cache counts exceed the input, which only an exclusive count (Anthropic's
+ * API) produces: then input + read + write.
+ */
+export function totalInputTokens(
+	input: number,
+	cacheRead: number,
+	cacheWrite: number,
+	convention: string | null,
+): number {
+	if (convention === "total") return input;
+	return cacheRead + cacheWrite > input ? input + cacheRead + cacheWrite : input;
 }
+
+/** Numeric token counters are kept even though their keys contain "token"
+ * — cost tracking depends on them (redact.ts isUsageCountKey). */
+function isUsageCount(key: string, value: string): boolean {
+	return isUsageCountKey(key) && /^\d+(\.\d+)?$/.test(value);
+}
+
+/**
+ * The OpenInference keys kept for drill-down: usage, cost, model, provider
+ * and span kind. Its other `llm.*` keys carry messages and prompt templates,
+ * which stay out of the table (privacy is whitelist-based).
+ */
+const OPENINFERENCE_USAGE_KEY =
+	/^(?:llm\.token_count\.|llm\.cost\.|llm\.model_name$|llm\.provider$|llm\.system$|openinference\.span\.kind$)/;
 
 /**
  * Drill-down context stored as JSON alongside the typed columns: only the
@@ -204,7 +336,8 @@ function llmAttributeSubset(
 		if (
 			!key.startsWith("gen_ai.") &&
 			!key.startsWith("ai.") &&
-			!key.startsWith("autter.llm.")
+			!key.startsWith("autter.llm.") &&
+			!OPENINFERENCE_USAGE_KEY.test(key)
 		) {
 			continue;
 		}

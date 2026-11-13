@@ -15,7 +15,7 @@ it.
 | **Errors** | issues grouped by fingerprint, with severity/source filters, search and sparklines. Each issue shows stack, top frames, releases, routes and recent occurrences | `runtime_error_occurrences` |
 | **Events** | logs and operation events, newest first, with severity/type filters and search (including by trace id), plus `trackEvent()` counters | `runtime_logs`, `runtime_metrics_1m` |
 | **Traces** | recent traces (errors only, or slower than a threshold), per-operation p50/p95, and a waterfall per trace with its errors and logs | `runtime_spans`, `runtime_error_occurrences`, `runtime_logs` |
-| **LLM** | spend, calls, tokens and latency by model; recent calls | `runtime_llm_calls` |
+| **LLM** | spend (labelled estimated, reported, estimated before cache pricing or unpriced, with the price table's as-of day), calls, tokens, cached input and cache writes, and latency by model; recent calls | `runtime_llm_calls` |
 
 It's read-only. Every query runs with ClickHouse `readonly=2`, a 15 s time
 limit and a row cap.

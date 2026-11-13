@@ -87,9 +87,14 @@ and [readable stack traces](SOURCE-MAPS.md).
 
 `runtime_llm_calls` is per-call, not rolled up: LLM traffic is orders of
 magnitude smaller than HTTP, spend analysis needs per-call granularity
-(model, tokens, `cost_usd`, `cost_source`, user/session, and `error_type`
-for failed calls), and SDKs send GenAI spans unsampled (the errors-are-100%
-rule applies to money too).
+(model, tokens, prompt-cache reads and writes, `cost_usd`, `cost_source`,
+`pricing_version`, user/session, and `error_type` for failed calls), and
+SDKs send GenAI spans unsampled (the errors-are-100% rule applies to money
+too). From 1.16.0 `input_tokens` is the total prompt, cache included, and
+`cache_read_tokens` / `cache_write_tokens` / `cache_write_long_tokens` are
+subsets of it; an `estimated` row with `pricing_version = ''` was priced
+before cache pricing (every input token at the full input rate) and is left
+as it was.
 
 `runtime_latency_histograms` stores per-route OTLP duration histograms
 (bucket bounds + counts) so latency percentiles can be computed from
@@ -780,35 +785,69 @@ Span-level:
   From 1.8.0 cumulative points are answered as rejected in
   `partial_success` and counted (`cumulative_histogram`).
 - GenAI spans (`gen_ai.*` attributes; Vercel AI SDK inner `.doGenerate` /
-  `.doStream` / `.doEmbed` spans) additionally produce a `runtime_llm_calls`
-  row — provider, model, operation, token counts, and cost
-  (`autter.llm.cost_usd` if reported, else estimated from the built-in
-  price table). Outer AI SDK spans are skipped to avoid double counting.
+  `.doStream` / `.doEmbed` spans; OpenInference `LLM` / `EMBEDDING` spans)
+  additionally produce a `runtime_llm_calls` row — provider, model,
+  operation, token counts with prompt-cache reads and writes, and cost
+  (reported if the span carries one, else estimated, cache-aware, from the
+  built-in price table). Outer AI SDK spans, in-process agent spans and
+  OpenInference agent/chain/tool spans are skipped to avoid double counting.
 
 ## OTLP mapping (LLM calls)
 
 Spans that identify an LLM provider call become one `runtime_llm_calls`
-row each — no Autter-specific code required. Three attribute families are
-recognised (first match wins per field):
+row each — no Autter-specific code required. Four attribute families are
+recognised: OTel GenAI semconv, the Vercel AI SDK, OpenInference, and
+Autter's own (first match wins per field):
 
 | Field | Attributes checked |
 | --- | --- |
-| `provider` | `gen_ai.system`, `ai.model.provider` |
-| `model` | `gen_ai.response.model`, `gen_ai.request.model`, `ai.response.model`, `ai.model.id` |
-| `operation` | `gen_ai.operation.name`, derived from Vercel span names |
-| `input_tokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.prompt_tokens`, `ai.usage.promptTokens`, `ai.usage.inputTokens` |
-| `output_tokens` | `gen_ai.usage.output_tokens`, `gen_ai.usage.completion_tokens`, `ai.usage.completionTokens`, `ai.usage.outputTokens` |
-| `cost_usd` | `autter.llm.cost_usd` / `gen_ai.usage.cost` (reported), else estimated from a built-in per-model price table (`cost_source` records which) |
+| `provider` | `gen_ai.provider.name`, `gen_ai.system`, `ai.model.provider`, `llm.provider`, `llm.system` |
+| `model` | `gen_ai.response.model`, `gen_ai.request.model`, `ai.response.model`, `ai.model.id`, `llm.model_name` |
+| `operation` | `gen_ai.operation.name`, derived from Vercel span names, `llm.request.type`, the OpenInference span kind (`llm`, `embedding`) |
+| `input_tokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.prompt_tokens`, `ai.usage.promptTokens`, `ai.usage.inputTokens`, `llm.token_count.prompt`, `ai.usage.tokens` — stored as the **total** prompt (see below) |
+| `cache_read_tokens` | `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_read_input_tokens` (OpenLLMetry), `ai.usage.cachedInputTokens` (Vercel), `llm.token_count.prompt_details.cache_read` (OpenInference) |
+| `cache_write_tokens` | `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.cache_creation_input_tokens` (OpenLLMetry), `llm.token_count.prompt_details.cache_write` (OpenInference) |
+| `cache_write_long_tokens` | `autter.llm.cache_creation.long_ttl_tokens` (writes at the long TTL: Anthropic 1 h, OpenAI 12 h), at most `cache_write_tokens` |
+| `output_tokens` | `gen_ai.usage.output_tokens`, `gen_ai.usage.completion_tokens`, `ai.usage.completionTokens`, `ai.usage.outputTokens`, `llm.token_count.completion` |
+| `reasoning_tokens` | `gen_ai.usage.reasoning.output_tokens`, `gen_ai.usage.reasoning_tokens`, `ai.usage.reasoningTokens`, `llm.token_count.completion_details.reasoning` |
+| `cost_usd` / `cost_source` | Reported: `autter.llm.cost_usd` → `gen_ai.usage.cost` → `ai.usage.cost` → `llm.cost.total` (`reported`). Else estimated, cache-aware, from the price table (`estimated`), else 0 (`none`) |
+| `pricing_version` | The price table behind an estimate: its as-of day, or `override:<asOf>` for a price from `AUTTER_LLM_PRICES_FILE`; `''` for reported and unpriced calls, and for rows estimated before 1.16.0 |
 | `user_id` | `autter.user_id`, `ai.telemetry.metadata.userId`, `enduser.id`, `user.id` |
 | `session_id` | `autter.session_id`, `ai.telemetry.metadata.sessionId`, `session.id` |
 
-A span qualifies when it carries a model or provider attribute. Vercel AI
-SDK umbrella spans (`ai.generateText`, `ai.streamText`, …) are skipped —
-only their provider-level `.doGenerate`/`.doStream`/`.doEmbed` children
-count, so retries are counted individually and nothing double-counts.
-Failed calls keep `status = 'error'` (+ `error.type`), and any `exception`
-events on the span still produce regular error occurrences, so LLM
-failures group into issues like any other error.
+**Token convention.** Input is the total prompt, cache reads and writes
+included, and the cache counts are subsets of it (as the GenAI semconv
+says); output includes reasoning. `autter.llm.usage_convention = "total"`
+(set by Autter SDKs) says the sender already reports the total. Without it,
+input is read as inclusive unless cache read + cache write exceed it, which
+only an exclusive count can produce (Anthropic's API reports uncached input
+apart from cache reads and writes): then the total is input + read + write.
+An exclusive count whose cache tokens do not exceed its uncached input
+cannot be told apart from an inclusive one and is read as inclusive, which
+under-counts it; senders that report Anthropic usage exclusively should set
+the marker or report the total. Before 1.16.0, `input_tokens` held whatever
+the sender reported (total for OpenAI, Gemini and semconv senders,
+uncached-only for Anthropic through the Autter SDK).
+
+**Estimate.** `uncached = max(0, input − read − write)`, then uncached ×
+input rate + read × cache-read rate + (write − long) × cache-write rate +
+long × long-TTL write rate + output × output rate. A missing cache-read or
+cache-write rate is the full input rate; a missing long-TTL rate is the
+short write rate. Unknown models stay unpriced. The table, its sources and
+its limits: [LLM instrumentation](LLM-INSTRUMENTATION.md#prompt-caching-and-cost).
+
+A span qualifies when it carries a model or provider attribute. Skipped,
+so nothing is counted twice: Vercel AI SDK umbrella spans
+(`ai.generateText`, `ai.streamText`, …; their `.doGenerate`/`.doStream`/
+`.doEmbed` children count, so retries are counted individually);
+`invoke_agent` / `invoke_workflow` / `invoke_*` spans of kind INTERNAL (an
+in-process agent, whose model calls are its own `chat` child spans; a
+CLIENT `invoke_agent` span is a call to a remote agent service and is
+kept); `execute_tool` and `create_agent` spans; OpenInference spans whose
+`openinference.span.kind` is not `LLM` or `EMBEDDING`. Failed calls keep
+`status = 'error'` (+ `error.type`), and any `exception` events on the span
+still produce regular error occurrences, so LLM failures group into issues
+like any other error.
 
 ## Browser payload (v1)
 
@@ -961,7 +1000,12 @@ everything else. A replay from ClickHouse reads it from `collapsed_count`.
 Batches also carry `metrics` (1-minute usage rollup points) and `llmCalls`
 (per-call LLM usage — provider, model, tokens, `costUsd`, `costSource`,
 `userId`, `status`, `startedAt`) whenever the ingest produced them — same
-shapes as their ClickHouse rows, additive to the v1 payload.
+shapes as their ClickHouse rows, additive to the v1 payload. 1.16.0 adds
+`cacheReadTokens`, `cacheWriteTokens`, `cacheWriteLongTokens`,
+`reasoningTokens` (0 when the span had none) and `pricingVersion` (`""`
+unless the cost was estimated) to every LLM call; `inputTokens` is then the
+total prompt and the cache counts are subsets of it. Batches from older
+ingesters lack these fields.
 
 ### Delivery semantics
 

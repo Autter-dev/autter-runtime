@@ -164,6 +164,7 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `TRUST_PROXY` | `1` | Proxy hops whose `X-Forwarded-For` is trusted for the client address (`1` behind an ALB or Caddy; `0` when exposed directly) |
 | `OCCURRENCE_TTL_DAYS` / `SPAN_TTL_DAYS` / `METRICS_TTL_DAYS` | `14` / `7` / `90` | ClickHouse TTLs (applied at table creation) |
 | `LLM_CALL_TTL_DAYS` | `90` | Retention for `runtime_llm_calls` rows |
+| `AUTTER_LLM_PRICES_FILE` | unset | JSON file of LLM prices merged over the built-in table (see [LLM / GenAI calls](#llm--genai-calls)). Read and validated at startup: an invalid file stops the ingester with every bad field named |
 | `LOG_TTL_DAYS` | `14` | Retention for `runtime_logs` (request summaries are always kept, never sampled, so this is the main volume knob). New tables get it. When it is **set**, it is also applied to an existing table at boot: a longer TTL at once, a shorter one only when the table has no rows older than it (otherwise the boot log gives the `ALTER TABLE … MODIFY TTL` to run). Unset, an existing table's TTL is left as it is. Only the delete rule is changed (move and recompress rules are kept), with `materialize_ttl_after_modify = 0`; a failure is logged and retried next boot |
 | `ARCHIVE_S3_URL` / `ARCHIVE_S3_NAMED_COLLECTION` | unset (off) | Tiered retention ([docs/RETENTION.md](../../docs/RETENTION.md)): days older than the hot window (the TTLs above) of occurrences, spans, logs and LLM calls are written to Parquet in this bucket (S3, GCS's S3 endpoint, MinIO, R2) before they leave ClickHouse; the archive job drops each day after reading its objects back, and the delete TTL becomes a backstop a week past the hot window, set only once every older day is archived. Unset: the TTLs delete as before |
 | `ARCHIVE_S3_ACCESS_KEY_ID` / `ARCHIVE_S3_SECRET_ACCESS_KEY` | unset | Keys ClickHouse uses for the bucket (HMAC keys for GCS); not needed with a named collection or ClickHouse's own credentials |
@@ -303,17 +304,61 @@ not `default`: `SHOW TABLES FROM autter_runtime`.
 Spans following the [OTel GenAI semconv](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 (`gen_ai.*` attributes — emitted by `withLlmCall` in `@autter/runtime-node`,
 the Vercel AI SDK with telemetry enabled, and the GenAI instrumentations for
-Python/Go/etc.) are recognised automatically on `/v1/traces` and additionally
-stored per call in `runtime_llm_calls`: provider, model, operation, input/
-output tokens, duration, ok/error status (with the provider exception type
-in `error_type` for failed calls), and a USD cost. The cost is taken
-from the `autter.llm.cost_usd` span attribute when reported; otherwise it's
-estimated from the built-in price table in `src/llm-pricing.ts`
-(`cost_source` records which: `reported` / `estimated` / `unpriced`). An
-opaque calling-user id is read from `autter.user_id` (or the AI SDK's
+Python/Go/etc.) and OpenInference `LLM` / `EMBEDDING` spans
+(`llm.model_name`, `llm.token_count.*`) are recognised automatically on
+`/v1/traces` and additionally stored per call in `runtime_llm_calls`:
+provider, model, operation, input/output tokens, prompt-cache reads and
+writes, reasoning tokens, duration, ok/error status (with the provider
+exception type in `error_type` for failed calls), and a USD cost. An opaque
+calling-user id is read from `autter.user_id` (or the AI SDK's
 `metadata.userId`). The Vercel AI SDK's outer `ai.generateText`/`ai.streamText`
-spans are not counted — their inner `.doGenerate`/`.doEmbed` call spans carry
-the usage, and counting both would double the tokens.
+spans, in-process `invoke_agent` spans, and OpenInference agent/chain/tool
+spans are not counted — their model-call children carry the usage, and
+counting both would double the tokens.
+
+**Cost.** A cost the span reports wins (`autter.llm.cost_usd` →
+`gen_ai.usage.cost` → `ai.usage.cost` → `llm.cost.total`; `cost_source =
+'reported'`). Otherwise it is estimated, cache-aware, from the built-in price
+table in `src/llm-prices.ts` (`cost_source = 'estimated'`, and
+`pricing_version` records the table's as-of day):
+
+```
+uncached = max(0, input − cache_read − cache_write)
+cost     = uncached × input rate + cache_read × cache-read rate
+         + (cache_write − long) × cache-write rate + long × long-TTL write rate
+         + output × output rate
+```
+
+A model the table does not list is left unpriced (`cost_source = 'none'`,
+cost 0); it is never priced like a sibling. Entries match on a version
+boundary (`gpt-5` prices `gpt-5-2025-08-07`, not `gpt-5.5` or `gpt-5-pro`).
+The token contract, the table's sources and what it leaves out are in
+[docs/LLM-INSTRUMENTATION.md](../../docs/LLM-INSTRUMENTATION.md#prompt-caching-and-cost).
+
+**Price override file.** `AUTTER_LLM_PRICES_FILE` points at a JSON file
+merged over the built-in table, for negotiated rates, fine-tuned or
+self-hosted models, or a price change before the next release:
+
+```json
+{
+  "asOf": "2026-12-01",
+  "models": [
+    { "match": "gpt-5.6-sol", "inputPerMTok": 5, "outputPerMTok": 25,
+      "cacheReadPerMTok": 0.5, "cacheWritePerMTok": 6.25, "cacheWriteLongPerMTok": 12.5 },
+    { "match": "acme-support-ft", "inputPerMTok": 1.2, "outputPerMTok": 4.8 }
+  ]
+}
+```
+
+An entry replaces every built-in entry with the same `match` (its dated
+ones too) and adds models the table lacks; `match` is lowercased and
+router/Bedrock prefixes are stripped as for incoming model ids. Rates are
+USD per 1M tokens; the cache rates and `effectiveFrom` (a `YYYY-MM-DD` day
+the price starts) are optional, with the same fallbacks as the built-in
+table. Rows priced from the file record `pricing_version =
+'override:<asOf>'`. The file is read once at startup; unknown keys, negative
+or non-numeric rates, a bad date or a model listed twice stop the ingester
+with every problem named.
 
 ## Schema migrations
 

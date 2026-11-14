@@ -7,11 +7,16 @@ Run: python3 -m venv .venv && .venv/bin/pip install -r adapters/python/requireme
 
 from __future__ import annotations
 
+import gzip
+import json
 import os
+import random
+import re
 import sys
 import threading
 import unittest
 from unittest import mock
+from wsgiref.util import setup_testing_defaults
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -20,6 +25,7 @@ try:
     from opentelemetry import trace
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.id_generator import IdGenerator
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
     from opentelemetry.sdk.trace.sampling import (
@@ -440,7 +446,7 @@ class InitTracing(unittest.TestCase):
     def test_env_configured_pipeline_keeps_errors_only(self):
         exporter = InMemorySpanExporter()
         with mock.patch.dict(os.environ, self.ENV):
-            provider = init_tracing(exporter=exporter, set_global=False)
+            provider = init_tracing(exporter=exporter, metric_exporter=CapturingMetricExporter(), set_global=False)
         tracer = provider.get_tracer("test")
         with tracer.start_as_current_span("GET /ok", kind=SpanKind.SERVER):
             pass
@@ -514,10 +520,59 @@ class InitTracing(unittest.TestCase):
         self.assertEqual(resource["service.name"], "orders-api")
         provider.shutdown()
 
-    def test_count_requests_is_off_by_default(self):
+    def counted_ok(self, env, **kwargs):
+        """One sampled GET /ok through init_tracing: (exported span, histogram points)."""
         exporter = InMemorySpanExporter()
-        with mock.patch.dict(os.environ, {**self.ENV, "OTEL_TRACES_SAMPLER": "always_on"}):
+        metric_exporter = CapturingMetricExporter()
+        with mock.patch.dict(os.environ, {**self.ENV, "OTEL_TRACES_SAMPLER": "always_on", **env}):
+            if "AUTTER_COUNT_REQUESTS" not in env:
+                os.environ.pop("AUTTER_COUNT_REQUESTS", None)
+            provider = init_tracing(exporter=exporter, metric_exporter=metric_exporter, set_global=False, **kwargs)
+        with provider.get_tracer("test").start_as_current_span("GET /ok", kind=SpanKind.SERVER, attributes=http("/ok")):
+            pass
+        provider.force_flush()
+        span = exporter.get_finished_spans()[0]
+        points = metric_exporter.take().get("http.server.duration", [])
+        provider.shutdown()
+        return span, points
+
+    def test_count_requests_is_on_by_default(self):
+        span, points = self.counted_ok({})
+        self.assertEqual([(a["http.route"], count) for a, count, _ in points], [("/ok", 1)])
+        self.assertIs(span.attributes[METRIC_COUNTED_ATTRIBUTE], True)
+        self.assertIs(span.resource.attributes["autter.metrics_wired"], True)
+        self.assertIs(span.resource.attributes["autter.metrics_routes"], True)
+
+    def test_count_requests_opt_out(self):
+        for env, kwargs in (
+            ({"AUTTER_COUNT_REQUESTS": "false"}, {}),
+            ({"AUTTER_COUNT_REQUESTS": "0"}, {}),
+            ({}, {"count_requests": False}),
+            ({"AUTTER_COUNT_REQUESTS": "true"}, {"count_requests": False}),  # the argument wins
+        ):
+            with self.subTest(env=env, kwargs=kwargs):
+                span, points = self.counted_ok(env, **kwargs)
+                self.assertEqual(points, [])
+                self.assertNotIn(METRIC_COUNTED_ATTRIBUTE, span.attributes)
+                self.assertNotIn("autter.metrics_wired", span.resource.attributes)
+                self.assertNotIn("autter.metrics_routes", span.resource.attributes)
+
+    def test_an_unreadable_count_requests_value_keeps_the_default(self):
+        with self.assertLogs("autter.runtime", "WARNING") as logs:
+            span, points = self.counted_ok({"AUTTER_COUNT_REQUESTS": "maybe"})
+        self.assertTrue(any("AUTTER_COUNT_REQUESTS" in line for line in logs.output))
+        self.assertEqual(len(points), 1)
+        self.assertIs(span.attributes[METRIC_COUNTED_ATTRIBUTE], True)
+
+    def test_count_requests_without_the_metric_exporter_package_is_off_with_a_warning(self):
+        exporter = InMemorySpanExporter()
+        missing = {"opentelemetry.exporter.otlp.proto.http.metric_exporter": None}
+        with mock.patch.dict(os.environ, {**self.ENV, "OTEL_TRACES_SAMPLER": "always_on"}), mock.patch.dict(
+            sys.modules, missing
+        ), self.assertLogs("autter.runtime", "WARNING") as logs:
+            os.environ.pop("AUTTER_COUNT_REQUESTS", None)
             provider = init_tracing(exporter=exporter, set_global=False)
+        self.assertTrue(any("opentelemetry-exporter-otlp-proto-http" in line for line in logs.output))
         with provider.get_tracer("test").start_as_current_span("GET /ok", kind=SpanKind.SERVER, attributes=http("/ok")):
             pass
         provider.force_flush()
@@ -556,6 +611,7 @@ class InitTracing(unittest.TestCase):
                 resource=Resource.create({"service.name": "explicit"}),
                 redact=False,
                 set_global=False,
+                metric_exporter=CapturingMetricExporter(),
             )
         with provider.get_tracer("test").start_as_current_span("GET /ok"):
             pass
@@ -564,6 +620,268 @@ class InitTracing(unittest.TestCase):
         self.assertEqual([s.name for s in spans], ["GET /ok"])
         self.assertEqual(spans[0].resource.attributes["service.name"], "explicit")
         provider.shutdown()
+
+
+# ── The recommended rate: 1% head sampling, every error kept, every request counted ──
+
+REQUESTS = 5_000
+FAIL_EVERY = 50  # 2% of the requests raise
+RATIO = "0.01"
+
+
+class SeededIds(IdGenerator):
+    """Reproducible trace ids, so the 1% the ratio sampler keeps is the same every run."""
+
+    def __init__(self, seed: int):
+        self._rng = random.Random(seed)
+
+    def generate_span_id(self) -> int:
+        return self._rng.getrandbits(64) or 1
+
+    def generate_trace_id(self) -> int:
+        return self._rng.getrandbits(128) or 1
+
+
+def orders_app(tracer):
+    """A WSGI app: GET /orders/<n> reads the order; every 50th charge fails."""
+
+    def app(environ, start_response):
+        order = int(environ["PATH_INFO"].rsplit("/", 1)[1])
+        with tracer.start_as_current_span("db.query", attributes={"db.system": "postgresql"}):
+            pass
+        if order % FAIL_EVERY == FAIL_EVERY - 1:
+            with tracer.start_as_current_span("charge"):
+                raise RuntimeError(f"card declined for order {order}")
+        start_response("200 OK", [("content-type", "text/plain")])
+        return [b"ok"]
+
+    return app
+
+
+def instrumented(app, tracer):
+    """What OpenTelemetry's WSGI instrumentation does per request: one SERVER
+    span with the HTTP attributes, the exception recorded and a 500 answered
+    when the app raises."""
+
+    def middleware(environ, start_response):
+        attributes = {"http.method": environ["REQUEST_METHOD"], "http.route": "/orders/<int:order_id>",
+                      "http.target": environ["PATH_INFO"]}
+        with tracer.start_as_current_span("GET /orders/<int:order_id>", kind=SpanKind.SERVER,
+                                          attributes=attributes, record_exception=False) as span:
+
+            def respond(status, headers, exc_info=None):
+                span.set_attribute("http.status_code", int(status.split()[0]))
+                return start_response(status, headers, exc_info)
+
+            try:
+                return list(app(environ, respond))
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, f"{type(exc).__name__}: {exc}"))
+                respond("500 Internal Server Error", [("content-type", "text/plain")], sys.exc_info())
+                return [b"error"]
+
+    return middleware
+
+
+def drive(seed=20261115, **init_kwargs):
+    """REQUESTS requests through the instrumented app, configured as the docs
+    say (parentbased_traceidratio, 0.01). Returns what left the process."""
+    exporter = InMemorySpanExporter()
+    metric_exporter = CapturingMetricExporter()
+    env = {
+        "OTEL_SERVICE_NAME": "orders-wsgi",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.version=9c1e4f2a7b3d,deployment.environment=test",
+        "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+        "OTEL_TRACES_SAMPLER_ARG": RATIO,
+    }
+    with mock.patch.dict(os.environ, env):
+        os.environ.pop("AUTTER_COUNT_REQUESTS", None)
+        os.environ.update(init_kwargs.pop("env", {}))
+        provider = init_tracing(exporter=exporter, metric_exporter=metric_exporter, set_global=False, **init_kwargs)
+    provider.id_generator = SeededIds(seed)
+    tracer = provider.get_tracer("test.wsgi")
+    app = instrumented(orders_app(tracer), tracer)
+    statuses = {}
+    for order in range(REQUESTS):
+        environ = {"PATH_INFO": f"/orders/{order}"}
+        setup_testing_defaults(environ)
+        captured = []
+        app(environ, lambda status, headers, exc_info=None: captured.append(status))
+        statuses[order] = int(captured[-1].split()[0])
+    provider.force_flush()
+    spans = list(exporter.get_finished_spans())
+    batches = list(metric_exporter.batches)
+    points = metric_exporter.take().get("http.server.duration", [])
+    provider.shutdown()
+    return {"statuses": statuses, "spans": spans, "points": points, "metric_batches": batches}
+
+
+class RecommendedSamplingRate(unittest.TestCase):
+    """The setup the docs recommend, at volume: 1% head sampling, 2% of
+    requests failing. Every error must leave the process, and the request
+    count must be all the traffic, not the 1% sample."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.counted = drive()
+        # Another seed: other trace ids, so the ingester test can post both runs.
+        cls.uncounted = drive(seed=20261116, env={"AUTTER_COUNT_REQUESTS": "false"})
+
+    def server_spans(self, run):
+        return [s for s in run["spans"] if s.kind is SpanKind.SERVER]
+
+    def check_every_error_exported(self, run):
+        failed = sorted(order for order, status in run["statuses"].items() if status == 500)
+        self.assertEqual(len(failed), REQUESTS // FAIL_EVERY)
+        servers = self.server_spans(run)
+        errored = [s for s in servers if any(e.name == "exception" for e in s.events)]
+        self.assertEqual(sorted(int(s.attributes["http.target"].rsplit("/", 1)[1]) for s in errored), failed)
+        self.assertEqual(len({s.context.trace_id for s in errored}), len(failed))
+        by_trace = {}
+        for span in run["spans"]:
+            by_trace.setdefault(span.context.trace_id, []).append(span.name)
+        for span in errored:
+            # The whole local trace: the query before the failure, the failing call, the request.
+            self.assertEqual(sorted(by_trace[span.context.trace_id]),
+                             ["GET /orders/<int:order_id>", "charge", "db.query"])
+            self.assertEqual(span.attributes["http.status_code"], 500)
+            self.assertIs(span.status.status_code, StatusCode.ERROR)
+        healthy = [s for s in servers if s not in errored]
+        # Head sampling kept about 1% of the healthy traffic, unmarked.
+        self.assertGreater(len(healthy), 0.005 * (REQUESTS - len(failed)))
+        self.assertLess(len(healthy), 0.015 * (REQUESTS - len(failed)))
+        for span in healthy:
+            self.assertNotIn(TAIL_RETAINED_ATTRIBUTE, span.attributes)
+        retained = [s for s in errored if s.attributes.get(TAIL_RETAINED_ATTRIBUTE) is True]
+        # Most errors were on traces head sampling dropped: retention sent them.
+        self.assertGreater(len(retained), 0.95 * len(failed))
+        return errored, healthy
+
+    def test_every_error_is_exported_with_counting_on(self):
+        self.check_every_error_exported(self.counted)
+
+    def test_every_error_is_exported_with_counting_off(self):
+        self.check_every_error_exported(self.uncounted)
+
+    def test_the_request_histogram_counts_every_request_once(self):
+        points = self.counted["points"]
+        self.assertEqual(sum(count for _, count, _ in points), REQUESTS)
+        by_status = {}
+        for attributes, count, temporality in points:
+            self.assertIs(temporality, AggregationTemporality.DELTA)
+            self.assertEqual(attributes["http.route"], "/orders/<int:order_id>")
+            status = attributes["http.response.status_code"]
+            by_status[status] = by_status.get(status, 0) + count
+        self.assertEqual(by_status, {200: REQUESTS - REQUESTS // FAIL_EVERY, 500: REQUESTS // FAIL_EVERY})
+        # Every exported request span says the histogram counted it, so the
+        # ingester adds no second count from the span.
+        for span in self.server_spans(self.counted):
+            self.assertIs(span.attributes[METRIC_COUNTED_ATTRIBUTE], True)
+            self.assertIs(span.resource.attributes["autter.metrics_wired"], True)
+
+    def test_counting_off_sends_no_request_counts(self):
+        self.assertEqual(self.uncounted["points"], [])
+        for span in self.server_spans(self.uncounted):
+            self.assertNotIn(METRIC_COUNTED_ATTRIBUTE, span.attributes)
+            self.assertNotIn("autter.metrics_wired", span.resource.attributes)
+
+    def test_capture_fixtures_for_the_ingester(self):
+        # AUTTER_CAPTURE_FIXTURES=packages/otlp-ingester/test-fixtures/python
+        # writes both runs as gzipped OTLP/JSON for python-otel.test.ts.
+        out_dir = os.environ.get("AUTTER_CAPTURE_FIXTURES")
+        if not out_dir:
+            self.skipTest("AUTTER_CAPTURE_FIXTURES is not set")
+        for name, run in (("sampling-1pct-counted", self.counted), ("sampling-1pct-uncounted", self.uncounted)):
+            write_sampling_fixture(os.path.join(out_dir, f"{name}.json.gz"), run)
+
+
+# ── OTLP/JSON, for the ingester fixtures ──────────────────────────────────
+
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _public(text: str) -> str:
+    text = text.replace(_REPO, "/srv/app")
+    return re.sub(r"/(?:Users|home)/[^/\s\"']+", "/home/user", text)
+
+
+def _any_value(value):
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, (list, tuple)):
+        return {"arrayValue": {"values": [_any_value(item) for item in value]}}
+    return {"stringValue": _public(str(value))}
+
+
+def _key_values(attributes) -> list:
+    return [{"key": key, "value": _any_value(value)} for key, value in (attributes or {}).items()]
+
+
+def _otlp_span(span) -> dict:
+    out = {
+        "traceId": f"{span.context.trace_id:032x}",
+        "spanId": f"{span.context.span_id:016x}",
+        "flags": int(span.context.trace_flags),
+        "name": span.name,
+        "kind": span.kind.value + 1,  # the SDK's INTERNAL is 0, OTLP's 1
+        "startTimeUnixNano": str(span.start_time),
+        "endTimeUnixNano": str(span.end_time),
+        "attributes": _key_values(span.attributes),
+        "events": [{"timeUnixNano": str(e.timestamp), "name": e.name, "attributes": _key_values(e.attributes)}
+                   for e in span.events],
+        "status": {"code": span.status.status_code.value,
+                   **({"message": _public(span.status.description)} if span.status.description else {})},
+    }
+    if span.parent is not None:
+        out["parentSpanId"] = f"{span.parent.span_id:016x}"
+    return out
+
+
+def write_sampling_fixture(path: str, run: dict) -> None:
+    resource = run["spans"][0].resource
+    traces = {"resourceSpans": [{
+        "resource": {"attributes": _key_values(resource.attributes)},
+        "scopeSpans": [{"scope": {"name": "test.wsgi"}, "spans": [_otlp_span(s) for s in run["spans"]]}],
+    }]}
+    resource_metrics = []
+    for batch in run["metric_batches"]:
+        for rm in batch.resource_metrics:
+            scopes = []
+            for sm in rm.scope_metrics:
+                metrics_out = []
+                for metric in sm.metrics:
+                    points = [{
+                        "attributes": _key_values(p.attributes),
+                        "startTimeUnixNano": str(p.start_time_unix_nano),
+                        "timeUnixNano": str(p.time_unix_nano),
+                        "count": str(p.count),
+                        "sum": p.sum,
+                        "bucketCounts": [str(c) for c in p.bucket_counts],
+                        "explicitBounds": list(p.explicit_bounds),
+                        "min": p.min,
+                        "max": p.max,
+                    } for p in metric.data.data_points]
+                    metrics_out.append({"name": metric.name, "unit": metric.unit, "histogram": {
+                        "aggregationTemporality": metric.data.aggregation_temporality.value, "dataPoints": points}})
+                scopes.append({"scope": {"name": sm.scope.name}, "metrics": metrics_out})
+            resource_metrics.append({"resource": {"attributes": _key_values(rm.resource.attributes)},
+                                     "scopeMetrics": scopes})
+    document = {
+        "description": f"{REQUESTS} requests, every {FAIL_EVERY}th failing, parentbased_traceidratio {RATIO}, "
+                       "through init_tracing(); written by adapters/python/test_autter_tracing.py",
+        "requests": REQUESTS,
+        "failed": REQUESTS // FAIL_EVERY,
+        "traces": traces,
+        "metrics": {"resourceMetrics": resource_metrics},
+    }
+    data = (json.dumps(document, separators=(",", ":")) + "\n").encode("utf-8")
+    with open(path, "wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as fh:
+        fh.write(data)
 
 
 if __name__ == "__main__":

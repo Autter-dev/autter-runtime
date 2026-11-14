@@ -47,23 +47,34 @@ before(async () => {
 
 after(() => collector.close());
 
-test("SIGTERM with no other handler: flushes then exits 130/143", async () => {
+// Windows has no POSIX signals: process.kill(pid, "SIGTERM") terminates the
+// process at once (exit code 1) and no "SIGTERM" listener runs, so the
+// flush-on-signal behaviour these tests check cannot happen there.
+const posixSignals = {
+	skip: process.platform === "win32" ? "Windows has no POSIX signals: kill(SIGTERM) terminates without running handlers" : false,
+};
+
+test("SIGTERM with no other handler: flushes then exits 130/143", posixSignals, async () => {
 	const { code, out } = await runChild(fixtures("sigterm-sole.mjs"));
 	assert.equal(code, 143); // SIGTERM -> 128 + 15
 	assert.match(out, /\[autter\] telemetry flushed/);
 });
 
-test("second signal exits immediately instead of waiting for a slow flush", async () => {
-	const started = Date.now();
-	const { code } = await runChild(fixtures("sigterm-double.mjs"));
-	const elapsed = Date.now() - started;
+test("second signal exits immediately instead of waiting for a slow flush", posixSignals, async () => {
+	const { code, out } = await runChild(fixtures("sigterm-double.mjs"));
+	const exited = Date.now();
 	assert.equal(code, 143);
+	// Timed from the first signal (the fixture prints SIGNALLED <ms>), not
+	// from spawn: on a loaded runner Node's start-up alone can take seconds.
+	const signalled = Number(/SIGNALLED (\d+)/.exec(out)?.[1]);
+	assert.ok(signalled > 0, `the fixture never signalled: ${out}`);
+	const elapsed = exited - signalled;
 	// Flush target alone would hold the process for ~2s; the second SIGTERM
-	// must cut through well before that.
+	// (100 ms after the first) must cut through well before that.
 	assert.ok(elapsed < 1_500, `took ${elapsed}ms — second signal did not cut through`);
 });
 
-test("SIGTERM coexists with the app's own handler — app exit code wins", async () => {
+test("SIGTERM coexists with the app's own handler — app exit code wins", posixSignals, async () => {
 	const { code, out } = await runChild(fixtures("sigterm-coexists.mjs"));
 	assert.equal(code, 0);
 	assert.match(out, /app graceful drain complete/);

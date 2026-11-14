@@ -10,11 +10,18 @@ import {
 
 test("operation context isolates concurrent requests and exports outcomes, steps and redacted logs", async () => {
 	const requests = [];
+	const seen = new Set();
 	const collector = createServer((req, res) => {
 		let body = "";
 		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
-			requests.push({ path: req.url, body: JSON.parse(body) });
+			// Delivery is at-least-once: on a loaded machine an export whose
+			// answer takes longer than its 3 s attempt timeout is sent again,
+			// byte for byte. Count it once.
+			if (!seen.has(`${req.url} ${body}`)) {
+				seen.add(`${req.url} ${body}`);
+				requests.push({ path: req.url, body: JSON.parse(body) });
+			}
 			res.end("{}");
 		});
 	});

@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 import { initAutterServer, runtimeContext } from "../dist/index.js";
 import { captureRuntime, expectOperation } from "../dist/testing.js";
+import { until } from "./support/wait.mjs";
 
 test("logging.requests (experimental hook mode) summarises plain node:http requests", async () => {
 	const collector = createServer((req, res) => {
@@ -35,7 +36,10 @@ test("logging.requests (experimental hook mode) summarises plain node:http reque
 		assert.equal(ok.headers.get("x-request-id"), "hook-req-0001");
 		await ok.text();
 		await (await fetch(`${base}/fail`)).text();
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		// Summaries are recorded when each response closes, which can be after
+		// the client has read the body.
+		const named = (name) => runtime.operations.some((e) => e.attributes["autter.operation.name"] === name);
+		await until(() => named("GET /orders/:id") && named("GET /fail"));
 		expectOperation(runtime, "GET /orders/:id").toHaveKind("request").toHaveRequestId("hook-req-0001").toHaveOutcome("succeeded");
 		expectOperation(runtime, "GET /fail").toHaveOutcome("failed").toHaveContext({ "http.response.status_code": 503 });
 	} finally {

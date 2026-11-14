@@ -50,7 +50,14 @@ test("fileSink writes NDJSON per day and rotates by size, keeping maxFiles", () 
 	}
 });
 
-test("fileSink disables itself on a read-only directory", { skip: process.getuid?.() === 0 }, () => {
+// Skipped where chmod cannot make a directory unwritable: for root (it
+// writes anyway) and on Windows (chmod only toggles the read-only attribute,
+// which Windows ignores on directories).
+const cannotLockDir =
+	process.getuid?.() === 0 ? "root can write to a read-only directory"
+	: process.platform === "win32" ? "chmod does not make a directory read-only on Windows"
+	: false;
+test("fileSink disables itself on a read-only directory", { skip: cannotLockDir }, () => {
 	const root = mkdtempSync(join(tmpdir(), "autter-ro-"));
 	const warnings = [];
 	const original = console.warn;

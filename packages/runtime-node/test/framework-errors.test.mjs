@@ -20,6 +20,7 @@ import {
 	initAutterServer,
 } from "../dist/index.js";
 import { captureRuntime } from "../dist/testing.js";
+import { trackOpenResponses, until } from "./support/wait.mjs";
 
 const require = createRequire(import.meta.url);
 const traceBodies = [];
@@ -27,6 +28,7 @@ let collector;
 let sdk;
 let runtime;
 const apps = [];
+const responses = { open: 0 };
 
 before(async () => {
 	const { createServer } = await import("node:http");
@@ -68,6 +70,7 @@ after(async () => {
 
 async function listen(handler) {
 	const server = require("http").createServer(handler);
+	trackOpenResponses(server, responses);
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	apps.push(
 		() =>
@@ -84,7 +87,9 @@ let exported;
  * the server span and the ingester's occurrences for one request path. */
 async function exportedFor(path) {
 	if (!exported) {
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		// Every server span ends when its response closes, which can be after
+		// the client has read the body; shutdown() exports only ended spans.
+		await until(() => responses.open === 0);
 		await sdk.shutdown();
 		const spans = [];
 		const occurrences = [];
@@ -187,6 +192,7 @@ test("Fastify: autterFastifyErrors (onError) records the thrown error with its s
 	app.get("/fastify/bad-request", async () => {
 		throw Object.assign(new Error("invalid cart"), { statusCode: 400 });
 	});
+	trackOpenResponses(app.server, responses);
 	await app.listen({ port: 0, host: "127.0.0.1" });
 	apps.push(() => app.close());
 	const url = `http://127.0.0.1:${app.server.address().port}`;
@@ -203,6 +209,7 @@ test("Fastify: autterFastifyErrors (onError) records the thrown error with its s
 	direct.get("/fastify/direct", async function fastifyDirectHandler() {
 		throw Object.assign(new Error("direct registration"), { statusCode: 409 });
 	});
+	trackOpenResponses(direct.server, responses);
 	await direct.listen({ port: 0, host: "127.0.0.1" });
 	apps.push(() => direct.close());
 	const conflict = await fetch(`http://127.0.0.1:${direct.server.address().port}/fastify/direct`);

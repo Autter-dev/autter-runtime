@@ -172,7 +172,8 @@ test("request-scoped breadcrumbs and runtimeLogger entries reach the exception s
 		captureException(new Error("crash outside any request"));
 		await runtime.shutdown();
 
-		const deadline = Date.now() + 5000;
+		// Polls; the deadline only bounds a failing run (a loaded runner is slow).
+		const deadline = Date.now() + 15_000;
 		while (sinkOccurrences.length < 6 && Date.now() < deadline) await delay(20);
 		const byMessage = (list, message) => list.find((o) => o.message === message);
 

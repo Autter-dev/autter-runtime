@@ -18,11 +18,19 @@ export const ADDITIVE_SUMMARY_KEYS = new Set([
 
 export async function runGoldenScenario(sdk) {
 	const bodies = [];
+	const seen = new Set();
 	const collector = createServer((req, res) => {
 		let body = "";
 		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
-			if (req.url === "/v1/logs") bodies.push(JSON.parse(body));
+			// Delivery is at-least-once: on a loaded machine an export whose
+			// answer takes longer than its 3 s attempt timeout is sent again,
+			// byte for byte. Keep one copy (every record carries a unique
+			// event id and timestamp, so distinct batches never collide).
+			if (req.url === "/v1/logs" && !seen.has(body)) {
+				seen.add(body);
+				bodies.push(JSON.parse(body));
+			}
 			res.end("{}");
 		});
 	});

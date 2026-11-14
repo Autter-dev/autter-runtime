@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { initAutterServer, runtimeLogger, flushRuntimeLogs } from "../dist/index.js";
+import { quietPeriod, until } from "./support/wait.mjs";
 
 const ALL_MIGRATIONS = [
 	"0001-baseline", "0002-occurrences-aggregation-columns", "0003-compress-fat-columns",
@@ -50,11 +51,10 @@ function captureWarnings() {
 	return { lines, restore: () => { console.warn = original; } };
 }
 
-const until = async (check, ms = 2000) => {
-	const start = Date.now();
-	while (!check() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 10));
-};
-const settle = () => new Promise((r) => setTimeout(r, 150));
+// The checks below are mostly that something does NOT happen (a second
+// warning, a warning at all): after waiting for what does happen, give the
+// rest a short, bounded chance to show up.
+const settle = () => quietPeriod(150);
 
 async function withServer(endpoint, options, fn) {
 	const runtime = initAutterServer({
@@ -176,14 +176,36 @@ test("a hanging compat request never delays process exit", async () => {
 	await new Promise((resolve) => hang.listen(0, "127.0.0.1", resolve));
 	try {
 		const fixture = fileURLToPath(new URL("./fixtures/compat-exit.mjs", import.meta.url));
-		const started = Date.now();
-		const code = await new Promise((resolve) => {
-			const child = spawn(process.execPath, [fixture, `http://127.0.0.1:${hang.address().port}`], { stdio: "ignore" });
-			child.on("exit", resolve);
+		const { code, holding, lingered } = await new Promise((resolve) => {
+			const child = spawn(process.execPath, [fixture, `http://127.0.0.1:${hang.address().port}`], {
+				stdio: ["ignore", "pipe", "inherit"],
+			});
+			let out = "";
+			child.stdout.on("data", (d) => (out += d));
+			// Timed from the end of the fixture's own work (it prints
+			// WORK_DONE <ms>), not from spawn: Node's start-up is not what this
+			// test measures, and on a loaded runner it alone can take seconds.
+			child.on("exit", (exitCode) =>
+				resolve({
+					code: exitCode,
+					holding: /HOLDING (.*)/.exec(out)?.[1],
+					lingered: Date.now() - Number(/WORK_DONE (\d+)/.exec(out)?.[1] ?? 0),
+				}),
+			);
 		});
 		assert.equal(code, 0);
 		assert.equal(hits, 1, "the compat request was in flight");
-		assert.ok(Date.now() - started < 2500, `exited after ${Date.now() - started}ms`);
+		// Deterministic: once its work is done, no socket or timer keeps the
+		// loop alive (an in-flight request that is not unref'd shows as a
+		// TCPSocketWrap, its timeout as a Timeout). Other resources are not
+		// the compat check's: the child's stdio pipes, and on a slow machine
+		// the OTel host detector's `ioreg` (macOS) / `REG QUERY` (Windows).
+		const held = JSON.parse(holding ?? "null")?.filter((type) => type === "TCPSocketWrap" || type === "Timeout");
+		assert.deepEqual(held, [], `still keeping the process alive after its work: ${holding}`);
+		// And in time: held by the request, it would linger until the
+		// request's 3 s timeout, about 2.7 s after its 300 ms of work. The
+		// bound is loose because a loaded runner can be slow to report exit.
+		assert.ok(lingered < 2500, `exited ${lingered}ms after its work was done`);
 	} finally {
 		hang.closeAllConnections();
 		await new Promise((resolve) => hang.close(resolve));

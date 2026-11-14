@@ -7,12 +7,22 @@ on:
 
 jobs:
   build:
+    # Every package's tests on each Node major the packages support
+    # (engines.node >= 20) through the current release. The bundle size
+    # check and the Python adapter do not depend on the Node version, so
+    # they run once, on 22.
+    name: build (Node ${{ matrix.node }})
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
+      - run: node --version && npm --version
       - run: npm install
       - run: npm run build
       - run: npm run test -w @autter/runtime-core
@@ -22,8 +32,29 @@ jobs:
       - run: npm run test -w @autter/runtime-browser
       - run: npm run test -w @autter/otlp-ingester
       - run: npm run test -w @autter/runtime-cli
-      - run: npm run size -w @autter/runtime-browser
-      - run: python3 -m unittest discover -s adapters/python -v
+      - if: matrix.node == 22
+        run: npm run size -w @autter/runtime-browser
+      - if: matrix.node == 22
+        run: python3 -m unittest discover -s adapters/python -v
+
+  runtime-node-os:
+    # @autter/runtime-node's tests on macOS and Windows (the Ubuntu legs
+    # above cover the Node versions). Only this package: its test script
+    # builds the two packages it needs (runtime-core, otlp-ingester).
+    name: runtime-node (${{ matrix.os }}, Node 24)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --version && npm --version
+      - run: npm install
+      - run: npm run test -w @autter/runtime-node
 
   clickhouse-e2e:
     # The built ingester against a real ClickHouse, the version production

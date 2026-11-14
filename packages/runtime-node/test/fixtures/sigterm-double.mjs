@@ -14,6 +14,7 @@ installAutterAutoFlush({
 });
 
 setTimeout(() => {
+	process.stdout.write(`SIGNALLED ${Date.now()}\n`);
 	process.kill(process.pid, "SIGTERM");
 	setTimeout(() => process.kill(process.pid, "SIGTERM"), 100);
 }, 50);

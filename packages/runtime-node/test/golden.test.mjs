@@ -5,10 +5,12 @@ import * as sdk from "../dist/index.js";
 import { normalise, runGoldenScenario } from "./fixtures/golden-scenario.mjs";
 
 test("a fixed 1.4.0 operation still exports byte-identical OTLP JSON (1.5.0 additive keys aside)", async () => {
+	// CRLF → LF: a Windows checkout (core.autocrlf) rewrites the file's line
+	// endings; the comparison is about the JSON, not how git stored it.
 	const golden = readFileSync(
 		new URL("./fixtures/golden-1.4.0-logs.json", import.meta.url),
 		"utf8",
-	);
+	).replace(/\r\n/g, "\n");
 	const current = await runGoldenScenario(sdk);
 	// Additive 1.5.0 summary keys (kind, level) are the ONLY difference.
 	const stripped = normalise(

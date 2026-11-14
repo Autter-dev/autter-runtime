@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Tests and CI: Node 20 to 26, macOS and Windows
+
+- CI ran on one configuration (Node 22, Ubuntu) although the packages support Node >= 20. Every package's tests now run on Node 20, 22, 24 and 26 on Ubuntu, and `@autter/runtime-node`'s on macOS and Windows (Node 24). No package code changed: what failed elsewhere was the tests.
+- On Node 20, `@autter/runtime-browser`'s test script failed before running anything (`Could not find 'test/*.test.mjs'`): it quoted the glob, and Node 20 does not expand globs. It and `@autter/runtime-node` now run through `scripts/run-tests.mjs`, which also works in Windows' `cmd.exe`.
+- On Windows, 13 runtime-node tests failed: a child process imported `D:\...` instead of a `file:` URL (7), the golden OTLP file had CRLF line endings after checkout (1), the read-only-directory test relies on chmod (1, now skipped on Windows), and four tests send the process SIGTERM, which Windows does not deliver to handlers (three now skipped on Windows, the redaction one emits the event instead).
+- On a slow or loaded machine, tests that slept a fixed 25-50 ms before asserting, or bounded a time from process start, could fail. They now poll for what they assert (`test/support/wait.mjs`); a fixed wait remains only for checks that something does not happen. Timing checks are measured from the event they are about, not from spawn, and test collectors that count records keep one copy of an export retried after its 3 s attempt timeout.
+
 ### Python adapter: request counting on by default
 
 - `init_tracing()` counts every HTTP request by default (`adapters/python/autter_tracing.py`). It was opt-in, so a service at the recommended 1% sampling sent every error but only 1% of its requests, and its error rate read about 100 times too high. Turn it off with `AUTTER_COUNT_REQUESTS=false` or `init_tracing(count_requests=False)`. It still stays off, with a warning, when a meter provider is already registered or the metric exporter does not prefer delta histograms, and now also when `opentelemetry-exporter-otlp-proto-http` is not installed (it used to raise `ImportError` when asked to count).

@@ -173,13 +173,15 @@ test("retainTracesAboveMs: false (or 0) turns slow retention off", async () => {
 });
 
 test("a positive retainTracesAboveMs is a fixed threshold, below the default floor too", async () => {
-	await runApp("tail-fixed", { traceSampleRate: 0, retainTracesAboveMs: 100 }, `
+	// Wide margins on both sides of the 300 ms threshold (still under the
+	// 500 ms floor): a 10 ms request can take far longer on a loaded runner.
+	await runApp("tail-fixed", { traceSampleRate: 0, retainTracesAboveMs: 300 }, `
 		await get("/slow/10");
-		await get("/slow/200");
+		await get("/slow/450");
 	`);
 	const spans = requestSpans("tail-fixed");
 	assert.equal(byPath(spans, "/slow/10").length, 0);
-	assert.equal(byPath(spans, "/slow/200")[0]?.attributes["autter.retention_reason"], "slow");
+	assert.equal(byPath(spans, "/slow/450")[0]?.attributes["autter.retention_reason"], "slow");
 });
 
 test("slow traces are rate limited per process and per route", async () => {

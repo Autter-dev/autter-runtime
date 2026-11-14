@@ -365,9 +365,18 @@ test("the browser relay scrubs message, stack, name and nested context", () => {
 
 test("JWT pattern stays linear on long dash-joined runs", async () => {
 	const { redactText } = await import("../dist/index.js");
-	const started = Date.now();
-	redactText("eyJ-".repeat(16384));
-	assert.ok(Date.now() - started < 500, `took ${Date.now() - started}ms`);
+	const time = (text) => {
+		const started = performance.now();
+		redactText(text);
+		return performance.now() - started;
+	};
+	// Relative to the same length of text the pattern never matches, so a
+	// loaded or slow machine slows both: linear stays within a small factor,
+	// backtracking (quadratic here) is hundreds of times slower. 500 ms is
+	// the floor, for when the baseline is too small to measure.
+	const baseline = time("abc-".repeat(16384));
+	const elapsed = time("eyJ-".repeat(16384));
+	assert.ok(elapsed < Math.max(500, 25 * baseline), `took ${Math.round(elapsed)}ms (baseline ${Math.round(baseline)}ms)`);
 });
 
 test("custom key and value patterns ignore g/y flags", () => {

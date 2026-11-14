@@ -209,7 +209,8 @@ OTEL_EXPORTER_OTLP_HEADERS=x-autter-key=${AUTTER_RUNTIME_KEY}   # the server key
 OTEL_SERVICE_NAME=shop
 OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment=production
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
-OTEL_TRACES_SAMPLER_ARG=0.1   # 10% of healthy traces; errors are always exported
+OTEL_TRACES_SAMPLER_ARG=0.01  # 1% of healthy traces; init_tracing() exports every error
+AUTTER_COUNT_REQUESTS=true    # count every request (the default; older copies need it set)
 ```
 
 `authorization=Bearer%20${AUTTER_RUNTIME_KEY}` works as well: header values
@@ -317,19 +318,35 @@ provider.add_span_processor(RetainErrorTraces(BatchSpanProcessor(RedactingSpanEx
 trace.set_tracer_provider(provider)
 ```
 
-### Request counts (opt-in)
+### Request counts
 
 Without a metric feed, the ingester counts the requests of the traces head
-sampling kept, while retention keeps every error: at a 10% ratio, request
-counts read a tenth of the traffic and error rates (release health, the
-post-deploy fix watch) read ten times too high. A Python meter provider's
-default **cumulative** `http.server.duration` is not counted at all.
-`init_tracing(count_requests=True)`, or `AUTTER_COUNT_REQUESTS=true`, counts
-every request once:
+sampling kept, while retention keeps every error: at a 1% ratio, request
+counts read a hundredth of the traffic and error rates (release health, the
+post-deploy fix watch) read a hundred times too high (a true 2% reads as
+about 200%). A Python meter provider's default **cumulative**
+`http.server.duration` is not counted at all. `init_tracing()` counts every
+request once, by default. Copies of `autter_tracing.py` taken before that
+default (see the CHANGELOG) count only with `init_tracing(count_requests=True)`
+or `AUTTER_COUNT_REQUESTS=true`, so setting the variable keeps any copy right:
 
 ```bash
-AUTTER_COUNT_REQUESTS=true   # with the OTEL_* variables above; needs opentelemetry-exporter-otlp-proto-http
+AUTTER_COUNT_REQUESTS=true    # the default; needs opentelemetry-exporter-otlp-proto-http
+AUTTER_COUNT_REQUESTS=false   # or init_tracing(count_requests=False): turn counting off
 ```
+
+Turn it off when:
+
+- **The ingester is older than 1.8.0** (self-hosted). It ignores the marks
+  below and counts each head-sampled request twice, from the histogram and
+  from its span. Upgrade the ingester, or turn counting off until you do.
+- **The app registers its own meter provider after `init_tracing()`.**
+  OpenTelemetry keeps the first one registered, so the app's call is ignored
+  with an "Overriding of current MeterProvider is not allowed" warning and its
+  own metrics never reach its exporter. Register yours before
+  `init_tracing()` (counting then stays off by itself, with a warning), add
+  your instruments to the one `init_tracing()` registers, or turn counting
+  off.
 
 - `CountRequests` sees every HTTP server span, sampled or not
   (`RecordUnsampled` records them all), and records one point per request
@@ -352,8 +369,9 @@ AUTTER_COUNT_REQUESTS=true   # with the OTEL_* variables above; needs openteleme
   such as a memory gauge, to it with `metrics.get_meter(...)`; do not
   register another meter provider. If one is already registered when
   `init_tracing()` runs, counting stays off with a warning, and so it does
-  with a metric exporter that does not prefer delta histograms: the flags
-  are only set next to the histogram that honours them.
+  with a metric exporter that does not prefer delta histograms or without
+  `opentelemetry-exporter-otlp-proto-http`: the flags are only set next to
+  the histogram that honours them.
 - Non-HTTP server spans (gRPC) are not counted by it and keep their
   span-fed counts.
 
@@ -361,7 +379,10 @@ Wiring the pieces yourself: build the meter provider with
 `request_meter_provider(resource)`, add `REQUEST_COUNT_RESOURCE_ATTRIBUTES`
 to the tracer provider's resource, and wrap the exporting processor:
 `CountRequests(RetainErrorTraces(BatchSpanProcessor(...)), meter_provider)`.
-The Flask recipe tests it under gunicorn.
+The Flask recipe tests it under gunicorn, and `test_autter_tracing.py` at
+the recommended rate: 5,000 requests at `parentbased_traceidratio` 0.01 with
+2% failing export all 100 errors and count 5,000 requests, and the ingester
+stores a 2% error rate from that export (244% with counting off).
 
 **Zero-code (`opentelemetry-instrument`).** The `opentelemetry-distro`
 wrapper takes its sampler from `OTEL_TRACES_SAMPLER`, and no standard
@@ -493,8 +514,11 @@ OTEL_TRACES_SAMPLER_ARG=0.01
 Errors surface as issues when spans carry `exception` events (every SDK's
 `record_exception` / `RecordError` does this) or `ERROR` status.
 
-**Always-on errors.** With a ratio sampler, an error on an unsampled trace is
-dropped with it. The pieces the Python recipe uses are defined by the
+**Always-on errors.** With a ratio sampler and a plain OpenTelemetry SDK, an
+error on an unsampled trace is not sent: at 0.01, about 99 errors in 100 are
+lost. Python: use `init_tracing()` ([Python](#python-django-fastapi-flask-celery)).
+Other SDKs: sample at 100%, or wire record-only sampling and retention as
+below. The pieces the Python recipe uses are defined by the
 [SDK specification](https://opentelemetry.io/docs/specs/otel/trace/sdk/#sampling),
 so an SDK that implements it can be wired the same way: a sampler may answer
 *record only*, span processors receive every recorded span, and exporters
@@ -568,7 +592,10 @@ same exporter. (The Node package does this exemption for you.)
 ## Sampling guidance (all stacks)
 
 Errors are always worth sending; keep successful-trace sampling at ~1%
-(`OTEL_TRACES_SAMPLER_ARG=0.01`). Request/usage metrics are derived
+(`OTEL_TRACES_SAMPLER_ARG=0.01`). That is only safe where errors bypass the
+sampler: the `@autter/*` SDKs and Python's `init_tracing()` send every error
+at any rate, while a plain OpenTelemetry SDK with a ratio sampler drops the
+errors of the traces it drops (see the end of this section). Request/usage metrics are derived
 server-side from server spans (one count per request) and the
 `http.server.request.duration` / `http.server.duration` histogram — no extra
 setup. A sampled request reaches both feeds, so at ~1% sampling request
@@ -578,8 +605,7 @@ temporality, `http.route` on the data point), add
 `OTEL_RESOURCE_ATTRIBUTES` and set `autter.metric_has_route=true` on each
 server span whose data point carries `http.route` (`@autter/runtime-node`
 1.7.0+ does all of this for you, and so does `adapters/python`'s
-`init_tracing(count_requests=True)`: see
-[Request counts](#request-counts-opt-in)). Cumulative histograms are not
+`init_tracing()`: see [Request counts](#request-counts)). Cumulative histograms are not
 counted, so leave the flags off with them. LLM/GenAI spans are the exception — send
 them at 100% (see above).
 

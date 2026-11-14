@@ -748,13 +748,14 @@ Span-level:
   - carries `autter.tail_retained` on a resource with
     `autter.metrics_wired` (runtime-node's tail retention of erroring
     and slow traces ships such spans next to its metric feed).
-  `adapters/python`'s `init_tracing(count_requests=True)` sends the same
+  `adapters/python`'s `init_tracing()` (request counting on by default;
+  `AUTTER_COUNT_REQUESTS=false` turns it off) sends the same
   shape: a delta histogram with a point for every request (recorded from
   every HTTP server span, sampled or not), each HTTP server span marked
   `autter.metric_has_route`, and both resource attributes.
   A request that carries `autter.tail_retained` on a resource without a
-  metric feed (the Python retention in `adapters/python` without
-  `count_requests`) is counted by neither: it was exported because it failed, so it is no sample of the
+  metric feed (the Python retention in `adapters/python` with
+  `count_requests` off) is counted by neither: it was exported because it failed, so it is no sample of the
   traffic, and adds only its failure, `error_count` 1, on its route.
   A metric-counted request adds no request from its spans; the metric
   already counted a 5xx as a failed request, so an error recorded in it

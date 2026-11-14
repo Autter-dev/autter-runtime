@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Python adapter: request counting on by default
+
+- `init_tracing()` counts every HTTP request by default (`adapters/python/autter_tracing.py`). It was opt-in, so a service at the recommended 1% sampling sent every error but only 1% of its requests, and its error rate read about 100 times too high. Turn it off with `AUTTER_COUNT_REQUESTS=false` or `init_tracing(count_requests=False)`. It still stays off, with a warning, when a meter provider is already registered or the metric exporter does not prefer delta histograms, and now also when `opentelemetry-exporter-otlp-proto-http` is not installed (it used to raise `ImportError` when asked to count).
+- Upgrade notes: a self-hosted ingester older than 1.8.0 counts each head-sampled request twice (from the histogram and from its span): upgrade it first, or set `AUTTER_COUNT_REQUESTS=false`. `init_tracing()` now registers the global meter provider, so an app that registers its own afterwards gets OpenTelemetry's "Overriding of current MeterProvider is not allowed" warning and its metrics go nowhere: register yours before `init_tracing()`, or turn counting off.
+- Tests at the recommended rate: 5,000 requests at `parentbased_traceidratio` 0.01 with 2% failing export all 100 errors and count 5,000 requests (`test_autter_tracing.py`), and the ingester stores a 2% error rate from that export (`python-otel.test.ts`; 244% with counting off).
+- Docs: sampling advice no longer says errors are always captured for every SDK; it says which senders keep them (the `@autter/*` SDKs, Python's `init_tracing()`) and that a plain OpenTelemetry SDK with a ratio sampler drops the errors of unsampled traces.
+
 ## [1.18.0] - 2026-11-14
 
 Packages: `otlp-ingester` 1.16.0, `runtime-node` 1.14.0, and the local `dashboard` image. Release the ingester before `runtime-node` 1.14.0 (`llm_cache_tokens`); see the upgrade notes.

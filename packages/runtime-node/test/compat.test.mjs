@@ -176,23 +176,24 @@ test("a hanging compat request never delays process exit", async () => {
 	await new Promise((resolve) => hang.listen(0, "127.0.0.1", resolve));
 	try {
 		const fixture = fileURLToPath(new URL("./fixtures/compat-exit.mjs", import.meta.url));
-		const { code, ranFor } = await new Promise((resolve) => {
+		const { code, lingered } = await new Promise((resolve) => {
 			const child = spawn(process.execPath, [fixture, `http://127.0.0.1:${hang.address().port}`], {
 				stdio: ["ignore", "pipe", "inherit"],
 			});
 			let out = "";
 			child.stdout.on("data", (d) => (out += d));
-			// Timed from the fixture's own start (it prints STARTED <ms>), not
-			// from spawn: Node's start-up is not what this test measures, and on
-			// a loaded runner it alone can take seconds.
+			// Timed from the end of the fixture's own work (it prints
+			// WORK_DONE <ms>), not from spawn: Node's start-up is not what this
+			// test measures, and on a loaded runner it alone can take seconds.
 			child.on("exit", (exitCode) =>
-				resolve({ code: exitCode, ranFor: Date.now() - Number(/STARTED (\d+)/.exec(out)?.[1] ?? 0) }),
+				resolve({ code: exitCode, lingered: Date.now() - Number(/WORK_DONE (\d+)/.exec(out)?.[1] ?? 0) }),
 			);
 		});
 		assert.equal(code, 0);
 		assert.equal(hits, 1, "the compat request was in flight");
-		// Its own work is 300 ms; the compat request's timeout is 3 s.
-		assert.ok(ranFor < 2000, `exited ${ranFor}ms after starting`);
+		// Held by the request, it would linger until the request's 3 s timeout
+		// (about 2.7 s after its 300 ms of work).
+		assert.ok(lingered < 1500, `exited ${lingered}ms after its work was done`);
 	} finally {
 		hang.closeAllConnections();
 		await new Promise((resolve) => hang.close(resolve));

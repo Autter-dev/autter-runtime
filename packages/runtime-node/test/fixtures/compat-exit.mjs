@@ -12,7 +12,6 @@ initAutterServer({
 	memoryMetrics: false,
 });
 
-process.stdout.write(`STARTED ${Date.now()}\n`);
-
-// The app's own work: long enough for the check to start its request.
-setTimeout(() => {}, 300);
+// The app's own work: long enough for the check to start its request. The
+// process should exit right after it; the parent times it from WORK_DONE.
+setTimeout(() => process.stdout.write(`WORK_DONE ${Date.now()}\n`), 300);

@@ -176,7 +176,7 @@ test("a hanging compat request never delays process exit", async () => {
 	await new Promise((resolve) => hang.listen(0, "127.0.0.1", resolve));
 	try {
 		const fixture = fileURLToPath(new URL("./fixtures/compat-exit.mjs", import.meta.url));
-		const { code, lingered } = await new Promise((resolve) => {
+		const { code, holding, lingered } = await new Promise((resolve) => {
 			const child = spawn(process.execPath, [fixture, `http://127.0.0.1:${hang.address().port}`], {
 				stdio: ["ignore", "pipe", "inherit"],
 			});
@@ -186,14 +186,23 @@ test("a hanging compat request never delays process exit", async () => {
 			// WORK_DONE <ms>), not from spawn: Node's start-up is not what this
 			// test measures, and on a loaded runner it alone can take seconds.
 			child.on("exit", (exitCode) =>
-				resolve({ code: exitCode, lingered: Date.now() - Number(/WORK_DONE (\d+)/.exec(out)?.[1] ?? 0) }),
+				resolve({
+					code: exitCode,
+					holding: /HOLDING (.*)/.exec(out)?.[1],
+					lingered: Date.now() - Number(/WORK_DONE (\d+)/.exec(out)?.[1] ?? 0),
+				}),
 			);
 		});
 		assert.equal(code, 0);
 		assert.equal(hits, 1, "the compat request was in flight");
-		// Held by the request, it would linger until the request's 3 s timeout
-		// (about 2.7 s after its 300 ms of work).
-		assert.ok(lingered < 1500, `exited ${lingered}ms after its work was done`);
+		// Deterministic: once its work is done nothing keeps the loop alive
+		// but the child's own stdio (pipes to this process).
+		const held = JSON.parse(holding ?? "null")?.filter((type) => type !== "PipeWrap" && type !== "TTYWrap");
+		assert.deepEqual(held, [], `still keeping the process alive after its work: ${holding}`);
+		// And in time: held by the request, it would linger until the
+		// request's 3 s timeout, about 2.7 s after its 300 ms of work. The
+		// bound is loose because a loaded runner can be slow to report exit.
+		assert.ok(lingered < 2500, `exited ${lingered}ms after its work was done`);
 	} finally {
 		hang.closeAllConnections();
 		await new Promise((resolve) => hang.close(resolve));

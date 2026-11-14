@@ -292,7 +292,9 @@ function runFixture({ express, env = {}, requests }) {
 			started = true;
 			for (const path of requests) {
 				try {
-					const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(2_000) });
+					// A generous timeout: it only stops a hung fixture, and a loaded
+					// runner can take seconds to answer.
+					const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(10_000) });
 					responses.push({ path, status: response.status, requestId: response.headers.get("x-request-id") });
 					await response.text();
 				} catch {

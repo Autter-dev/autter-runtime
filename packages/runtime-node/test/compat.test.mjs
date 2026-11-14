@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { initAutterServer, runtimeLogger, flushRuntimeLogs } from "../dist/index.js";
+import { quietPeriod, until } from "./support/wait.mjs";
 
 const ALL_MIGRATIONS = [
 	"0001-baseline", "0002-occurrences-aggregation-columns", "0003-compress-fat-columns",
@@ -50,11 +51,10 @@ function captureWarnings() {
 	return { lines, restore: () => { console.warn = original; } };
 }
 
-const until = async (check, ms = 2000) => {
-	const start = Date.now();
-	while (!check() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 10));
-};
-const settle = () => new Promise((r) => setTimeout(r, 150));
+// The checks below are mostly that something does NOT happen (a second
+// warning, a warning at all): after waiting for what does happen, give the
+// rest a short, bounded chance to show up.
+const settle = () => quietPeriod(150);
 
 async function withServer(endpoint, options, fn) {
 	const runtime = initAutterServer({
@@ -176,14 +176,23 @@ test("a hanging compat request never delays process exit", async () => {
 	await new Promise((resolve) => hang.listen(0, "127.0.0.1", resolve));
 	try {
 		const fixture = fileURLToPath(new URL("./fixtures/compat-exit.mjs", import.meta.url));
-		const started = Date.now();
-		const code = await new Promise((resolve) => {
-			const child = spawn(process.execPath, [fixture, `http://127.0.0.1:${hang.address().port}`], { stdio: "ignore" });
-			child.on("exit", resolve);
+		const { code, ranFor } = await new Promise((resolve) => {
+			const child = spawn(process.execPath, [fixture, `http://127.0.0.1:${hang.address().port}`], {
+				stdio: ["ignore", "pipe", "inherit"],
+			});
+			let out = "";
+			child.stdout.on("data", (d) => (out += d));
+			// Timed from the fixture's own start (it prints STARTED <ms>), not
+			// from spawn: Node's start-up is not what this test measures, and on
+			// a loaded runner it alone can take seconds.
+			child.on("exit", (exitCode) =>
+				resolve({ code: exitCode, ranFor: Date.now() - Number(/STARTED (\d+)/.exec(out)?.[1] ?? 0) }),
+			);
 		});
 		assert.equal(code, 0);
 		assert.equal(hits, 1, "the compat request was in flight");
-		assert.ok(Date.now() - started < 2500, `exited after ${Date.now() - started}ms`);
+		// Its own work is 300 ms; the compat request's timeout is 3 s.
+		assert.ok(ranFor < 2000, `exited ${ranFor}ms after starting`);
 	} finally {
 		hang.closeAllConnections();
 		await new Promise((resolve) => hang.close(resolve));

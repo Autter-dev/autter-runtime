@@ -16,6 +16,7 @@ import express4 from "express";
 import express5 from "express5";
 import { normalizeTraces } from "../../otlp-ingester/dist/normalize-otlp.js";
 import { autterErrorHandler, autterRequests, captureException, initAutterServer } from "../dist/index.js";
+import { trackOpenResponses, until } from "./support/wait.mjs";
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +25,7 @@ let collector;
 let collectorPort;
 let sdk;
 const servers = [];
+const responses = { open: 0 };
 
 before(async () => {
 	const { createServer } = await import("node:http");
@@ -61,6 +63,7 @@ after(async () => {
 
 async function listen(app) {
 	const server = require("http").createServer(app);
+	trackOpenResponses(server, responses);
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	servers.push(
 		() =>
@@ -155,7 +158,9 @@ for (const [name, express, prefix] of [
 let exported;
 async function exportedFor(path) {
 	if (!exported) {
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		// Every server span ends when its response closes, which can be after
+		// the client has read the body; shutdown() exports only ended spans.
+		await until(() => responses.open === 0);
 		await sdk.shutdown();
 		const spans = [];
 		const occurrences = [];

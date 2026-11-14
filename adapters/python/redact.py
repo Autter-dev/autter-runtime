@@ -19,11 +19,21 @@ parity is enforced by the shared ``test-vectors/redaction.json``. Secure by
 default; extend with :func:`configure` (your own value/key patterns). The
 Autter ingester scrubs again server-side as a second line of defence.
 
+Identifying attributes (the client's IP address and port, the raw user
+agent, the host's id and addresses, the command line and its owner:
+:data:`IDENTIFYING_ATTRIBUTE_KEYS`) are dropped rather than scrubbed:
+:func:`drop_identifying_attributes`. ``autter_tracing.RedactingSpanExporter``
+applies it to every span, also with redaction off. Opt in to a keyed hash of
+the client's address instead (``client.address_hash``): :func:`hash_client_ip`.
+
 Stdlib only.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -99,6 +109,46 @@ _USAGE_KEY = re.compile(
     r"|^ai\.usage\.[a-z]*tokens$",
     re.I,
 )
+
+#: Attributes that identify a person, a machine or a command line rather than
+#: describe a request. Dropped by default from span, event and link
+#: attributes and the resource (same list as @autter/runtime-node and the
+#: ingester; parity: ``test-vectors/redaction.json``, ``identifying``).
+#: Kept on purpose: ``service.instance.id``, ``host.name`` (container and pod
+#: names; drop it with ``drop_attributes``), ``process.pid``,
+#: ``process.runtime.*``, ``os.type``, ``host.arch``.
+IDENTIFYING_ATTRIBUTE_KEYS: tuple[str, ...] = (
+    # The client's address (and, on outgoing calls, the peer's), in the old,
+    # 1.2x and stable semantic conventions; the server's own IP address.
+    "net.peer.ip",
+    "net.peer.port",
+    "net.sock.peer.addr",
+    "net.sock.peer.port",
+    "net.host.ip",
+    "net.sock.host.addr",
+    "network.local.address",
+    "http.client_ip",
+    "client.address",
+    "client.port",
+    "network.peer.address",
+    "network.peer.port",
+    # The raw user-agent string.
+    "http.user_agent",
+    "user_agent.original",
+    # The machine (its id and addresses; host.name is kept).
+    "host.id",
+    "host.mac",
+    "host.ip",
+    # The command line and the user running it.
+    "process.command_args",
+    "process.command",
+    "process.command_line",
+    "process.owner",
+    "process.executable.path",
+)
+
+KEEP_IDENTIFYING_ATTRIBUTES_ENV = "AUTTER_KEEP_IDENTIFYING_ATTRIBUTES"
+DROP_ATTRIBUTES_ENV = "AUTTER_DROP_ATTRIBUTES"
 
 _extra_values: list[re.Pattern[str]] = []
 _extra_keys: list[re.Pattern[str]] = []
@@ -212,3 +262,139 @@ def redact_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
     if not _enabled:
         return dict(attributes)
     return _redact_mapping(attributes, 0)
+
+
+def keep_identifying_from_env(raw: str | None) -> bool | list[str] | None:
+    """Parse ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``: ``true``/``1``/``yes``/
+    ``on``/``all`` keep every identifying attribute, ``false``/``0``/``no``/
+    ``off``/``none`` keep none, anything else is a comma-separated list of
+    keys. Unset or blank: ``None`` (drop them all)."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on", "all"):
+        return True
+    if value in ("0", "false", "no", "off", "none"):
+        return False
+    return [key.strip() for key in raw.split(",") if key.strip()]
+
+
+def drop_attributes_from_env(raw: str | None) -> list[str] | None:
+    """Parse ``AUTTER_DROP_ATTRIBUTES``: a comma-separated list of keys."""
+    if not isinstance(raw, str):
+        return None
+    keys = [key.strip() for key in raw.split(",") if key.strip()]
+    return keys or None
+
+
+def identifying_keys_to_drop(
+    keep: bool | Iterable[str] | None = None, extra: Iterable[str] | None = None
+) -> frozenset[str]:
+    """The keys to drop: :data:`IDENTIFYING_ATTRIBUTE_KEYS` minus ``keep``
+    (``True`` keeps them all, a list keeps those keys), plus ``extra`` (a key
+    both kept and in ``extra`` is dropped)."""
+    if keep is True:
+        kept: set[str] = set(IDENTIFYING_ATTRIBUTE_KEYS)
+    elif keep is None or keep is False or isinstance(keep, str):
+        kept = set()
+    else:
+        kept = {key for key in keep if isinstance(key, str)}
+    dropped = {key for key in IDENTIFYING_ATTRIBUTE_KEYS if key not in kept}
+    if extra is not None and not isinstance(extra, str):
+        dropped.update(key for key in extra if isinstance(key, str) and key)
+    return frozenset(dropped)
+
+
+_DEFAULT_DROPPED = identifying_keys_to_drop()
+
+
+def drop_identifying_attributes(attributes: Any, dropped: frozenset[str] | None = None) -> Any:
+    """``attributes`` without the identifying keys (``dropped``, default
+    :func:`identifying_keys_to_drop`). The same object when none is present;
+    otherwise a ``dict`` copy. Never mutates its input. Applies whether or
+    not redaction is enabled."""
+    keys = _DEFAULT_DROPPED if dropped is None else dropped
+    if not attributes or not keys:
+        return attributes
+    if not any(key in keys for key in attributes):
+        return attributes
+    return {key: value for key, value in attributes.items() if key not in keys}
+
+
+#: Opt-in hashed client IP: the attribute, its length in hex characters, the
+#: shortest salt accepted and the environment variables. Same values as
+#: @autter/runtime-node and the ingester (``test-vectors/redaction.json``,
+#: ``clientIpHash``).
+CLIENT_IP_HASH_ATTRIBUTE = "client.address_hash"
+CLIENT_IP_HASH_LENGTH = 32
+CLIENT_IP_SALT_MIN_LENGTH = 16
+HASH_CLIENT_IP_ENV = "AUTTER_HASH_CLIENT_IP"
+CLIENT_IP_SALT_ENV = "AUTTER_CLIENT_IP_SALT"
+
+#: Where the client address is read from, first valid wins: ``client.address``
+#: and ``http.client_ip`` (from ``X-Forwarded-For`` behind a proxy), then the
+#: socket peer, on server spans only (behind a proxy it is the proxy; on a
+#: client span it is the server being called).
+CLIENT_IP_SOURCE_KEYS = ("client.address", "http.client_ip", "net.peer.ip", "network.peer.address", "net.sock.peer.addr")
+CLIENT_IP_CLIENT_KEYS = ("client.address", "http.client_ip")
+
+_IPV4_PORT = re.compile(r"^[\d.]+:\d{1,5}$")
+_BRACKETED = re.compile(r"^\[([^\]]+)\](?::\d{1,5})?$")
+_IPV4 = re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$")
+_IPV6_CHARS = re.compile(r"^[0-9a-f:.]+$")
+
+
+def normalize_client_ip(raw: Any) -> str | None:
+    """The canonical text of an IP address, or ``None`` when ``raw`` is not
+    one: the first entry of a comma-separated list, port and brackets
+    removed, zone id removed, IPv6 lower-cased and compressed (RFC 5952),
+    IPv4-mapped IPv6 turned into IPv4."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.split(",")[0].strip()
+    if not value or len(value) > 100:
+        return None
+    bracketed = _BRACKETED.match(value)
+    if bracketed:
+        value = bracketed.group(1)
+    elif _IPV4_PORT.match(value):
+        value = value[: value.rindex(":")]
+    if "%" in value:
+        value = value[: value.index("%")]
+    value = value.lower()
+    if _IPV4.match(value):
+        return value
+    if ":" not in value or not _IPV6_CHARS.match(value):
+        return None
+    try:
+        address = ipaddress.IPv6Address(value)
+    except ValueError:
+        return None
+    if address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return address.compressed
+
+
+def client_ip_of(attributes: Mapping[str, Any] | None, server_span: bool) -> str | None:
+    """The normalised client address of a span or log record: the first
+    :data:`CLIENT_IP_SOURCE_KEYS` entry holding a valid IP (the peer keys
+    only when ``server_span``)."""
+    if not attributes:
+        return None
+    for key in CLIENT_IP_SOURCE_KEYS if server_span else CLIENT_IP_CLIENT_KEYS:
+        ip = normalize_client_ip(attributes.get(key))
+        if ip:
+            return ip
+    return None
+
+
+def usable_client_ip_salt(salt: Any) -> str | None:
+    """``salt`` when it is a string of at least :data:`CLIENT_IP_SALT_MIN_LENGTH` characters."""
+    return salt if isinstance(salt, str) and len(salt) >= CLIENT_IP_SALT_MIN_LENGTH else None
+
+
+def hash_client_ip(salt: str, ip: str) -> str:
+    """HMAC-SHA256(salt, ip) as hex, first :data:`CLIENT_IP_HASH_LENGTH`
+    characters. ``ip`` is normalised (:func:`normalize_client_ip`). Never
+    call it without a secret salt: the IPv4 space can be hashed in full."""
+    return hmac.new(salt.encode("utf-8"), ip.encode("utf-8"), hashlib.sha256).hexdigest()[:CLIENT_IP_HASH_LENGTH]

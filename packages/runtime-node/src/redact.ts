@@ -11,3 +11,4 @@ export {
 	type RedactOptions,
 	type AttributeRedactor as Redactor,
 } from "@autter/runtime-core";
+export { IDENTIFYING_ATTRIBUTE_KEYS, type KeepIdentifyingAttributes } from "@autter/runtime-core";

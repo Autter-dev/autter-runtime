@@ -32,11 +32,11 @@ standard ``OTEL_*`` environment variables::
 
     init_tracing()  # before the framework instrumentor runs
 
-Request counts (opt-in: ``init_tracing(count_requests=True)`` or
-``AUTTER_COUNT_REQUESTS=true``). Without it the ingester counts the requests
-of the traces head sampling kept, so at a 10% ratio request counts read 10%
-of the traffic while every error is kept, and error rates read 10 times too
-high. :class:`CountRequests` sees every HTTP server span (sampled or not:
+Request counts (on by default; off with ``init_tracing(count_requests=False)``
+or ``AUTTER_COUNT_REQUESTS=false``). Without them the ingester counts the
+requests of the traces head sampling kept, so at a 1% ratio request counts
+read 1% of the traffic while every error is kept, and error rates read 100
+times too high. :class:`CountRequests` sees every HTTP server span (sampled or not:
 :class:`RecordUnsampled` records them all) and records each request once, in
 a delta ``http.server.duration`` histogram (ms; ``http.route``,
 ``http.request.method``, ``http.response.status_code`` from the span) that
@@ -47,7 +47,11 @@ adds no request from those spans: each request is counted once, whether it
 was sampled, retained for an error, or not exported. The framework
 instrumentations' own ``http.server.duration`` / ``http.server.request.duration``
 are dropped from that meter provider (they would count every request a
-second time). Needs ``opentelemetry-exporter-otlp-proto-http`` for metrics.
+second time). Needs ``opentelemetry-exporter-otlp-proto-http`` for metrics
+(without it, counting stays off with a warning). An ingester older than 1.8.0
+ignores the marks and counts the sampled requests a second time, from their
+spans. :func:`init_tracing` registers its meter provider as the global one:
+an app that registers its own afterwards should turn counting off.
 
 Copy this file and ``redact.py`` into your project. Needs ``opentelemetry-sdk``
 (tested with 1.20, 1.27 and 1.41 on Python 3.9, 1.45 on Python 3.14) and, for
@@ -80,13 +84,45 @@ from opentelemetry.sdk.trace.sampling import (
     SamplingResult,
     TraceIdRatioBased,
 )
-from opentelemetry.trace import SpanContext, SpanKind, StatusCode, TraceFlags
+from opentelemetry.trace import Link, SpanContext, SpanKind, StatusCode, TraceFlags
 from opentelemetry.trace.status import Status
 
 try:  # imported as part of a package
-    from .redact import redact_attributes, redact_text
+    from .redact import (
+        CLIENT_IP_HASH_ATTRIBUTE,
+        CLIENT_IP_SALT_ENV,
+        CLIENT_IP_SALT_MIN_LENGTH,
+        DROP_ATTRIBUTES_ENV,
+        HASH_CLIENT_IP_ENV,
+        client_ip_of,
+        hash_client_ip,
+        usable_client_ip_salt,
+        KEEP_IDENTIFYING_ATTRIBUTES_ENV,
+        drop_attributes_from_env,
+        drop_identifying_attributes,
+        identifying_keys_to_drop,
+        keep_identifying_from_env,
+        redact_attributes,
+        redact_text,
+    )
 except ImportError:  # copied next to the app as a plain module
-    from redact import redact_attributes, redact_text
+    from redact import (
+        CLIENT_IP_HASH_ATTRIBUTE,
+        CLIENT_IP_SALT_ENV,
+        CLIENT_IP_SALT_MIN_LENGTH,
+        DROP_ATTRIBUTES_ENV,
+        HASH_CLIENT_IP_ENV,
+        client_ip_of,
+        hash_client_ip,
+        usable_client_ip_salt,
+        KEEP_IDENTIFYING_ATTRIBUTES_ENV,
+        drop_attributes_from_env,
+        drop_identifying_attributes,
+        identifying_keys_to_drop,
+        keep_identifying_from_env,
+        redact_attributes,
+        redact_text,
+    )
 
 __all__ = [
     "TAIL_RETAINED_ATTRIBUTE",
@@ -190,10 +226,10 @@ class _CopiedSpan(ReadableSpan):
             name=overrides.get("name", span.name),
             context=overrides.get("context", span.context),
             parent=span.parent,
-            resource=span.resource,
+            resource=overrides.get("resource", span.resource),
             attributes=overrides.get("attributes", span.attributes),
             events=overrides.get("events", span.events),
-            links=span.links,
+            links=overrides.get("links", span.links),
             kind=span.kind,
             # The deprecated property warns; the OTLP exporter reads the scope.
             instrumentation_info=getattr(span, "_instrumentation_info", None),
@@ -469,14 +505,21 @@ def request_meter_provider(
     instruments export as usual.
 
     ``exporter`` defaults to ``OTLPMetricExporter`` (``OTEL_EXPORTER_OTLP_*``)
-    preferring delta histograms. One that does not prefer delta for
-    histograms gets ``None`` (with a warning): counting then stays off.
+    preferring delta histograms; without that package installed, or with an
+    exporter that does not prefer delta for histograms, the result is
+    ``None`` (with a warning): counting then stays off.
     The export interval is ``OTEL_METRIC_EXPORT_INTERVAL`` (default 60 s; the
     ingester's latency histograms need two minutes or less).
     """
     if exporter is None:
-        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-
+        try:
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        except ImportError:
+            LOGGER.warning(
+                "[autter-runtime] request counts are off: install opentelemetry-exporter-otlp-proto-http "
+                "to send them, or set AUTTER_COUNT_REQUESTS=false to silence this."
+            )
+            return None
         exporter = OTLPMetricExporter(preferred_temporality={Histogram: AggregationTemporality.DELTA})
     if not _prefers_delta_histograms(exporter):
         LOGGER.warning(
@@ -496,22 +539,95 @@ def request_meter_provider(
     )
 
 
-def _env_flag(name: str) -> bool:
-    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw:
+        LOGGER.warning("[autter-runtime] invalid %s %r, using %s", name, raw, "true" if default else "false")
+    return default
 
 
-def _redacted(span: ReadableSpan) -> ReadableSpan:
-    events = [Event(event.name, redact_attributes(event.attributes), event.timestamp) for event in span.events]
+def _keys_to_drop(keep: Any, drop: Optional[Sequence[str]]) -> frozenset:
+    """``keep`` / ``drop`` as given, else from the environment."""
+    if keep is None:
+        keep = keep_identifying_from_env(os.environ.get(KEEP_IDENTIFYING_ATTRIBUTES_ENV))
+    if drop is None:
+        drop = drop_attributes_from_env(os.environ.get(DROP_ATTRIBUTES_ENV))
+    return identifying_keys_to_drop(keep, drop)
+
+
+_resource_cache: tuple = (None, None, None)
+
+
+def _without_identifying_resource(resource: Resource, dropped: frozenset) -> Resource:
+    """The resource without the dropped keys; one copy per resource (every
+    span of a provider shares it), so the exporter's grouping stays cheap."""
+    global _resource_cache
+    cached_resource, cached_dropped, cached = _resource_cache
+    if cached_resource is resource and cached_dropped is dropped:
+        return cached
+    attributes = drop_identifying_attributes(resource.attributes, dropped)
+    result = resource if attributes is resource.attributes else Resource(attributes, getattr(resource, "schema_url", None))
+    _resource_cache = (resource, dropped, result)
+    return result
+
+
+def _client_ip_hasher(enabled: Optional[bool], salt: Optional[str]) -> Optional[Any]:
+    """The hasher for ``hash_client_ip`` (default ``AUTTER_HASH_CLIENT_IP``)
+    with ``salt`` (default ``AUTTER_CLIENT_IP_SALT``), or ``None`` when off.
+    On without a usable salt it stays off with one warning: never an
+    unsalted hash. The salt is never logged."""
+    if enabled is None:
+        enabled = _env_flag(HASH_CLIENT_IP_ENV)
+    if not enabled:
+        return None
+    usable = usable_client_ip_salt(salt if salt is not None else os.environ.get(CLIENT_IP_SALT_ENV))
+    if usable is None:
+        LOGGER.warning(
+            "[autter-runtime] hash_client_ip is on but no salt of at least %d characters is set "
+            "(client_ip_salt= or %s): client IP addresses are dropped and not hashed.",
+            CLIENT_IP_SALT_MIN_LENGTH,
+            CLIENT_IP_SALT_ENV,
+        )
+        return None
+    return lambda ip: hash_client_ip(usable, ip)
+
+
+def _redacted(
+    span: ReadableSpan, redact: bool = True, dropped: Optional[frozenset] = None, hasher: Optional[Any] = None
+) -> ReadableSpan:
+    def clean(attributes: Any) -> Any:
+        kept = drop_identifying_attributes(attributes, dropped)
+        return redact_attributes(kept) if redact else kept
+
+    attributes = clean(span.attributes)
+    if hasher is not None and (span.attributes or {}).get(CLIENT_IP_HASH_ATTRIBUTE) is None:
+        # From the raw address, before it was dropped; a hash already on the
+        # span (set upstream) is left alone.
+        ip = client_ip_of(span.attributes, span.kind == SpanKind.SERVER)
+        if ip:
+            attributes = {**(attributes or {}), CLIENT_IP_HASH_ATTRIBUTE: hasher(ip)}
+
+    events = [Event(event.name, clean(event.attributes), event.timestamp) for event in span.events]
+    links = [Link(link.context, clean(link.attributes)) for link in span.links]
     status = span.status
-    if status is not None and status.description:
+    if redact and status is not None and status.description:
         status = Status(status.status_code, redact_text(status.description))
     return _CopiedSpan(
         span,
-        name=redact_text(span.name),
-        attributes=redact_attributes(span.attributes),
+        name=redact_text(span.name) if redact else span.name,
+        attributes=attributes,
         events=events,
+        links=links,
         status=status,
+        resource=_without_identifying_resource(span.resource, _DEFAULT_KEYS if dropped is None else dropped),
     )
+
+
+_DEFAULT_KEYS = identifying_keys_to_drop()
 
 
 class RedactingSpanExporter(SpanExporter):
@@ -522,13 +638,39 @@ class RedactingSpanExporter(SpanExporter):
     ``str(exc)`` often carries a connection string or an API key) and status
     descriptions go through ``redact.py``, the patterns @autter/runtime-node
     uses. The ingester scrubs again on arrival.
+
+    Identifying attributes (``redact.IDENTIFYING_ATTRIBUTE_KEYS``: the client's
+    IP address and port, the raw user agent, ``host.id``, the command line and
+    its owner) are dropped from span, event and link attributes and from the
+    resource, also with ``redact=False``. ``keep_identifying_attributes``
+    (``True`` or a list of keys; default ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``)
+    keeps them; ``drop_attributes`` (default ``AUTTER_DROP_ATTRIBUTES``, a
+    comma-separated list) drops more keys, such as ``host.name``.
+
+    ``hash_client_ip`` (default ``AUTTER_HASH_CLIENT_IP``, off) adds
+    ``client.address_hash``, HMAC-SHA256 of the client's normalised address
+    under ``client_ip_salt`` (default ``AUTTER_CLIENT_IP_SALT``, at least 16
+    characters; without one nothing is hashed). Same hash as
+    @autter/runtime-node and the ingester for the same salt.
     """
 
-    def __init__(self, exporter: SpanExporter):
+    def __init__(
+        self,
+        exporter: SpanExporter,
+        *,
+        redact: bool = True,
+        keep_identifying_attributes: Any = None,
+        drop_attributes: Optional[Sequence[str]] = None,
+        hash_client_ip: Optional[bool] = None,
+        client_ip_salt: Optional[str] = None,
+    ):
         self._exporter = exporter
+        self._redact = redact
+        self._dropped = _keys_to_drop(keep_identifying_attributes, drop_attributes)
+        self._hasher = _client_ip_hasher(hash_client_ip, client_ip_salt)
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._exporter.export([_redacted(span) for span in spans])
+        return self._exporter.export([_redacted(span, self._redact, self._dropped, self._hasher) for span in spans])
 
     def shutdown(self) -> None:
         self._exporter.shutdown()
@@ -573,6 +715,10 @@ def init_tracing(
     set_global: bool = True,
     count_requests: Optional[bool] = None,
     metric_exporter: Optional[MetricExporter] = None,
+    keep_identifying_attributes: Any = None,
+    drop_attributes: Optional[Sequence[str]] = None,
+    hash_client_ip: Optional[bool] = None,
+    client_ip_salt: Optional[str] = None,
 ) -> TracerProvider:
     """A TracerProvider that head-samples as configured and always exports
     errors, registered as the global provider.
@@ -584,17 +730,36 @@ def init_tracing(
       ``OTEL_EXPORTER_OTLP_HEADERS``.
     * ``resource``: default ``Resource.create()``, which reads
       ``OTEL_SERVICE_NAME`` and ``OTEL_RESOURCE_ATTRIBUTES``.
-    * ``redact``: wrap the exporter in :class:`RedactingSpanExporter`.
-    * ``count_requests`` (default: ``AUTTER_COUNT_REQUESTS=true``): count
-      every HTTP request, sampled or not (:class:`CountRequests`), in a delta
-      histogram sent through ``metric_exporter`` (default
-      ``OTLPMetricExporter`` preferring delta histograms, which reads the same
-      ``OTEL_EXPORTER_OTLP_*`` variables; see :func:`request_meter_provider`).
-      With ``set_global`` its meter provider is registered as the global one,
-      so add your own instruments (a memory gauge) to it rather than
-      registering another. It stays off, with a warning, when a meter
-      provider is already registered: its own HTTP duration histograms,
-      if delta, would count every request a second time.
+    * ``redact``: scrub secrets and PII in :class:`RedactingSpanExporter`.
+    * ``keep_identifying_attributes`` (default
+      ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``: ``true`` or a comma-separated
+      list): identifying attributes (client IP address and port, raw user
+      agent, ``host.id``, command line; ``redact.IDENTIFYING_ATTRIBUTE_KEYS``)
+      are dropped from spans and the resource, also with ``redact=False``;
+      ``True`` keeps them all, a list keeps those keys. The ingester drops
+      them too unless it is given the same setting.
+    * ``drop_attributes`` (default ``AUTTER_DROP_ATTRIBUTES``): more keys to
+      drop the same way, such as ``["host.name"]``.
+    * ``hash_client_ip`` (default ``AUTTER_HASH_CLIENT_IP``, off) and
+      ``client_ip_salt`` (default ``AUTTER_CLIENT_IP_SALT``): add
+      ``client.address_hash``, a keyed hash of the client's address (see
+      :class:`RedactingSpanExporter`).
+    * ``count_requests`` (default: on, unless ``AUTTER_COUNT_REQUESTS=false``;
+      ``False`` turns it off): count every HTTP request, sampled or not
+      (:class:`CountRequests`), in a delta histogram sent through
+      ``metric_exporter`` (default ``OTLPMetricExporter`` preferring delta
+      histograms, which reads the same ``OTEL_EXPORTER_OTLP_*`` variables;
+      see :func:`request_meter_provider`), so error rates are errors over
+      all requests rather than over the sampled ones. With ``set_global`` its
+      meter provider is registered as the global one, so add your own
+      instruments (a memory gauge) to it rather than registering another; an
+      app that registers its own meter provider after this call should pass
+      ``count_requests=False`` (OpenTelemetry keeps the first one). It stays
+      off, with a warning, when a meter provider is already registered (its
+      own HTTP duration histograms, if delta, would count every request a
+      second time) or ``opentelemetry-exporter-otlp-proto-http`` is not
+      installed. Needs an ingester from 1.8.0: an older one counts the
+      sampled requests twice.
 
     Call it once per process before the framework instrumentor runs (after
     fork in prefork servers: gunicorn without ``--preload`` imports the WSGI
@@ -620,12 +785,15 @@ def init_tracing(
             return existing
     if resource is None:
         resource = Resource.create()
+    dropped = _keys_to_drop(keep_identifying_attributes, drop_attributes)
+    resource = _without_identifying_resource(resource, dropped)
     meter_provider = None
-    if count_requests if count_requests is not None else _env_flag("AUTTER_COUNT_REQUESTS"):
+    if count_requests if count_requests is not None else _env_flag("AUTTER_COUNT_REQUESTS", True):
         if set_global and isinstance(metrics.get_meter_provider(), MeterProvider):
             LOGGER.warning(
-                "[autter-runtime] init_tracing(count_requests=True): a MeterProvider is already registered, so "
-                "request counts are off. Register none before init_tracing(): its meter provider replaces it."
+                "[autter-runtime] init_tracing(): a MeterProvider is already registered, so request counts are "
+                "off and error rates count only sampled requests. Register none before init_tracing() (its meter "
+                "provider replaces it), or set AUTTER_COUNT_REQUESTS=false to silence this."
             )
         else:
             counted = resource.merge(Resource(REQUEST_COUNT_RESOURCE_ATTRIBUTES))
@@ -638,8 +806,14 @@ def init_tracing(
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         exporter = OTLPSpanExporter()
-    if redact:
-        exporter = RedactingSpanExporter(exporter)
+    exporter = RedactingSpanExporter(
+        exporter,
+        redact=redact,
+        keep_identifying_attributes=keep_identifying_attributes,
+        drop_attributes=drop_attributes,
+        hash_client_ip=hash_client_ip,
+        client_ip_salt=client_ip_salt,
+    )
     provider = TracerProvider(
         sampler=RecordUnsampled(sampler if sampler is not None else head_sampler_from_env()),
         resource=resource,

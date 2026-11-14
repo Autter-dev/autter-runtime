@@ -1,3 +1,4 @@
+import { CLIENT_IP_SALT_MIN_LENGTH, clientIpHasher } from "./identifying.js";
 import { limitsWarning, loadConfig } from "./config.js";
 import { createIngesterApp } from "./server.js";
 import { ingesterVersion } from "./sdk-versions.js";
@@ -9,6 +10,20 @@ if (config.llmPriceOverrides) {
 	console.log(
 		`LLM prices: built-in table as of ${llmPricesAsOf()}, ${config.llmPriceOverrides.models.length} model price(s) from AUTTER_LLM_PRICES_FILE (as of ${config.llmPriceOverrides.asOf})`,
 	);
+}
+if (config.keepIdentifyingAttributes || config.dropAttributes?.length) {
+	const kept = config.keepIdentifyingAttributes === true ? "all" : (config.keepIdentifyingAttributes || []).join(", ") || "none";
+	console.log(
+		`Identifying attributes: kept ${kept} (AUTTER_KEEP_IDENTIFYING_ATTRIBUTES); also dropped: ${config.dropAttributes?.join(", ") || "none"} (AUTTER_DROP_ATTRIBUTES)`,
+	);
+}
+if (config.hashClientIp) {
+	// Never the salt itself: only whether a usable one is set.
+	if (clientIpHasher(config.hashClientIp, config.clientIpSalt)) console.log("Client IP hashing: on (client.address_hash)");
+	else
+		console.warn(
+			`WARNING: AUTTER_HASH_CLIENT_IP is on but AUTTER_CLIENT_IP_SALT is not set or shorter than ${CLIENT_IP_SALT_MIN_LENGTH} characters: client IP addresses are dropped and not hashed.`,
+		);
 }
 const sharingWarning = limitsWarning(config);
 if (sharingWarning) console.warn(`WARNING: ${sharingWarning}`);

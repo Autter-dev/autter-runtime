@@ -72,6 +72,11 @@ setTimeout(async () => {
 		.end();
 
 	setTimeout(() => {
-		process.kill(process.pid, "SIGTERM");
+		// Windows has no POSIX signals (kill(SIGTERM) terminates without
+		// running handlers): deliver the event the handler listens for, so the
+		// redaction checks still run there. The signal path itself is tested
+		// in autoflush.test.mjs on Linux and macOS.
+		if (process.platform === "win32") process.emit("SIGTERM", "SIGTERM");
+		else process.kill(process.pid, "SIGTERM");
 	}, 100);
 }, 30);

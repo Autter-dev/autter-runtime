@@ -16,11 +16,11 @@ import {
 	runtimeLogger,
 } from "../dist/index.js";
 import { captureRuntime, expectOperation } from "../dist/testing.js";
+import { quietPeriod, until } from "./support/wait.mjs";
 
 const require = createRequire(import.meta.url);
 const sink = () => new Writable({ write(_chunk, _enc, cb) { cb(); } });
-const tick = () => new Promise((resolve) => setImmediate(resolve));
-const settle = async () => { await tick(); await new Promise((r) => setTimeout(r, 25)); };
+const hasException = (runtime, message) => runtime.exceptions.some((e) => e.message === message);
 
 // A throwaway OTLP collector so exporters flush cleanly (never a bad endpoint).
 let collector;
@@ -66,7 +66,8 @@ test("errors logged through console, pino, winston, bunyan and runtimeLogger bec
 		wl.error(new Error("from winston"));
 		bl.error(new Error("from bunyan"), "bunyan says");
 		runtimeLogger.error(new Error("from runtimeLogger"));
-		await settle();
+		const messages = ["from console", "from pino", "from pino child", "from winston", "from bunyan", "from runtimeLogger"];
+		await until(() => messages.every((message) => hasException(runtime, message)));
 
 		const byMessage = new Map(runtime.exceptions.map((e) => [e.message, e]));
 		for (const [message, source] of [
@@ -102,7 +103,8 @@ test("a caught error inside a request does not fail it; a deliberate fallback de
 		await withRuntimeOperation("pricing", async () => {
 			runtimeContext.degraded(new Error("pricing down"), "using cached prices");
 		});
-		await settle();
+		const named = (name) => runtime.operations.some((e) => e.attributes["autter.operation.name"] === name);
+		await until(() => named("checkout") && named("pricing") && hasException(runtime, "pricing down"));
 
 		// The caught error is recorded, but the operation it happened in succeeded.
 		expectOperation(runtime, "checkout").toHaveOutcome("succeeded");
@@ -127,7 +129,9 @@ test("an error also passed to captureException in the same tick is reported once
 		console.error(both); // console capture is OFF here
 		captureException(both); // explicit capture
 		runtimeLogger.error(new Error("still caught")); // runtimeLogger stays on
-		await settle();
+		await until(() => hasException(runtime, "both paths") && hasException(runtime, "still caught"));
+		// "Reported once": give a second report of "both paths" a chance to arrive.
+		await quietPeriod(50);
 
 		assert.equal(runtime.exceptions.filter((e) => e.message === "both paths").length, 1, "reported once");
 		assert.notEqual(runtime.exceptions.find((e) => e.message === "both paths").attributes["autter.handling"], "caught");
@@ -147,7 +151,9 @@ test("the burst limit caps a looping caught error and counts the ones left out",
 			console.error(new Error("tight loop"));
 		}
 		for (let i = 0; i < 40; i++) loop();
-		await settle();
+		await until(() => hasException(runtime, "tight loop"));
+		// The cap is an upper bound: give reports past the burst a chance to arrive.
+		await quietPeriod(50);
 		const reported = runtime.exceptions.filter((e) => e.message === "tight loop");
 		// Ten through the burst, the rest dropped (one kind: same type + throw site).
 		assert.ok(reported.length <= 11, `burst-limited to ~10, got ${reported.length}`);

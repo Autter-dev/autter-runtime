@@ -172,6 +172,60 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `ARCHIVE_TABLES` / `ARCHIVE_BACKSTOP_DAYS` / `ARCHIVE_INTERVAL_MINUTES` / `ARCHIVE_MAX_DAYS_PER_PASS` / `ARCHIVE_SCHEDULER` | all four / `auto` (hot window + 7 days; `0` = none) / `60` / `4` / `auto` | Which tables, the disk-guard TTL, how often and how much per pass, and which process runs the job (`auto`: Redis lease holder or the only replica) |
 | `AUTTER_REDACT_VALUE_PATTERNS` | — | JSON array of extra regex sources masked in stored/forwarded text and attribute values (built-in secret/PII patterns always apply) |
 | `AUTTER_REDACT_KEY_PATTERNS` | — | JSON array of extra regex sources for attribute keys whose values are masked wholesale |
+| `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES` | unset (drop them all) | Identifying attributes (client IP and port, raw user agent, `host.id` / `host.ip` / `host.mac`, command line and owner) are dropped on arrival; `true` keeps them all, a comma-separated list keeps those keys. An SDK that keeps one needs this set too, or the attribute is not stored. See [Identifying attributes](#identifying-attributes) |
+| `AUTTER_DROP_ATTRIBUTES` | unset | Comma-separated attribute keys dropped on arrival as well, such as `host.name` |
+| `AUTTER_HASH_CLIENT_IP` | off | `true` adds `client.address_hash`, a keyed hash of the client's address, to spans and log records that carry no hash yet (plain OpenTelemetry senders). Needs `AUTTER_CLIENT_IP_SALT`. See [Hashed client IP](#hashed-client-ip-opt-in) |
+| `AUTTER_CLIENT_IP_SALT` | unset | Secret salt for `AUTTER_HASH_CLIENT_IP`, at least 16 characters. Never logged. Without it nothing is hashed (a warning at startup) |
+
+## Identifying attributes
+
+OpenTelemetry SDKs put attributes that identify a person or a machine on
+spans and resources by default: the client's IP address and port, the raw
+user-agent string, the machine's id and addresses, and the command line and
+its owner. Nothing in Autter reads them, so the ingester drops them on
+arrival, before anything is stored or forwarded to the sink: from span,
+span event and span link attributes, log record attributes (and the keys of
+a structured log body), and the resource of traces, logs and metrics. This
+covers every sender: plain OpenTelemetry SDKs in any language, the Python
+adapter, and older `@autter/runtime-node` versions. The keys are listed in
+[`src/identifying.ts`](src/identifying.ts) and
+[`test-vectors/redaction.json`](../../test-vectors/redaction.json)
+(`identifying.drop`); the SDKs drop the same list before export.
+
+`service.instance.id`, `host.name`, `process.pid`, `process.runtime.*`,
+`os.type` and `host.arch` are kept. `host.name` is usually a container or
+pod name, but on a laptop or a VM it is the machine's name: drop it with
+`AUTTER_DROP_ATTRIBUTES=host.name`.
+
+To store identifying attributes, set `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES`
+(`true`, or a comma-separated list of keys) here **and** in the SDK
+(`keepIdentifyingAttributes` in `@autter/runtime-node`,
+`keep_identifying_attributes` in the Python adapter, or the same
+environment variable). Each side drops what it was not told to keep, so a
+key kept by only one of them is not stored. The ingester logs what it keeps
+at startup. Rows already stored keep these attributes until their TTL.
+
+### Hashed client IP (opt-in)
+
+`AUTTER_HASH_CLIENT_IP=true` with `AUTTER_CLIENT_IP_SALT` adds
+`client.address_hash` to every span and log record that names a client
+address and has no hash yet: HMAC-SHA256 of the normalised address under the
+salt, 32 hex characters. The address is the first valid one of
+`client.address`, `http.client_ip`, then on server spans the socket peer
+(`net.peer.ip`, `network.peer.address`, `net.sock.peer.addr`). The raw
+address is dropped as before. A hash sent by an SDK is stored as it is and
+never hashed again.
+
+The SDKs (`hashClientIp` in `@autter/runtime-node`, `hash_client_ip` in the
+Python adapter) compute the same hash from the same salt, so use one salt
+per project and hash in the SDK where you can. The ingester has one salt for
+every project it serves: on an ingester shared by several projects their
+hashes are comparable to whoever can read all of them, so give each project
+its own salt in its SDKs instead. Without a salt of at least 16 characters
+nothing is hashed (never an unsalted hash, which could be reversed by
+hashing every IPv4 address) and the ingester warns at startup. A hashed IP
+is still pseudonymous personal data in some readings of privacy law: it is
+off by default, and the salt should be kept and rotated like any secret.
 
 ## Rate limits and key lookups (1.12.0)
 

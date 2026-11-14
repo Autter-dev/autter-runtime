@@ -28,10 +28,23 @@ const autter = initAutterServer({
 if (env.APP_LISTENER === "log")
 	process.on("unhandledRejection", (reason) => {
 		process.stdout.write(`app listener: ${reason instanceof Error ? reason.message : String(reason)}\n`);
+		// The rejection was handled and the process lives on: flush and exit.
+		setImmediate(exitAsSurvivor);
 	});
 
 const { default: express } = await import(env.EXPRESS ?? "express");
 const app = express();
+// Without an app listener the rejection must crash the process. If it has
+// not after LIFETIME_MS from the first request, it survived (the test then
+// fails on "survived"). The window counts from the first request, not from
+// start (start-up alone can take seconds on a loaded runner), and is longer
+// than auto-flush's bounded flush before a crash exit (3 s), so a slow flush
+// on a crashing process is never mistaken for survival.
+let lifetime;
+app.use((_req, _res, next) => {
+	lifetime ??= setTimeout(exitAsSurvivor, Number(env.LIFETIME_MS ?? 5000));
+	next();
+});
 app.use(autterRequests());
 app.get("/orders/:id", function lateRejectionHandler(req, res) {
 	res.json({ ok: true });
@@ -52,10 +65,15 @@ server.listen(0, "127.0.0.1", () => {
 });
 
 // Survivors flush and exit; a crash ends the process before this.
-setTimeout(async () => {
+let exiting = false;
+async function exitAsSurvivor() {
+	if (exiting) return;
+	exiting = true;
 	server.close();
 	server.closeAllConnections?.();
 	await autter.shutdown();
 	process.stdout.write("survived\n");
 	process.exit(0);
-}, Number(env.LIFETIME_MS ?? 800)).unref?.();
+}
+// A safety net if no request ever arrives (the parent failed to connect).
+setTimeout(exitAsSurvivor, 30_000).unref();

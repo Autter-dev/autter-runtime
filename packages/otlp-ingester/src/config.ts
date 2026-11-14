@@ -1,6 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveConfigFromEnv, type ArchiveConfig } from "./archive.js";
+import { dropAttributesEnv, keepIdentifyingEnv } from "./identifying.js";
 import { loadLlmPriceOverrides, type LlmPriceOverrides } from "./llm-pricing.js";
 import type { IngestKeyScope } from "./types.js";
 
@@ -199,6 +200,24 @@ export interface IngesterConfig {
 	 */
 	redactValuePatterns?: string[];
 	redactKeyPatterns?: string[];
+	/**
+	 * Identifying attributes (client IP address and port, raw user agent,
+	 * host id and addresses, command line and owner: identifying.ts) are
+	 * dropped on arrival. `true` keeps them all, a list keeps those keys
+	 * (AUTTER_KEEP_IDENTIFYING_ATTRIBUTES: `true` or a comma-separated
+	 * list). An SDK that keeps one gets it stored only with this set too.
+	 */
+	keepIdentifyingAttributes?: boolean | string[];
+	/** More attribute keys to drop on arrival, such as `host.name` (AUTTER_DROP_ATTRIBUTES, comma-separated). */
+	dropAttributes?: string[];
+	/**
+	 * Opt-in (AUTTER_HASH_CLIENT_IP=true): add `client.address_hash`, a keyed
+	 * hash of the client's address, to spans and log records that carry no
+	 * hash yet (identifying.ts). Needs clientIpSalt.
+	 */
+	hashClientIp?: boolean;
+	/** The secret salt (AUTTER_CLIENT_IP_SALT, at least 16 characters). Never logged. */
+	clientIpSalt?: string | null;
 	/**
 	 * In-memory budget (MiB, decoded size) for parsed source maps used to
 	 * symbolicate browser frames at ingest (SOURCE_MAP_CACHE_MB, default 64).
@@ -409,6 +428,10 @@ export function loadConfig(): IngesterConfig {
 		logTtlDaysExplicit: Number.parseInt(process.env.LOG_TTL_DAYS ?? "", 10) > 0,
 		redactValuePatterns: patternListEnv("AUTTER_REDACT_VALUE_PATTERNS"),
 		redactKeyPatterns: patternListEnv("AUTTER_REDACT_KEY_PATTERNS"),
+		keepIdentifyingAttributes: keepIdentifyingEnv(process.env.AUTTER_KEEP_IDENTIFYING_ATTRIBUTES),
+		dropAttributes: dropAttributesEnv(process.env.AUTTER_DROP_ATTRIBUTES),
+		hashClientIp: /^(?:1|true|yes|on)$/i.test((process.env.AUTTER_HASH_CLIENT_IP ?? "").trim()),
+		clientIpSalt: process.env.AUTTER_CLIENT_IP_SALT || null,
 		sourceMapCacheMb: intEnv("SOURCE_MAP_CACHE_MB", 64),
 		loopCollapseAfter: loopCollapseAfterEnv(process.env.LOOP_COLLAPSE_AFTER),
 		archive: archiveConfigFromEnv(process.env),

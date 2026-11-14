@@ -61,6 +61,7 @@ import {
 	type Redactor,
 } from "./redact.js";
 import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporter.js";
+import { clientIpHasher, type HashClientIpOption } from "./client-ip.js";
 import { authHeaders, resolveIngestKey, warnKeyKind, warnMissingKey } from "./ingest-auth.js";
 import { IngestMetricExporter, IngestSpanExporter } from "./ingest-exporters.js";
 import { makeUrlQueryPolicy } from "./url-query.js";
@@ -104,9 +105,15 @@ import {
 	errorInternal,
 	fingerprintEventAttributes,
 	isError,
+	DROP_ATTRIBUTES_ENV,
+	dropAttributesFromEnv,
+	KEEP_IDENTIFYING_ATTRIBUTES_ENV,
+	keepIdentifyingFromEnv,
+	makeIdentifyingAttributeFilter,
 	splitFingerprint,
 	type CaptureLoggedErrorsOption,
 	type IgnoreErrorPattern,
+	type KeepIdentifyingAttributes,
 } from "@autter/runtime-core";
 import {
 	setHandledCapture,
@@ -377,6 +384,56 @@ export interface AutterServerOptions {
 	 * Applies even with `redactAttributes: false`. Default `[]`.
 	 */
 	keepQueryParams?: string[];
+	/**
+	 * Identifying attributes never leave the process by default: the
+	 * client's IP address and port (`net.peer.ip`, `client.address`,
+	 * `http.client_ip`, `network.peer.address`, …), the raw user-agent
+	 * string (`http.user_agent`, `user_agent.original`), the machine's id
+	 * and addresses (`host.id`, `host.ip`, `host.mac`) and the command line
+	 * and its owner (`process.command_args`, `process.command`,
+	 * `process.command_line`, `process.owner`, `process.executable.path`).
+	 * OpenTelemetry adds them to every server span and to the resource;
+	 * nothing in Autter reads them. They are dropped at export from span,
+	 * event and link attributes and from the resource, whichever
+	 * instrumentation set them, also with `redactAttributes: false`.
+	 * `service.instance.id`, `host.name` (container and pod names; on a
+	 * laptop or VM, the machine's name: drop it with `dropAttributes`),
+	 * `process.pid`, `process.runtime.*`, `os.type`, `host.arch` and the
+	 * coarse `user_agent.browser` / `.os` / `.device` fields are kept.
+	 *
+	 * `true` keeps all of them; a list keeps those keys:
+	 * `keepIdentifyingAttributes: ["host.name"]`. Default: the
+	 * AUTTER_KEEP_IDENTIFYING_ATTRIBUTES environment variable (`true`, or a
+	 * comma-separated list), else none. The ingester drops them as well
+	 * unless it is given the same setting.
+	 */
+	keepIdentifyingAttributes?: KeepIdentifyingAttributes;
+	/**
+	 * More attribute keys to drop at export, exactly like the identifying
+	 * ones (span, event and link attributes and the resource, also with
+	 * `redactAttributes: false`): `dropAttributes: ["host.name"]`. A key both
+	 * kept and listed here is dropped. Default: the AUTTER_DROP_ATTRIBUTES
+	 * environment variable (a comma-separated list), else none.
+	 */
+	dropAttributes?: string[];
+	/**
+	 * Count distinct clients without storing their IP addresses. Off by
+	 * default. When on, the client's address (first of `client.address`,
+	 * `http.client_ip`, then on server spans the socket peer `net.peer.ip` /
+	 * `network.peer.address` / `net.sock.peer.addr`, which behind a proxy is
+	 * the proxy) is normalised and exported only as `client.address_hash`:
+	 * HMAC-SHA256 with your secret salt, 32 hex characters. The raw address
+	 * is still dropped. A hashed IP is still pseudonymous personal data in
+	 * some readings of privacy law; treat the salt as a secret and use the
+	 * same one in every service of the project (the Python adapter and the
+	 * ingester compute the same hash from the same salt).
+	 *
+	 * `true` reads the salt from AUTTER_CLIENT_IP_SALT; `{ salt }` passes it.
+	 * A salt shorter than 16 characters, or none, turns hashing off with a
+	 * warning (never an unsalted hash). Default: AUTTER_HASH_CLIENT_IP=true,
+	 * else off.
+	 */
+	hashClientIp?: HashClientIpOption;
 	/**
 	 * Verbose lifecycle logging to stderr: "exported N spans", flushes and
 	 * auto-flush activity — handy while wiring the SDK up. Also enabled by
@@ -1261,6 +1318,14 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// Every trace exporter scrubs spans on the way out, whoever created them
 	// (see redact-exporter.ts): secrets and PII, and URL query values.
 	const queryPolicy = makeUrlQueryPolicy(options.keepQueryParams);
+	// Identifying attributes (client IP, user agent, host name, command
+	// line) are dropped at export unless kept (runtime-core identifying.ts).
+	const identifying = makeIdentifyingAttributeFilter(
+		options.keepIdentifyingAttributes ?? keepIdentifyingFromEnv(process.env[KEEP_IDENTIFYING_ATTRIBUTES_ENV]),
+		options.dropAttributes ?? dropAttributesFromEnv(process.env[DROP_ATTRIBUTES_ENV]),
+	);
+	// Opt-in keyed hash of the client IP (client-ip.ts); null when off.
+	const ipHasher = clientIpHasher(options.hashClientIp);
 	const slowPerMinute = Number.isFinite(options.retainSlowTracesPerMinute)
 		? Math.max(0, options.retainSlowTracesPerMinute!) : DEFAULT_SLOW_TRACES_PER_MINUTE;
 	// One policy for every trace exporter: LLM spans keep prompt/completion
@@ -1279,6 +1344,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 						new IngestSpanExporter(new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }), ingestTarget),
 						() => redactor,
 						queryPolicy,
+						identifying,
+						ipHasher,
 					),
 					llmContent,
 				),
@@ -1376,6 +1443,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					temporalityPreference: AggregationTemporalityPreference.DELTA,
 				}), ingestTarget),
 				() => redactor,
+				identifying,
 			),
 			"metrics",
 		),

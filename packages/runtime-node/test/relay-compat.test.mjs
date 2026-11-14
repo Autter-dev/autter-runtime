@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { createBrowserRelayFetchHandler, sanitizeBrowserPayload } from "../dist/index.js";
+import { quietPeriod, until } from "./support/wait.mjs";
 
 const event = (type) => ({ type, timestamp: new Date().toISOString(), message: "m" });
 
@@ -24,11 +25,6 @@ async function ingester(handler) {
 		close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }),
 	};
 }
-
-const until = async (check, ms = 2000) => {
-	const start = Date.now();
-	while (!check() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 10));
-};
 
 test("the relay forwards a valid browser SDK version and drops a malformed one", () => {
 	const base = { version: 1, service: "web", environment: "production", events: [event("exception")] };
@@ -56,7 +52,8 @@ test("relay warns once when CSP events reach an ingester without CSP support", a
 		await until(() => warnings.some((w) => w.includes("CSP")));
 		assert.equal((await send()).status, 202);
 		await until(() => old.bodies.length === 2);
-		await new Promise((r) => setTimeout(r, 50));
+		// Warned once: give a second warning a chance to appear.
+		await quietPeriod(50);
 		const csp = warnings.filter((w) => w.includes("CSP"));
 		assert.equal(csp.length, 1, warnings.join("\n"));
 		assert.match(csp[0], /Browser CSP violation capture needs ingester >= 1\.3\.4; yours is 1\.3\.3\. Upgrade the ingester/);
@@ -92,7 +89,8 @@ test("the relay retries a forward the ingester answers 503 (Retry-After) or 429,
 
 		assert.equal((await send()).status, 202);
 		await until(() => server.bodies.length === 4);
-		await new Promise((r) => setTimeout(r, 1200));
+		// A 401 is not retried: wait out the shortest retry delay (1 s) for one.
+		await quietPeriod(1200);
 		assert.equal(server.bodies.length, 4, "a 401 is final");
 	} finally {
 		await server.close();

@@ -84,6 +84,7 @@ import type { SinkDeadLetterRow } from "./sink-dead-letters.js";
 import { LoopCollapser } from "./loop-collapse.js";
 import { applySuppression } from "./suppression.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
+import { IdentifyingAttributeFilter, clientIpHasher, identifyingKeysToDrop } from "./identifying.js";
 import { configureLlmPricing } from "./llm-pricing.js";
 import {
 	buildCompatReport,
@@ -219,6 +220,12 @@ const INGESTER_INFO_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {}): IngesterApp {
 	configureRedaction(config);
+	// Identifying attributes (client IP, user agent, host id, command line)
+	// are dropped before anything below reads, stores or forwards a request.
+	const identifying = new IdentifyingAttributeFilter(
+		identifyingKeysToDrop(config.keepIdentifyingAttributes, config.dropAttributes),
+		clientIpHasher(config.hashClientIp, config.clientIpSalt),
+	);
 	// LLM prices: the built-in table, with a self-hosted override file
 	// (AUTTER_LLM_PRICES_FILE, validated by loadConfig) merged over it.
 	configureLlmPricing(config);
@@ -1213,6 +1220,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		} else {
 			request = req.body as OtlpTraceRequest;
 		}
+		request = identifying.traces(request);
 		const totalSpans = spansInRequest(request);
 		let normalized: ReturnType<typeof normalizeTraces>;
 		let truncated: number;
@@ -1295,7 +1303,9 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		let truncated: number;
 		const stats = { overLimit: 0 };
 		try {
-			logsRequest = req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest;
+			logsRequest = identifying.logs(
+				req.is("application/x-protobuf") ? decodeLogsRequest(req.body as Buffer) : req.body as OtlpLogsRequest,
+			);
 			({ result: logs, truncated } = countTruncations(() => normalizeLogs(logsRequest, stats)));
 		} catch {
 			refuse(req, res, ctx, "invalid_payload", 400, { error: "invalid OTLP logs payload" });
@@ -1379,6 +1389,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		} else {
 			request = req.body as OtlpMetricsRequest;
 		}
+		request = identifying.metrics(request);
 		const memoryStats = { invalid: 0, overLimit: 0 };
 		let metricPoints: ReturnType<typeof normalizeMetrics>;
 		let memorySamples: ReturnType<typeof normalizeMemoryMetrics>;

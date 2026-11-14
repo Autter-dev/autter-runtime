@@ -748,13 +748,14 @@ Span-level:
   - carries `autter.tail_retained` on a resource with
     `autter.metrics_wired` (runtime-node's tail retention of erroring
     and slow traces ships such spans next to its metric feed).
-  `adapters/python`'s `init_tracing(count_requests=True)` sends the same
+  `adapters/python`'s `init_tracing()` (request counting on by default;
+  `AUTTER_COUNT_REQUESTS=false` turns it off) sends the same
   shape: a delta histogram with a point for every request (recorded from
   every HTTP server span, sampled or not), each HTTP server span marked
   `autter.metric_has_route`, and both resource attributes.
   A request that carries `autter.tail_retained` on a resource without a
-  metric feed (the Python retention in `adapters/python` without
-  `count_requests`) is counted by neither: it was exported because it failed, so it is no sample of the
+  metric feed (the Python retention in `adapters/python` with
+  `count_requests` off) is counted by neither: it was exported because it failed, so it is no sample of the
   traffic, and adds only its failure, `error_count` 1, on its route.
   A metric-counted request adds no request from its spans; the metric
   already counted a 5xx as a failed request, so an error recorded in it
@@ -921,6 +922,28 @@ attribute bags, and LLM-call attributes (`src/redact.ts`; extend with
 `AUTTER_REDACT_VALUE_PATTERNS` / `AUTTER_REDACT_KEY_PATTERNS`, JSON arrays
 of regex sources). Messages containing secrets therefore fingerprint on
 their scrubbed form.
+
+Identifying attributes are dropped rather than scrubbed: the client's IP
+address and port, the raw user-agent string, `host.id` / `host.ip` /
+`host.mac`, and the command line and its owner. OpenTelemetry adds them by
+default (resource detectors, HTTP server instrumentation) and nothing reads
+them. The Node SDK drops them at export (also with `redactAttributes:
+false`), the Python adapter in `RedactingSpanExporter`, and the ingester on
+arrival for traces, logs and metric resources (`src/identifying.ts`). One
+list, kept in parity by `test-vectors/redaction.json` (`identifying`).
+`service.instance.id` and `host.name` are kept. `keepIdentifyingAttributes`
+/ `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES` keeps them and must be set on both
+the SDK and the ingester; `dropAttributes` / `AUTTER_DROP_ATTRIBUTES` drops
+more keys.
+
+Opt-in, `hashClientIp` / `AUTTER_HASH_CLIENT_IP` with a secret salt
+(`AUTTER_CLIENT_IP_SALT`, 16+ characters) adds `client.address_hash`:
+HMAC-SHA256 of the normalised client address, 32 hex characters, the same in
+the Node SDK, the Python adapter and the ingester (vectors:
+`test-vectors/redaction.json`, `clientIpHash`). The ingester hashes only
+records without a hash. No salt, no hash: there is no unsalted fallback.
+A hashed IP is still pseudonymous personal data in some readings of privacy
+law, which is why it is off by default.
 
 ## Sink webhook (v1)
 

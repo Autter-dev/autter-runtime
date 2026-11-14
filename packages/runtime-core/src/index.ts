@@ -13,6 +13,16 @@ export {
 	type Redactor as AttributeRedactor,
 } from "./redact.js";
 export {
+	DROP_ATTRIBUTES_ENV,
+	IDENTIFYING_ATTRIBUTE_KEYS,
+	KEEP_IDENTIFYING_ATTRIBUTES_ENV,
+	dropAttributesFromEnv,
+	keepIdentifyingFromEnv,
+	makeIdentifyingAttributeFilter,
+	type IdentifyingAttributeFilter,
+	type KeepIdentifyingAttributes,
+} from "./identifying.js";
+export {
 	LEVEL_SEVERITY,
 	maxLevel,
 	boundContext,

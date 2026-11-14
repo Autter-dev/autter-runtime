@@ -10,6 +10,12 @@ if (config.llmPriceOverrides) {
 		`LLM prices: built-in table as of ${llmPricesAsOf()}, ${config.llmPriceOverrides.models.length} model price(s) from AUTTER_LLM_PRICES_FILE (as of ${config.llmPriceOverrides.asOf})`,
 	);
 }
+if (config.keepIdentifyingAttributes || config.dropAttributes?.length) {
+	const kept = config.keepIdentifyingAttributes === true ? "all" : (config.keepIdentifyingAttributes || []).join(", ") || "none";
+	console.log(
+		`Identifying attributes: kept ${kept} (AUTTER_KEEP_IDENTIFYING_ATTRIBUTES); also dropped: ${config.dropAttributes?.join(", ") || "none"} (AUTTER_DROP_ATTRIBUTES)`,
+	);
+}
 const sharingWarning = limitsWarning(config);
 if (sharingWarning) console.warn(`WARNING: ${sharingWarning}`);
 

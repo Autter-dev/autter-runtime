@@ -922,6 +922,19 @@ attribute bags, and LLM-call attributes (`src/redact.ts`; extend with
 of regex sources). Messages containing secrets therefore fingerprint on
 their scrubbed form.
 
+Identifying attributes are dropped rather than scrubbed: the client's IP
+address and port, the raw user-agent string, `host.id` / `host.ip` /
+`host.mac`, and the command line and its owner. OpenTelemetry adds them by
+default (resource detectors, HTTP server instrumentation) and nothing reads
+them. The Node SDK drops them at export (also with `redactAttributes:
+false`), the Python adapter in `RedactingSpanExporter`, and the ingester on
+arrival for traces, logs and metric resources (`src/identifying.ts`). One
+list, kept in parity by `test-vectors/redaction.json` (`identifying`).
+`service.instance.id` and `host.name` are kept. `keepIdentifyingAttributes`
+/ `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES` keeps them and must be set on both
+the SDK and the ingester; `dropAttributes` / `AUTTER_DROP_ATTRIBUTES` drops
+more keys.
+
 ## Sink webhook (v1)
 
 When `AUTTER_SINK_URL` is set, each ingest batch POSTs:

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Identifying attributes are dropped by default
+
+Packages: `runtime-node`, `otlp-ingester`, Python adapter (`adapters/python`).
+
+- OpenTelemetry adds attributes that identify a person or a machine to every server span and to the resource: the client's IP address and port (`net.peer.ip`, `client.address`, `http.client_ip` from `X-Forwarded-For`, `network.peer.address`, …), the raw user-agent string (`http.user_agent`, `user_agent.original`), the machine's id and addresses (`host.id`, `host.ip`, `host.mac`), and the command line and its owner (`process.command_args`, `process.command`, `process.command_line`, `process.owner`, `process.executable.path`). Redaction let them through because none looks like a secret, and nothing in Autter reads them. They are now dropped by default, from span, event and link attributes and from the resource: by `runtime-node` at export (also with `redactAttributes: false`), by the Python adapter's `RedactingSpanExporter` (also with `redact=False`), and by the ingester on arrival for traces, logs and metric resources, so plain OpenTelemetry senders and older SDKs are covered too. The full list is in [`test-vectors/redaction.json`](test-vectors/redaction.json) (`identifying.drop`).
+- Kept: `service.instance.id` (the ingester needs it), `host.name` (container and pod names; on a laptop or VM it is the machine's name), `process.pid`, `process.runtime.*`, `os.type`, `host.arch`, and the coarse `user_agent.browser` / `.os` / `.device` / `.bot` fields.
+- Keep them with `keepIdentifyingAttributes: true` or a list of keys (`initAutterServer`, `registerAutter`), `keep_identifying_attributes=` in Python `init_tracing()`, or `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES` (`true`, or a comma-separated list) for the SDKs and the ingester. Drop more keys, such as `host.name`, with `dropAttributes` / `drop_attributes=` / `AUTTER_DROP_ATTRIBUTES`. An attribute the SDK keeps is stored only if the ingester keeps it too: set `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES` on both.
+- Spans already stored keep these attributes until their TTL expires.
+
 ## [1.18.0] - 2026-11-14
 
 Packages: `otlp-ingester` 1.16.0, `runtime-node` 1.14.0, and the local `dashboard` image. Release the ingester before `runtime-node` 1.14.0 (`llm_cache_tokens`); see the upgrade notes.

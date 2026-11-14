@@ -298,6 +298,17 @@ exceptions never leave the process. `init_tracing()` keeps them:
   exception messages and tracebacks, causes included, with `redact.py`
   before export. `redact.configure(value_patterns=[...], key_patterns=[...])`
   adds your own patterns. The ingester scrubs again.
+- It also drops identifying attributes from spans, events, links and the
+  resource, also with `redact=False`: the client's IP address and port
+  (`net.peer.ip`, `client.address`, …), the raw user agent
+  (`http.user_agent`, `user_agent.original`), `host.id` / `host.ip` /
+  `host.mac`, and the command line and its owner (`process.command_line`,
+  …; `redact.IDENTIFYING_ATTRIBUTE_KEYS`). `service.instance.id` and
+  `host.name` are kept. `init_tracing(keep_identifying_attributes=True)`
+  (or a list of keys, or `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES`) keeps them;
+  the ingester drops them too unless it is given the same setting.
+  `drop_attributes=["host.name"]` (or `AUTTER_DROP_ATTRIBUTES`) drops more
+  keys.
 
 Every request is recorded as if sampled (instrumentations collect their
 attributes), but only sampled and failing traces are exported. To wire the

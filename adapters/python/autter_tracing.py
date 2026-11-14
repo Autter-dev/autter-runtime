@@ -80,13 +80,31 @@ from opentelemetry.sdk.trace.sampling import (
     SamplingResult,
     TraceIdRatioBased,
 )
-from opentelemetry.trace import SpanContext, SpanKind, StatusCode, TraceFlags
+from opentelemetry.trace import Link, SpanContext, SpanKind, StatusCode, TraceFlags
 from opentelemetry.trace.status import Status
 
 try:  # imported as part of a package
-    from .redact import redact_attributes, redact_text
+    from .redact import (
+        DROP_ATTRIBUTES_ENV,
+        KEEP_IDENTIFYING_ATTRIBUTES_ENV,
+        drop_attributes_from_env,
+        drop_identifying_attributes,
+        identifying_keys_to_drop,
+        keep_identifying_from_env,
+        redact_attributes,
+        redact_text,
+    )
 except ImportError:  # copied next to the app as a plain module
-    from redact import redact_attributes, redact_text
+    from redact import (
+        DROP_ATTRIBUTES_ENV,
+        KEEP_IDENTIFYING_ATTRIBUTES_ENV,
+        drop_attributes_from_env,
+        drop_identifying_attributes,
+        identifying_keys_to_drop,
+        keep_identifying_from_env,
+        redact_attributes,
+        redact_text,
+    )
 
 __all__ = [
     "TAIL_RETAINED_ATTRIBUTE",
@@ -190,10 +208,10 @@ class _CopiedSpan(ReadableSpan):
             name=overrides.get("name", span.name),
             context=overrides.get("context", span.context),
             parent=span.parent,
-            resource=span.resource,
+            resource=overrides.get("resource", span.resource),
             attributes=overrides.get("attributes", span.attributes),
             events=overrides.get("events", span.events),
-            links=span.links,
+            links=overrides.get("links", span.links),
             kind=span.kind,
             # The deprecated property warns; the OTLP exporter reads the scope.
             instrumentation_info=getattr(span, "_instrumentation_info", None),
@@ -500,18 +518,53 @@ def _env_flag(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _redacted(span: ReadableSpan) -> ReadableSpan:
-    events = [Event(event.name, redact_attributes(event.attributes), event.timestamp) for event in span.events]
+def _keys_to_drop(keep: Any, drop: Optional[Sequence[str]]) -> frozenset:
+    """``keep`` / ``drop`` as given, else from the environment."""
+    if keep is None:
+        keep = keep_identifying_from_env(os.environ.get(KEEP_IDENTIFYING_ATTRIBUTES_ENV))
+    if drop is None:
+        drop = drop_attributes_from_env(os.environ.get(DROP_ATTRIBUTES_ENV))
+    return identifying_keys_to_drop(keep, drop)
+
+
+_resource_cache: tuple = (None, None, None)
+
+
+def _without_identifying_resource(resource: Resource, dropped: frozenset) -> Resource:
+    """The resource without the dropped keys; one copy per resource (every
+    span of a provider shares it), so the exporter's grouping stays cheap."""
+    global _resource_cache
+    cached_resource, cached_dropped, cached = _resource_cache
+    if cached_resource is resource and cached_dropped is dropped:
+        return cached
+    attributes = drop_identifying_attributes(resource.attributes, dropped)
+    result = resource if attributes is resource.attributes else Resource(attributes, getattr(resource, "schema_url", None))
+    _resource_cache = (resource, dropped, result)
+    return result
+
+
+def _redacted(span: ReadableSpan, redact: bool = True, dropped: Optional[frozenset] = None) -> ReadableSpan:
+    def clean(attributes: Any) -> Any:
+        kept = drop_identifying_attributes(attributes, dropped)
+        return redact_attributes(kept) if redact else kept
+
+    events = [Event(event.name, clean(event.attributes), event.timestamp) for event in span.events]
+    links = [Link(link.context, clean(link.attributes)) for link in span.links]
     status = span.status
-    if status is not None and status.description:
+    if redact and status is not None and status.description:
         status = Status(status.status_code, redact_text(status.description))
     return _CopiedSpan(
         span,
-        name=redact_text(span.name),
-        attributes=redact_attributes(span.attributes),
+        name=redact_text(span.name) if redact else span.name,
+        attributes=clean(span.attributes),
         events=events,
+        links=links,
         status=status,
+        resource=_without_identifying_resource(span.resource, _DEFAULT_KEYS if dropped is None else dropped),
     )
+
+
+_DEFAULT_KEYS = identifying_keys_to_drop()
 
 
 class RedactingSpanExporter(SpanExporter):
@@ -522,13 +575,30 @@ class RedactingSpanExporter(SpanExporter):
     ``str(exc)`` often carries a connection string or an API key) and status
     descriptions go through ``redact.py``, the patterns @autter/runtime-node
     uses. The ingester scrubs again on arrival.
+
+    Identifying attributes (``redact.IDENTIFYING_ATTRIBUTE_KEYS``: the client's
+    IP address and port, the raw user agent, ``host.id``, the command line and
+    its owner) are dropped from span, event and link attributes and from the
+    resource, also with ``redact=False``. ``keep_identifying_attributes``
+    (``True`` or a list of keys; default ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``)
+    keeps them; ``drop_attributes`` (default ``AUTTER_DROP_ATTRIBUTES``, a
+    comma-separated list) drops more keys, such as ``host.name``.
     """
 
-    def __init__(self, exporter: SpanExporter):
+    def __init__(
+        self,
+        exporter: SpanExporter,
+        *,
+        redact: bool = True,
+        keep_identifying_attributes: Any = None,
+        drop_attributes: Optional[Sequence[str]] = None,
+    ):
         self._exporter = exporter
+        self._redact = redact
+        self._dropped = _keys_to_drop(keep_identifying_attributes, drop_attributes)
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._exporter.export([_redacted(span) for span in spans])
+        return self._exporter.export([_redacted(span, self._redact, self._dropped) for span in spans])
 
     def shutdown(self) -> None:
         self._exporter.shutdown()
@@ -573,6 +643,8 @@ def init_tracing(
     set_global: bool = True,
     count_requests: Optional[bool] = None,
     metric_exporter: Optional[MetricExporter] = None,
+    keep_identifying_attributes: Any = None,
+    drop_attributes: Optional[Sequence[str]] = None,
 ) -> TracerProvider:
     """A TracerProvider that head-samples as configured and always exports
     errors, registered as the global provider.
@@ -584,7 +656,16 @@ def init_tracing(
       ``OTEL_EXPORTER_OTLP_HEADERS``.
     * ``resource``: default ``Resource.create()``, which reads
       ``OTEL_SERVICE_NAME`` and ``OTEL_RESOURCE_ATTRIBUTES``.
-    * ``redact``: wrap the exporter in :class:`RedactingSpanExporter`.
+    * ``redact``: scrub secrets and PII in :class:`RedactingSpanExporter`.
+    * ``keep_identifying_attributes`` (default
+      ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``: ``true`` or a comma-separated
+      list): identifying attributes (client IP address and port, raw user
+      agent, ``host.id``, command line; ``redact.IDENTIFYING_ATTRIBUTE_KEYS``)
+      are dropped from spans and the resource, also with ``redact=False``;
+      ``True`` keeps them all, a list keeps those keys. The ingester drops
+      them too unless it is given the same setting.
+    * ``drop_attributes`` (default ``AUTTER_DROP_ATTRIBUTES``): more keys to
+      drop the same way, such as ``["host.name"]``.
     * ``count_requests`` (default: ``AUTTER_COUNT_REQUESTS=true``): count
       every HTTP request, sampled or not (:class:`CountRequests`), in a delta
       histogram sent through ``metric_exporter`` (default
@@ -620,6 +701,8 @@ def init_tracing(
             return existing
     if resource is None:
         resource = Resource.create()
+    dropped = _keys_to_drop(keep_identifying_attributes, drop_attributes)
+    resource = _without_identifying_resource(resource, dropped)
     meter_provider = None
     if count_requests if count_requests is not None else _env_flag("AUTTER_COUNT_REQUESTS"):
         if set_global and isinstance(metrics.get_meter_provider(), MeterProvider):
@@ -638,8 +721,9 @@ def init_tracing(
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         exporter = OTLPSpanExporter()
-    if redact:
-        exporter = RedactingSpanExporter(exporter)
+    exporter = RedactingSpanExporter(
+        exporter, redact=redact, keep_identifying_attributes=keep_identifying_attributes, drop_attributes=drop_attributes
+    )
     provider = TracerProvider(
         sampler=RecordUnsampled(sampler if sampler is not None else head_sampler_from_env()),
         resource=resource,

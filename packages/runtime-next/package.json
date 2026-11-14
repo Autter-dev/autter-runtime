@@ -10,6 +10,18 @@
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
+			"edge-light": {
+				"import": "./dist/index.edge.js",
+				"require": "./dist/index.edge.cjs"
+			},
+			"worker": {
+				"import": "./dist/index.edge.js",
+				"require": "./dist/index.edge.cjs"
+			},
+			"browser": {
+				"import": "./dist/index.browser.js",
+				"require": "./dist/index.browser.cjs"
+			},
 			"import": "./dist/index.js",
 			"require": "./dist/index.cjs"
 		},
@@ -51,7 +63,7 @@
 		"directory": "packages/runtime-next"
 	},
 	"scripts": {
-		"build": "node ../../scripts/ensure-built.mjs runtime-node runtime-edge runtime-browser && node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+		"build": "node ../../scripts/ensure-built.mjs runtime-core runtime-node runtime-edge runtime-browser && node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
 		"test": "npm run build -w @autter/runtime-core && npm run build -w @autter/runtime-node && npm run build -w @autter/runtime-edge && npm run build -w @autter/runtime-browser && npm run build && node --test test/*.test.mjs"
 	},
 	"dependencies": {
@@ -63,7 +75,9 @@
 		"react": ">=18"
 	},
 	"devDependencies": {
+		"@autter/runtime-core": "0.0.0",
 		"@types/react": "^18.3.0",
+		"esbuild": "^0.28.1",
 		"tsup": "^8.3.5",
 		"typescript": "^5.7.0"
 	},

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### runtime-next: the root is safe in modules shared with client and edge code
+
+- `@autter/runtime-next` has a browser build (`browser` condition) and an edge build (`edge-light` / `worker`) of its root entry. Before, every bundler got the server build, so a module that both a client component and a route handler import (an error catalog importing `defineRuntimeErrors`) pulled `@autter/runtime-node`, OpenTelemetry and `fs` into the client bundle and the build failed. The new builds export every name the server root does, with the same types: the coded-error helpers (`RuntimeError`, `defineRuntimeErrors`, `isRuntimeErrorLike`, `toClientError`, `errorAttributes`, `CODE_PATTERN`) and `redactAttributes` / `redactText` are the real ones; capture, log and context calls (`captureServerException`, `runtimeLogger`, `runtimeContext`, …) do nothing and warn once in development; setup functions and server wrappers (`registerAutter`, `withAutter`, `withRuntimeRequest`, `createAutterRelayRoute`, `withLlmCall`, …) throw a "server-only" error when called. Node.js resolves the root to the server build as before, for `import` and `require`. See the README ("Importing the root from shared modules").
+
 ## [1.18.0] - 2026-11-14
 
 Packages: `otlp-ingester` 1.16.0, `runtime-node` 1.14.0, and the local `dashboard` image. Release the ingester before `runtime-node` 1.14.0 (`llm_cache_tokens`); see the upgrade notes.

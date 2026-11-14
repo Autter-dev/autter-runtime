@@ -172,6 +172,36 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `ARCHIVE_TABLES` / `ARCHIVE_BACKSTOP_DAYS` / `ARCHIVE_INTERVAL_MINUTES` / `ARCHIVE_MAX_DAYS_PER_PASS` / `ARCHIVE_SCHEDULER` | all four / `auto` (hot window + 7 days; `0` = none) / `60` / `4` / `auto` | Which tables, the disk-guard TTL, how often and how much per pass, and which process runs the job (`auto`: Redis lease holder or the only replica) |
 | `AUTTER_REDACT_VALUE_PATTERNS` | — | JSON array of extra regex sources masked in stored/forwarded text and attribute values (built-in secret/PII patterns always apply) |
 | `AUTTER_REDACT_KEY_PATTERNS` | — | JSON array of extra regex sources for attribute keys whose values are masked wholesale |
+| `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES` | unset (drop them all) | Identifying attributes (client IP and port, raw user agent, `host.id` / `host.ip` / `host.mac`, command line and owner) are dropped on arrival; `true` keeps them all, a comma-separated list keeps those keys. An SDK that keeps one needs this set too, or the attribute is not stored. See [Identifying attributes](#identifying-attributes) |
+| `AUTTER_DROP_ATTRIBUTES` | unset | Comma-separated attribute keys dropped on arrival as well, such as `host.name` |
+
+## Identifying attributes
+
+OpenTelemetry SDKs put attributes that identify a person or a machine on
+spans and resources by default: the client's IP address and port, the raw
+user-agent string, the machine's id and addresses, and the command line and
+its owner. Nothing in Autter reads them, so the ingester drops them on
+arrival, before anything is stored or forwarded to the sink: from span,
+span event and span link attributes, log record attributes (and the keys of
+a structured log body), and the resource of traces, logs and metrics. This
+covers every sender: plain OpenTelemetry SDKs in any language, the Python
+adapter, and older `@autter/runtime-node` versions. The keys are listed in
+[`src/identifying.ts`](src/identifying.ts) and
+[`test-vectors/redaction.json`](../../test-vectors/redaction.json)
+(`identifying.drop`); the SDKs drop the same list before export.
+
+`service.instance.id`, `host.name`, `process.pid`, `process.runtime.*`,
+`os.type` and `host.arch` are kept. `host.name` is usually a container or
+pod name, but on a laptop or a VM it is the machine's name: drop it with
+`AUTTER_DROP_ATTRIBUTES=host.name`.
+
+To store identifying attributes, set `AUTTER_KEEP_IDENTIFYING_ATTRIBUTES`
+(`true`, or a comma-separated list of keys) here **and** in the SDK
+(`keepIdentifyingAttributes` in `@autter/runtime-node`,
+`keep_identifying_attributes` in the Python adapter, or the same
+environment variable). Each side drops what it was not told to keep, so a
+key kept by only one of them is not stored. The ingester logs what it keeps
+at startup. Rows already stored keep these attributes until their TTL.
 
 ## Rate limits and key lookups (1.12.0)
 

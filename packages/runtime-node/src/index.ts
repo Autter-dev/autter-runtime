@@ -44,6 +44,8 @@ export {
 export {
 	redactAttributes,
 	redactText,
+	IDENTIFYING_ATTRIBUTE_KEYS,
+	type KeepIdentifyingAttributes,
 	type RedactOptions,
 } from "./redact.js";
 export {

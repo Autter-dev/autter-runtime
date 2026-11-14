@@ -60,7 +60,10 @@ bodies, headers, emails, full URLs with query strings. On the backend,
 custom attributes are additionally scrubbed before export: values that look
 like emails/tokens/credentials and attributes with sensitive keys
 (`password`, `api_key`, …) are masked by default (`redactAttributes`), so a
-stray `captureException(err, { "user.email": … })` doesn't leak PII.
+stray `captureException(err, { "user.email": … })` doesn't leak PII. The
+client's IP address, the raw user-agent string, the machine's id and the
+command line that OpenTelemetry adds to spans are dropped
+(`keepIdentifyingAttributes` keeps them; `host.name` is kept).
 
 ## 2. Run the ingester
 

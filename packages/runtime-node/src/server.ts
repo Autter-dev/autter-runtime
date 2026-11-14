@@ -104,9 +104,15 @@ import {
 	errorInternal,
 	fingerprintEventAttributes,
 	isError,
+	DROP_ATTRIBUTES_ENV,
+	dropAttributesFromEnv,
+	KEEP_IDENTIFYING_ATTRIBUTES_ENV,
+	keepIdentifyingFromEnv,
+	makeIdentifyingAttributeFilter,
 	splitFingerprint,
 	type CaptureLoggedErrorsOption,
 	type IgnoreErrorPattern,
+	type KeepIdentifyingAttributes,
 } from "@autter/runtime-core";
 import {
 	setHandledCapture,
@@ -377,6 +383,38 @@ export interface AutterServerOptions {
 	 * Applies even with `redactAttributes: false`. Default `[]`.
 	 */
 	keepQueryParams?: string[];
+	/**
+	 * Identifying attributes never leave the process by default: the
+	 * client's IP address and port (`net.peer.ip`, `client.address`,
+	 * `http.client_ip`, `network.peer.address`, …), the raw user-agent
+	 * string (`http.user_agent`, `user_agent.original`), the machine's id
+	 * and addresses (`host.id`, `host.ip`, `host.mac`) and the command line
+	 * and its owner (`process.command_args`, `process.command`,
+	 * `process.command_line`, `process.owner`, `process.executable.path`).
+	 * OpenTelemetry adds them to every server span and to the resource;
+	 * nothing in Autter reads them. They are dropped at export from span,
+	 * event and link attributes and from the resource, whichever
+	 * instrumentation set them, also with `redactAttributes: false`.
+	 * `service.instance.id`, `host.name` (container and pod names; on a
+	 * laptop or VM, the machine's name: drop it with `dropAttributes`),
+	 * `process.pid`, `process.runtime.*`, `os.type`, `host.arch` and the
+	 * coarse `user_agent.browser` / `.os` / `.device` fields are kept.
+	 *
+	 * `true` keeps all of them; a list keeps those keys:
+	 * `keepIdentifyingAttributes: ["host.name"]`. Default: the
+	 * AUTTER_KEEP_IDENTIFYING_ATTRIBUTES environment variable (`true`, or a
+	 * comma-separated list), else none. The ingester drops them as well
+	 * unless it is given the same setting.
+	 */
+	keepIdentifyingAttributes?: KeepIdentifyingAttributes;
+	/**
+	 * More attribute keys to drop at export, exactly like the identifying
+	 * ones (span, event and link attributes and the resource, also with
+	 * `redactAttributes: false`): `dropAttributes: ["host.name"]`. A key both
+	 * kept and listed here is dropped. Default: the AUTTER_DROP_ATTRIBUTES
+	 * environment variable (a comma-separated list), else none.
+	 */
+	dropAttributes?: string[];
 	/**
 	 * Verbose lifecycle logging to stderr: "exported N spans", flushes and
 	 * auto-flush activity — handy while wiring the SDK up. Also enabled by
@@ -1261,6 +1299,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	// Every trace exporter scrubs spans on the way out, whoever created them
 	// (see redact-exporter.ts): secrets and PII, and URL query values.
 	const queryPolicy = makeUrlQueryPolicy(options.keepQueryParams);
+	// Identifying attributes (client IP, user agent, host name, command
+	// line) are dropped at export unless kept (runtime-core identifying.ts).
+	const identifying = makeIdentifyingAttributeFilter(
+		options.keepIdentifyingAttributes ?? keepIdentifyingFromEnv(process.env[KEEP_IDENTIFYING_ATTRIBUTES_ENV]),
+		options.dropAttributes ?? dropAttributesFromEnv(process.env[DROP_ATTRIBUTES_ENV]),
+	);
 	const slowPerMinute = Number.isFinite(options.retainSlowTracesPerMinute)
 		? Math.max(0, options.retainSlowTracesPerMinute!) : DEFAULT_SLOW_TRACES_PER_MINUTE;
 	// One policy for every trace exporter: LLM spans keep prompt/completion
@@ -1279,6 +1323,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 						new IngestSpanExporter(new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }), ingestTarget),
 						() => redactor,
 						queryPolicy,
+						identifying,
 					),
 					llmContent,
 				),
@@ -1376,6 +1421,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 					temporalityPreference: AggregationTemporalityPreference.DELTA,
 				}), ingestTarget),
 				() => redactor,
+				identifying,
 			),
 			"metrics",
 		),

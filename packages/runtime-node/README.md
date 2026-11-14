@@ -218,6 +218,7 @@ Defaults (cheap by construction):
 | Logs | not collected |
 | PII in custom attributes | redacted before export (`redactAttributes`) |
 | Query strings in span URLs | parameter names only (`keepQueryParams`) |
+| Client IP, raw user agent, host id, command line | dropped (`keepIdentifyingAttributes`, `dropAttributes`) |
 | Forgotten `shutdown()` | exporters still flushed on exit (`autoFlush`) |
 
 **Error-linked trace retention.** Errors export at 100% while traces are
@@ -613,6 +614,46 @@ initAutterServer({ ..., keepQueryParams: ["page", "sort"] });
 This runs at export, like the scrubbing above, and also with
 `redactAttributes: false`. Route templates (`http.route`) and request
 summaries never contained a query.
+
+**Identifying attributes.** OpenTelemetry puts attributes that identify a
+person or a machine on every server span and on the resource. None of them
+looks like a secret, so scrubbing keeps them, and nothing in Autter reads
+them. They are dropped at export from span, event and link attributes and
+from the resource (spans and metrics), whichever instrumentation set them,
+also with `redactAttributes: false`:
+
+| What | Keys |
+| --- | --- |
+| The client's address and port (the peer's, on outgoing calls), and the server's own IP | `net.peer.ip`, `net.peer.port`, `net.sock.peer.addr`, `net.sock.peer.port`, `http.client_ip`, `client.address`, `client.port`, `network.peer.address`, `network.peer.port`, `net.host.ip`, `net.sock.host.addr`, `network.local.address` |
+| The raw user-agent string | `http.user_agent`, `user_agent.original` |
+| The machine's id and addresses | `host.id`, `host.ip`, `host.mac` |
+| The command line and the user running it | `process.command_args`, `process.command`, `process.command_line`, `process.owner`, `process.executable.path` |
+
+Kept: `service.instance.id` (a random id; the ingester needs it to tell
+processes apart), `host.name`, `process.pid`, `process.runtime.*`,
+`os.type`, `host.arch`, `server.address`, and the coarse
+`user_agent.browser` / `.os` / `.device` / `.bot` fields of request
+summaries. `host.name` is kept because it is usually a container or pod
+name; on a laptop or a VM it is the machine's name, which can be a person's.
+Drop it, or any other key, with `dropAttributes`:
+
+```ts
+initAutterServer({ ..., dropAttributes: ["host.name"] });
+// or AUTTER_DROP_ATTRIBUTES=host.name
+```
+
+To keep identifying attributes, list them, or pass `true` for all of them:
+
+```ts
+initAutterServer({ ..., keepIdentifyingAttributes: ["http.user_agent"] });
+// or AUTTER_KEEP_IDENTIFYING_ATTRIBUTES=http.user_agent (true for all)
+```
+
+The ingester drops the same keys on arrival, so an attribute kept here is
+stored only when the ingester keeps it too: set
+`AUTTER_KEEP_IDENTIFYING_ATTRIBUTES` on the ingester as well
+([otlp-ingester README](../otlp-ingester/README.md#identifying-attributes)).
+`IDENTIFYING_ATTRIBUTE_KEYS` exports the list.
 
 ### One SDK per process, however many copies are loaded
 

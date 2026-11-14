@@ -19,6 +19,12 @@ parity is enforced by the shared ``test-vectors/redaction.json``. Secure by
 default; extend with :func:`configure` (your own value/key patterns). The
 Autter ingester scrubs again server-side as a second line of defence.
 
+Identifying attributes (the client's IP address and port, the raw user
+agent, the host's id and addresses, the command line and its owner:
+:data:`IDENTIFYING_ATTRIBUTE_KEYS`) are dropped rather than scrubbed:
+:func:`drop_identifying_attributes`. ``autter_tracing.RedactingSpanExporter``
+applies it to every span, also with redaction off.
+
 Stdlib only.
 """
 
@@ -99,6 +105,46 @@ _USAGE_KEY = re.compile(
     r"|^ai\.usage\.[a-z]*tokens$",
     re.I,
 )
+
+#: Attributes that identify a person, a machine or a command line rather than
+#: describe a request. Dropped by default from span, event and link
+#: attributes and the resource (same list as @autter/runtime-node and the
+#: ingester; parity: ``test-vectors/redaction.json``, ``identifying``).
+#: Kept on purpose: ``service.instance.id``, ``host.name`` (container and pod
+#: names; drop it with ``drop_attributes``), ``process.pid``,
+#: ``process.runtime.*``, ``os.type``, ``host.arch``.
+IDENTIFYING_ATTRIBUTE_KEYS: tuple[str, ...] = (
+    # The client's address (and, on outgoing calls, the peer's), in the old,
+    # 1.2x and stable semantic conventions; the server's own IP address.
+    "net.peer.ip",
+    "net.peer.port",
+    "net.sock.peer.addr",
+    "net.sock.peer.port",
+    "net.host.ip",
+    "net.sock.host.addr",
+    "network.local.address",
+    "http.client_ip",
+    "client.address",
+    "client.port",
+    "network.peer.address",
+    "network.peer.port",
+    # The raw user-agent string.
+    "http.user_agent",
+    "user_agent.original",
+    # The machine (its id and addresses; host.name is kept).
+    "host.id",
+    "host.mac",
+    "host.ip",
+    # The command line and the user running it.
+    "process.command_args",
+    "process.command",
+    "process.command_line",
+    "process.owner",
+    "process.executable.path",
+)
+
+KEEP_IDENTIFYING_ATTRIBUTES_ENV = "AUTTER_KEEP_IDENTIFYING_ATTRIBUTES"
+DROP_ATTRIBUTES_ENV = "AUTTER_DROP_ATTRIBUTES"
 
 _extra_values: list[re.Pattern[str]] = []
 _extra_keys: list[re.Pattern[str]] = []
@@ -212,3 +258,60 @@ def redact_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
     if not _enabled:
         return dict(attributes)
     return _redact_mapping(attributes, 0)
+
+
+def keep_identifying_from_env(raw: str | None) -> bool | list[str] | None:
+    """Parse ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``: ``true``/``1``/``yes``/
+    ``on``/``all`` keep every identifying attribute, ``false``/``0``/``no``/
+    ``off``/``none`` keep none, anything else is a comma-separated list of
+    keys. Unset or blank: ``None`` (drop them all)."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on", "all"):
+        return True
+    if value in ("0", "false", "no", "off", "none"):
+        return False
+    return [key.strip() for key in raw.split(",") if key.strip()]
+
+
+def drop_attributes_from_env(raw: str | None) -> list[str] | None:
+    """Parse ``AUTTER_DROP_ATTRIBUTES``: a comma-separated list of keys."""
+    if not isinstance(raw, str):
+        return None
+    keys = [key.strip() for key in raw.split(",") if key.strip()]
+    return keys or None
+
+
+def identifying_keys_to_drop(
+    keep: bool | Iterable[str] | None = None, extra: Iterable[str] | None = None
+) -> frozenset[str]:
+    """The keys to drop: :data:`IDENTIFYING_ATTRIBUTE_KEYS` minus ``keep``
+    (``True`` keeps them all, a list keeps those keys), plus ``extra`` (a key
+    both kept and in ``extra`` is dropped)."""
+    if keep is True:
+        kept: set[str] = set(IDENTIFYING_ATTRIBUTE_KEYS)
+    elif keep is None or keep is False or isinstance(keep, str):
+        kept = set()
+    else:
+        kept = {key for key in keep if isinstance(key, str)}
+    dropped = {key for key in IDENTIFYING_ATTRIBUTE_KEYS if key not in kept}
+    if extra is not None and not isinstance(extra, str):
+        dropped.update(key for key in extra if isinstance(key, str) and key)
+    return frozenset(dropped)
+
+
+_DEFAULT_DROPPED = identifying_keys_to_drop()
+
+
+def drop_identifying_attributes(attributes: Any, dropped: frozenset[str] | None = None) -> Any:
+    """``attributes`` without the identifying keys (``dropped``, default
+    :func:`identifying_keys_to_drop`). The same object when none is present;
+    otherwise a ``dict`` copy. Never mutates its input. Applies whether or
+    not redaction is enabled."""
+    keys = _DEFAULT_DROPPED if dropped is None else dropped
+    if not attributes or not keys:
+        return attributes
+    if not any(key in keys for key in attributes):
+        return attributes
+    return {key: value for key, value in attributes.items() if key not in keys}

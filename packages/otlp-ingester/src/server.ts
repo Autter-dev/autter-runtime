@@ -84,7 +84,7 @@ import type { SinkDeadLetterRow } from "./sink-dead-letters.js";
 import { LoopCollapser } from "./loop-collapse.js";
 import { applySuppression } from "./suppression.js";
 import { configureRedaction, scrubOccurrence } from "./redact.js";
-import { IdentifyingAttributeFilter, identifyingKeysToDrop } from "./identifying.js";
+import { IdentifyingAttributeFilter, clientIpHasher, identifyingKeysToDrop } from "./identifying.js";
 import { configureLlmPricing } from "./llm-pricing.js";
 import {
 	buildCompatReport,
@@ -224,6 +224,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 	// are dropped before anything below reads, stores or forwards a request.
 	const identifying = new IdentifyingAttributeFilter(
 		identifyingKeysToDrop(config.keepIdentifyingAttributes, config.dropAttributes),
+		clientIpHasher(config.hashClientIp, config.clientIpSalt),
 	);
 	// LLM prices: the built-in table, with a self-hosted override file
 	// (AUTTER_LLM_PRICES_FILE, validated by loadConfig) merged over it.

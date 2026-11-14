@@ -244,5 +244,192 @@
 			"http.route",
 			"http.method"
 		]
+	},
+	"clientIpHash": {
+		"$comment": "Opt-in hashed client IP (client.address_hash): HMAC-SHA256(salt, normalized IP) as hex, first `length` characters. `normalize` maps raw values to the canonical IP (null: not an IP, nothing hashed); `hash` maps raw values to the hash under `salt`; `source` says which address of a span or log record is hashed (`server`: an HTTP server span, where the socket peer may be read). Runtime-core/runtime-node, adapters/python and the otlp-ingester must agree on all three.",
+		"attribute": "client.address_hash",
+		"salt": "autter-test-salt-0123456789",
+		"length": 32,
+		"normalize": [
+			{
+				"input": "203.0.113.9",
+				"expect": "203.0.113.9"
+			},
+			{
+				"input": " 203.0.113.9 ",
+				"expect": "203.0.113.9"
+			},
+			{
+				"input": "203.0.113.9:51234",
+				"expect": "203.0.113.9"
+			},
+			{
+				"input": "203.0.113.9, 10.0.0.1",
+				"expect": "203.0.113.9"
+			},
+			{
+				"input": "::ffff:203.0.113.9",
+				"expect": "203.0.113.9"
+			},
+			{
+				"input": "::FFFF:CB00:7109",
+				"expect": "203.0.113.9"
+			},
+			{
+				"input": "[::ffff:203.0.113.9]:443",
+				"expect": "203.0.113.9"
+			},
+			{
+				"input": "2001:DB8:0:0::1",
+				"expect": "2001:db8::1"
+			},
+			{
+				"input": "[2001:db8::1]:8080",
+				"expect": "2001:db8::1"
+			},
+			{
+				"input": "fe80::1%eth0",
+				"expect": "fe80::1"
+			},
+			{
+				"input": "2001:0db8:0000:0000:0000:0000:0000:0001",
+				"expect": "2001:db8::1"
+			},
+			{
+				"input": "1:0:0:2:0:0:0:3",
+				"expect": "1:0:0:2::3"
+			},
+			{
+				"input": "unknown",
+				"expect": null
+			},
+			{
+				"input": "",
+				"expect": null
+			},
+			{
+				"input": "999.1.1.1",
+				"expect": null
+			},
+			{
+				"input": "01.2.3.4",
+				"expect": null
+			},
+			{
+				"input": "example.com",
+				"expect": null
+			},
+			{
+				"input": "1.2.3",
+				"expect": null
+			},
+			{
+				"input": "::ffff:zz",
+				"expect": null
+			}
+		],
+		"hash": [
+			{
+				"input": "203.0.113.9",
+				"expect": "ca02c4212f9f108bfc1f1c799ddac123"
+			},
+			{
+				"input": "::ffff:203.0.113.9",
+				"expect": "ca02c4212f9f108bfc1f1c799ddac123"
+			},
+			{
+				"input": "203.0.113.9:443",
+				"expect": "ca02c4212f9f108bfc1f1c799ddac123"
+			},
+			{
+				"input": "2001:db8::1",
+				"expect": "7f8f52c731e08ed237dc17921591cbe0"
+			},
+			{
+				"input": "[2001:DB8::1]:443",
+				"expect": "7f8f52c731e08ed237dc17921591cbe0"
+			},
+			{
+				"input": "10.0.0.2",
+				"expect": "8397b1a98831ffa12e2b88a4aa7e25bc"
+			}
+		],
+		"source": [
+			{
+				"attributes": {
+					"client.address": "203.0.113.9",
+					"net.peer.ip": "10.0.0.2"
+				},
+				"server": true,
+				"expect": "203.0.113.9"
+			},
+			{
+				"attributes": {
+					"http.client_ip": "198.51.100.1",
+					"net.peer.ip": "10.0.0.2"
+				},
+				"server": true,
+				"expect": "198.51.100.1"
+			},
+			{
+				"attributes": {
+					"client.address": "203.0.113.9",
+					"http.client_ip": "198.51.100.1"
+				},
+				"server": true,
+				"expect": "203.0.113.9"
+			},
+			{
+				"attributes": {
+					"net.peer.ip": "10.0.0.2",
+					"network.peer.address": "10.0.0.3"
+				},
+				"server": true,
+				"expect": "10.0.0.2"
+			},
+			{
+				"attributes": {
+					"network.peer.address": "::ffff:10.0.0.3"
+				},
+				"server": true,
+				"expect": "10.0.0.3"
+			},
+			{
+				"attributes": {
+					"net.sock.peer.addr": "10.0.0.5"
+				},
+				"server": true,
+				"expect": "10.0.0.5"
+			},
+			{
+				"attributes": {
+					"net.peer.ip": "10.0.0.2"
+				},
+				"server": false,
+				"expect": null
+			},
+			{
+				"attributes": {
+					"client.address": "unknown",
+					"network.peer.address": "10.0.0.3"
+				},
+				"server": true,
+				"expect": "10.0.0.3"
+			},
+			{
+				"attributes": {
+					"client.address": "10.0.0.4"
+				},
+				"server": false,
+				"expect": "10.0.0.4"
+			},
+			{
+				"attributes": {
+					"http.route": "/x"
+				},
+				"server": true,
+				"expect": null
+			}
+		]
 	}
 }

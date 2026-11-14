@@ -13,6 +13,19 @@ export {
 	type Redactor as AttributeRedactor,
 } from "./redact.js";
 export {
+	CLIENT_IP_CLIENT_KEYS,
+	CLIENT_IP_HASH_ATTRIBUTE,
+	CLIENT_IP_HASH_LENGTH,
+	CLIENT_IP_SALT_ENV,
+	CLIENT_IP_SALT_MIN_LENGTH,
+	CLIENT_IP_SOURCE_KEYS,
+	HASH_CLIENT_IP_ENV,
+	clientIpOf,
+	envFlag,
+	normalizeClientIp,
+	usableClientIpSalt,
+} from "./client-ip.js";
+export {
 	DROP_ATTRIBUTES_ENV,
 	IDENTIFYING_ATTRIBUTE_KEYS,
 	KEEP_IDENTIFYING_ATTRIBUTES_ENV,

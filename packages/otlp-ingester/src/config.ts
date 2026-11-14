@@ -211,6 +211,14 @@ export interface IngesterConfig {
 	/** More attribute keys to drop on arrival, such as `host.name` (AUTTER_DROP_ATTRIBUTES, comma-separated). */
 	dropAttributes?: string[];
 	/**
+	 * Opt-in (AUTTER_HASH_CLIENT_IP=true): add `client.address_hash`, a keyed
+	 * hash of the client's address, to spans and log records that carry no
+	 * hash yet (identifying.ts). Needs clientIpSalt.
+	 */
+	hashClientIp?: boolean;
+	/** The secret salt (AUTTER_CLIENT_IP_SALT, at least 16 characters). Never logged. */
+	clientIpSalt?: string | null;
+	/**
 	 * In-memory budget (MiB, decoded size) for parsed source maps used to
 	 * symbolicate browser frames at ingest (SOURCE_MAP_CACHE_MB, default 64).
 	 * A map that needs more than half of it is used without being kept.
@@ -422,6 +430,8 @@ export function loadConfig(): IngesterConfig {
 		redactKeyPatterns: patternListEnv("AUTTER_REDACT_KEY_PATTERNS"),
 		keepIdentifyingAttributes: keepIdentifyingEnv(process.env.AUTTER_KEEP_IDENTIFYING_ATTRIBUTES),
 		dropAttributes: dropAttributesEnv(process.env.AUTTER_DROP_ATTRIBUTES),
+		hashClientIp: /^(?:1|true|yes|on)$/i.test((process.env.AUTTER_HASH_CLIENT_IP ?? "").trim()),
+		clientIpSalt: process.env.AUTTER_CLIENT_IP_SALT || null,
 		sourceMapCacheMb: intEnv("SOURCE_MAP_CACHE_MB", 64),
 		loopCollapseAfter: loopCollapseAfterEnv(process.env.LOOP_COLLAPSE_AFTER),
 		archive: archiveConfigFromEnv(process.env),

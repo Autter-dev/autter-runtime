@@ -23,13 +23,17 @@ Identifying attributes (the client's IP address and port, the raw user
 agent, the host's id and addresses, the command line and its owner:
 :data:`IDENTIFYING_ATTRIBUTE_KEYS`) are dropped rather than scrubbed:
 :func:`drop_identifying_attributes`. ``autter_tracing.RedactingSpanExporter``
-applies it to every span, also with redaction off.
+applies it to every span, also with redaction off. Opt in to a keyed hash of
+the client's address instead (``client.address_hash``): :func:`hash_client_ip`.
 
 Stdlib only.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -315,3 +319,82 @@ def drop_identifying_attributes(attributes: Any, dropped: frozenset[str] | None 
     if not any(key in keys for key in attributes):
         return attributes
     return {key: value for key, value in attributes.items() if key not in keys}
+
+
+#: Opt-in hashed client IP: the attribute, its length in hex characters, the
+#: shortest salt accepted and the environment variables. Same values as
+#: @autter/runtime-node and the ingester (``test-vectors/redaction.json``,
+#: ``clientIpHash``).
+CLIENT_IP_HASH_ATTRIBUTE = "client.address_hash"
+CLIENT_IP_HASH_LENGTH = 32
+CLIENT_IP_SALT_MIN_LENGTH = 16
+HASH_CLIENT_IP_ENV = "AUTTER_HASH_CLIENT_IP"
+CLIENT_IP_SALT_ENV = "AUTTER_CLIENT_IP_SALT"
+
+#: Where the client address is read from, first valid wins: ``client.address``
+#: and ``http.client_ip`` (from ``X-Forwarded-For`` behind a proxy), then the
+#: socket peer, on server spans only (behind a proxy it is the proxy; on a
+#: client span it is the server being called).
+CLIENT_IP_SOURCE_KEYS = ("client.address", "http.client_ip", "net.peer.ip", "network.peer.address", "net.sock.peer.addr")
+CLIENT_IP_CLIENT_KEYS = ("client.address", "http.client_ip")
+
+_IPV4_PORT = re.compile(r"^[\d.]+:\d{1,5}$")
+_BRACKETED = re.compile(r"^\[([^\]]+)\](?::\d{1,5})?$")
+_IPV4 = re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$")
+_IPV6_CHARS = re.compile(r"^[0-9a-f:.]+$")
+
+
+def normalize_client_ip(raw: Any) -> str | None:
+    """The canonical text of an IP address, or ``None`` when ``raw`` is not
+    one: the first entry of a comma-separated list, port and brackets
+    removed, zone id removed, IPv6 lower-cased and compressed (RFC 5952),
+    IPv4-mapped IPv6 turned into IPv4."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.split(",")[0].strip()
+    if not value or len(value) > 100:
+        return None
+    bracketed = _BRACKETED.match(value)
+    if bracketed:
+        value = bracketed.group(1)
+    elif _IPV4_PORT.match(value):
+        value = value[: value.rindex(":")]
+    if "%" in value:
+        value = value[: value.index("%")]
+    value = value.lower()
+    if _IPV4.match(value):
+        return value
+    if ":" not in value or not _IPV6_CHARS.match(value):
+        return None
+    try:
+        address = ipaddress.IPv6Address(value)
+    except ValueError:
+        return None
+    if address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return address.compressed
+
+
+def client_ip_of(attributes: Mapping[str, Any] | None, server_span: bool) -> str | None:
+    """The normalised client address of a span or log record: the first
+    :data:`CLIENT_IP_SOURCE_KEYS` entry holding a valid IP (the peer keys
+    only when ``server_span``)."""
+    if not attributes:
+        return None
+    for key in CLIENT_IP_SOURCE_KEYS if server_span else CLIENT_IP_CLIENT_KEYS:
+        ip = normalize_client_ip(attributes.get(key))
+        if ip:
+            return ip
+    return None
+
+
+def usable_client_ip_salt(salt: Any) -> str | None:
+    """``salt`` when it is a string of at least :data:`CLIENT_IP_SALT_MIN_LENGTH` characters."""
+    return salt if isinstance(salt, str) and len(salt) >= CLIENT_IP_SALT_MIN_LENGTH else None
+
+
+def hash_client_ip(salt: str, ip: str) -> str:
+    """HMAC-SHA256(salt, ip) as hex, first :data:`CLIENT_IP_HASH_LENGTH`
+    characters. ``ip`` is normalised (:func:`normalize_client_ip`). Never
+    call it without a secret salt: the IPv4 space can be hashed in full."""
+    return hmac.new(salt.encode("utf-8"), ip.encode("utf-8"), hashlib.sha256).hexdigest()[:CLIENT_IP_HASH_LENGTH]

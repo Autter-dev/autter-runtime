@@ -15,8 +15,11 @@ Set `AUTTER_RUNTIME_KEY` in your environment. Then three small files, and
 The package has two entry points — this split is what keeps the Node
 OpenTelemetry SDK out of your browser bundle:
 
-- `@autter/runtime-next` (or `@autter/runtime-next/server`) — server only:
-  `instrumentation.ts`, route handlers, server components.
+- `@autter/runtime-next` (or `@autter/runtime-next/server`) — the server
+  API: `instrumentation.ts`, route handlers, server components. The root
+  (not `/server`) is also safe in modules that client or edge code imports,
+  such as an error catalog: see
+  [Importing the root from shared modules](#importing-the-root-from-shared-modules).
 - `@autter/runtime-next/client` — client components: browser tracker +
   error boundary. Never imports Node code.
 - `@autter/runtime-next/instrumentation` — `onRequestError` for
@@ -184,15 +187,61 @@ Also re-exported for convenience: `captureException`, `captureMessage`,
 servers: `autterErrorHandler`, `autterFastifyErrors`, `autterKoa` and
 `captureRequestError`.
 
-> Importing the root entry from a client component pulls the Node OTel SDK
-> into the browser bundle and fails the build (`fs` cannot be resolved).
-> Client code must always use `@autter/runtime-next/client`.
-
 LLM tracing is on automatically once `registerAutter` runs: Vercel AI SDK
 calls with `experimental_telemetry: { isEnabled: true }` (and anything
 wrapped in `withLlmCall` or an `instrumentLlmClient` client) are recorded at
 100% — every call, with model, tokens, latency, and cost. See the
 [`@autter/runtime-node` README](../runtime-node) for the API.
+
+## Importing the root from shared modules
+
+A module that both client and server code import, such as an error catalog,
+can import the root. The bundler picks the root's build by export condition,
+and the browser and edge builds export every name the server build does, with
+the same types, so the import never fails with "export not found" and never
+pulls the Node OpenTelemetry SDK (or `fs`) into a browser or edge bundle:
+
+```ts
+// lib/errors.ts — imported by a client component and by route handlers
+import { defineRuntimeErrors } from "@autter/runtime-next";
+
+export const orderErrors = defineRuntimeErrors("orders", {
+  not_found: { status: 404, message: "No such order", expected: true },
+});
+```
+
+| Bundled for | Build | What the root gives you |
+| --- | --- | --- |
+| Node.js server (route handlers, server components, server actions, `instrumentation.ts`) | `import` / `require` | Everything. |
+| Edge runtime (`middleware.ts`, `export const runtime = "edge"`; the `edge-light` / `worker` conditions) | `dist/index.edge.js` | The coded-error helpers for real (`@autter/runtime-edge`'s, the same classes `@autter/runtime-next/edge` uses). Every other name is a stand-in, as in the browser. |
+| Browser (client components; the `browser` condition) | `dist/index.browser.js` | The coded-error helpers for real: `RuntimeError`, `defineRuntimeErrors`, `isRuntimeErrorLike`, `toClientError`, `errorAttributes`, `CODE_PATTERN`, plus `redactAttributes` and `redactText`. Every other name is a stand-in (below). |
+
+The stand-ins in the browser and edge builds:
+
+- Capture, log and context calls do nothing and warn once per name in
+  development (silent in production): `captureServerException`,
+  `captureServerMessage`, `reportServerOutcome`, `captureRequestError`,
+  `trackLlmCall`, `addBreadcrumb`, `makeSafeCapture()`, `runtimeLogger`,
+  `createRuntimeLogger()`, `runtimeContext`. Wrappers still run your code:
+  `withRuntimeOperation`, `withProcessSpan`, `runInBackground` and
+  `runtimeContext.fork` call the function and return its result;
+  `instrumentLlmClient` returns the client unchanged. `flushRuntimeLogs`
+  resolves `{ ok: true, errors: [] }`.
+- Config builders return inert values, so a shared config module can build
+  them at import time: `otlpSink`, `consoleSink`, `fileSink`, and the
+  `enrich*` enrichers.
+- Setup functions and server wrappers throw a "server-only" error naming the
+  function when they are called (never at import): `registerAutter`,
+  `withAutter`, `withRuntimeRequest`, `createAutterRelayRoute`,
+  `withLlmCall`, `emitLlmSelftestTrace`, `initAutterLogging`,
+  `installAutterAutoFlush`, and the Express, Fastify and Koa hooks.
+
+So report browser errors with `captureException` from
+`@autter/runtime-next/client` (a server capture called in the browser is not
+forwarded to the browser tracker), and use `@autter/runtime-next/edge` for
+middleware and edge routes. `@autter/runtime-next/server` has no browser or
+edge build: import it from Node.js server code only.
+
 ## Operation logging (1.4.0+)
 
 Import `withRuntimeOperation`, `runtimeLogger`, `createRuntimeLogger`,

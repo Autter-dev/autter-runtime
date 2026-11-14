@@ -195,9 +195,12 @@ test("a hanging compat request never delays process exit", async () => {
 		});
 		assert.equal(code, 0);
 		assert.equal(hits, 1, "the compat request was in flight");
-		// Deterministic: once its work is done nothing keeps the loop alive
-		// but the child's own stdio (pipes to this process).
-		const held = JSON.parse(holding ?? "null")?.filter((type) => type !== "PipeWrap" && type !== "TTYWrap");
+		// Deterministic: once its work is done, no socket or timer keeps the
+		// loop alive (an in-flight request that is not unref'd shows as a
+		// TCPSocketWrap, its timeout as a Timeout). Other resources are not
+		// the compat check's: the child's stdio pipes, and on a slow machine
+		// the OTel host detector's `ioreg` (macOS) / `REG QUERY` (Windows).
+		const held = JSON.parse(holding ?? "null")?.filter((type) => type === "TCPSocketWrap" || type === "Timeout");
 		assert.deepEqual(held, [], `still keeping the process alive after its work: ${holding}`);
 		// And in time: held by the request, it would linger until the
 		// request's 3 s timeout, about 2.7 s after its 300 ms of work. The

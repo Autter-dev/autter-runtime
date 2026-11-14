@@ -32,11 +32,11 @@ standard ``OTEL_*`` environment variables::
 
     init_tracing()  # before the framework instrumentor runs
 
-Request counts (opt-in: ``init_tracing(count_requests=True)`` or
-``AUTTER_COUNT_REQUESTS=true``). Without it the ingester counts the requests
-of the traces head sampling kept, so at a 10% ratio request counts read 10%
-of the traffic while every error is kept, and error rates read 10 times too
-high. :class:`CountRequests` sees every HTTP server span (sampled or not:
+Request counts (on by default; off with ``init_tracing(count_requests=False)``
+or ``AUTTER_COUNT_REQUESTS=false``). Without them the ingester counts the
+requests of the traces head sampling kept, so at a 1% ratio request counts
+read 1% of the traffic while every error is kept, and error rates read 100
+times too high. :class:`CountRequests` sees every HTTP server span (sampled or not:
 :class:`RecordUnsampled` records them all) and records each request once, in
 a delta ``http.server.duration`` histogram (ms; ``http.route``,
 ``http.request.method``, ``http.response.status_code`` from the span) that
@@ -47,7 +47,11 @@ adds no request from those spans: each request is counted once, whether it
 was sampled, retained for an error, or not exported. The framework
 instrumentations' own ``http.server.duration`` / ``http.server.request.duration``
 are dropped from that meter provider (they would count every request a
-second time). Needs ``opentelemetry-exporter-otlp-proto-http`` for metrics.
+second time). Needs ``opentelemetry-exporter-otlp-proto-http`` for metrics
+(without it, counting stays off with a warning). An ingester older than 1.8.0
+ignores the marks and counts the sampled requests a second time, from their
+spans. :func:`init_tracing` registers its meter provider as the global one:
+an app that registers its own afterwards should turn counting off.
 
 Copy this file and ``redact.py`` into your project. Needs ``opentelemetry-sdk``
 (tested with 1.20, 1.27 and 1.41 on Python 3.9, 1.45 on Python 3.14) and, for
@@ -469,14 +473,21 @@ def request_meter_provider(
     instruments export as usual.
 
     ``exporter`` defaults to ``OTLPMetricExporter`` (``OTEL_EXPORTER_OTLP_*``)
-    preferring delta histograms. One that does not prefer delta for
-    histograms gets ``None`` (with a warning): counting then stays off.
+    preferring delta histograms; without that package installed, or with an
+    exporter that does not prefer delta for histograms, the result is
+    ``None`` (with a warning): counting then stays off.
     The export interval is ``OTEL_METRIC_EXPORT_INTERVAL`` (default 60 s; the
     ingester's latency histograms need two minutes or less).
     """
     if exporter is None:
-        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-
+        try:
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        except ImportError:
+            LOGGER.warning(
+                "[autter-runtime] request counts are off: install opentelemetry-exporter-otlp-proto-http "
+                "to send them, or set AUTTER_COUNT_REQUESTS=false to silence this."
+            )
+            return None
         exporter = OTLPMetricExporter(preferred_temporality={Histogram: AggregationTemporality.DELTA})
     if not _prefers_delta_histograms(exporter):
         LOGGER.warning(
@@ -496,8 +507,15 @@ def request_meter_provider(
     )
 
 
-def _env_flag(name: str) -> bool:
-    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw:
+        LOGGER.warning("[autter-runtime] invalid %s %r, using %s", name, raw, "true" if default else "false")
+    return default
 
 
 def _redacted(span: ReadableSpan) -> ReadableSpan:
@@ -585,16 +603,22 @@ def init_tracing(
     * ``resource``: default ``Resource.create()``, which reads
       ``OTEL_SERVICE_NAME`` and ``OTEL_RESOURCE_ATTRIBUTES``.
     * ``redact``: wrap the exporter in :class:`RedactingSpanExporter`.
-    * ``count_requests`` (default: ``AUTTER_COUNT_REQUESTS=true``): count
-      every HTTP request, sampled or not (:class:`CountRequests`), in a delta
-      histogram sent through ``metric_exporter`` (default
-      ``OTLPMetricExporter`` preferring delta histograms, which reads the same
-      ``OTEL_EXPORTER_OTLP_*`` variables; see :func:`request_meter_provider`).
-      With ``set_global`` its meter provider is registered as the global one,
-      so add your own instruments (a memory gauge) to it rather than
-      registering another. It stays off, with a warning, when a meter
-      provider is already registered: its own HTTP duration histograms,
-      if delta, would count every request a second time.
+    * ``count_requests`` (default: on, unless ``AUTTER_COUNT_REQUESTS=false``;
+      ``False`` turns it off): count every HTTP request, sampled or not
+      (:class:`CountRequests`), in a delta histogram sent through
+      ``metric_exporter`` (default ``OTLPMetricExporter`` preferring delta
+      histograms, which reads the same ``OTEL_EXPORTER_OTLP_*`` variables;
+      see :func:`request_meter_provider`), so error rates are errors over
+      all requests rather than over the sampled ones. With ``set_global`` its
+      meter provider is registered as the global one, so add your own
+      instruments (a memory gauge) to it rather than registering another; an
+      app that registers its own meter provider after this call should pass
+      ``count_requests=False`` (OpenTelemetry keeps the first one). It stays
+      off, with a warning, when a meter provider is already registered (its
+      own HTTP duration histograms, if delta, would count every request a
+      second time) or ``opentelemetry-exporter-otlp-proto-http`` is not
+      installed. Needs an ingester from 1.8.0: an older one counts the
+      sampled requests twice.
 
     Call it once per process before the framework instrumentor runs (after
     fork in prefork servers: gunicorn without ``--preload`` imports the WSGI
@@ -621,11 +645,12 @@ def init_tracing(
     if resource is None:
         resource = Resource.create()
     meter_provider = None
-    if count_requests if count_requests is not None else _env_flag("AUTTER_COUNT_REQUESTS"):
+    if count_requests if count_requests is not None else _env_flag("AUTTER_COUNT_REQUESTS", True):
         if set_global and isinstance(metrics.get_meter_provider(), MeterProvider):
             LOGGER.warning(
-                "[autter-runtime] init_tracing(count_requests=True): a MeterProvider is already registered, so "
-                "request counts are off. Register none before init_tracing(): its meter provider replaces it."
+                "[autter-runtime] init_tracing(): a MeterProvider is already registered, so request counts are "
+                "off and error rates count only sampled requests. Register none before init_tracing() (its meter "
+                "provider replaces it), or set AUTTER_COUNT_REQUESTS=false to silence this."
             )
         else:
             counted = resource.merge(Resource(REQUEST_COUNT_RESOURCE_ATTRIBUTES))

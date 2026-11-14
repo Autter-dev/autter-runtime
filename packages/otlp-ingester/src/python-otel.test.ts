@@ -3,9 +3,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
+import { gunzipSync } from "node:zlib";
 import type { IngesterConfig } from "./config.js";
 import { frameToken, occurrenceIdentity } from "./fingerprint-v3.js";
-import { normalizeTraces, type OtlpTraceRequest } from "./normalize-otlp.js";
+import { normalizeMetrics, normalizeTraces, type OtlpMetricsRequest, type OtlpTraceRequest } from "./normalize-otlp.js";
 import { decodeTraceRequest } from "./otlp-proto.js";
 import { createIngesterApp } from "./server.js";
 import { parseStackFrames } from "./stack-frames.js";
@@ -262,6 +263,55 @@ describe("python request counting and dedupe on real spans", () => {
 	});
 });
 
+// ── The recommended rate: 1% head sampling, 2% of requests failing ────────
+
+/**
+ * What `init_tracing()` sent for 5,000 requests through a WSGI app at
+ * `parentbased_traceidratio` 0.01 with every 50th request failing (a 500),
+ * captured by adapters/python/test_autter_tracing.py (RecommendedSamplingRate):
+ * with request counting on (the default) and off (`AUTTER_COUNT_REQUESTS=false`).
+ * Regenerate: AUTTER_CAPTURE_FIXTURES=<this dir> python -m unittest
+ * test_autter_tracing.RecommendedSamplingRate in adapters/python.
+ */
+interface SamplingFixture {
+	requests: number;
+	failed: number;
+	traces: OtlpTraceRequest;
+	metrics: OtlpMetricsRequest;
+}
+
+function loadSampling(name: "counted" | "uncounted"): SamplingFixture {
+	return JSON.parse(gunzipSync(readFileSync(new URL(`sampling-1pct-${name}.json.gz`, FIXTURES))).toString("utf8")) as SamplingFixture;
+}
+
+function storedRate(points: RuntimeMetricPoint[]) {
+	const { requestCount, errorCount } = sums(points);
+	return { requestCount, errorCount, errorRate: errorCount / requestCount };
+}
+
+describe("python at 1% sampling: the stored error rate", () => {
+	test("with request counting (the default): every request counted, error rate 2%", () => {
+		const fixture = loadSampling("counted");
+		const traces = normalizeTraces(fixture.traces);
+		// Every failure reached the ingester, sampled or not.
+		assert.equal(traces.occurrences.length, fixture.failed);
+		const stored = storedRate([...traces.metricPoints, ...normalizeMetrics(fixture.metrics)]);
+		assert.deepEqual(stored, { requestCount: fixture.requests, errorCount: fixture.failed, errorRate: 0.02 });
+	});
+
+	test("without it: requests are the 1% sample, so the same errors read as a rate about 100 times too high", () => {
+		const fixture = loadSampling("uncounted");
+		assert.deepEqual(fixture.metrics.resourceMetrics, []);
+		const traces = normalizeTraces(fixture.traces);
+		assert.equal(traces.occurrences.length, fixture.failed);
+		const stored = storedRate(traces.metricPoints);
+		assert.equal(stored.errorCount, fixture.failed);
+		// About 1% of 5,000 requests were head-sampled and counted.
+		assert.ok(stored.requestCount > 25 && stored.requestCount < 75, String(stored.requestCount));
+		assert.ok(stored.errorRate > 1, `error rate ${stored.errorRate}`);
+	});
+});
+
 // ── Over the wire: the exact protobuf body the Python exporter posted ─────
 
 const KEY = "autter_rt_recipe_test_key_0001";
@@ -360,4 +410,34 @@ test("a Django 500 posted as the Python exporter posts it reaches the sink with 
 		batch.metrics.map((m: { requestCount: number; errorCount: number }) => [m.requestCount, m.errorCount]),
 		[[0, 1]],
 	);
+});
+
+async function postForSinkMetrics(path: string, body: unknown): Promise<RuntimeMetricPoint[]> {
+	const seen = sinkBatches.length;
+	const res = await fetch(`${ingestUrl}${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-autter-key": KEY },
+		body: JSON.stringify(body),
+	});
+	assert.equal(res.status, 200, `${path}: ${await res.text()}`);
+	const deadline = Date.now() + 5000;
+	while (sinkBatches.length <= seen) {
+		if (Date.now() > deadline) throw new Error(`no sink batch for ${path}`);
+		await new Promise((r) => setTimeout(r, 10));
+	}
+	return sinkBatches[seen]!.metrics as RuntimeMetricPoint[];
+}
+
+test("1% sampling over the wire: the rollup the ingester stores reads 2% with counting, far more without", async () => {
+	const counted = loadSampling("counted");
+	const withCounting = storedRate([
+		...(await postForSinkMetrics("/v1/traces", counted.traces)),
+		...(await postForSinkMetrics("/v1/metrics", counted.metrics)),
+	]);
+	assert.deepEqual(withCounting, { requestCount: 5000, errorCount: 100, errorRate: 0.02 });
+
+	const uncounted = loadSampling("uncounted");
+	const without = storedRate(await postForSinkMetrics("/v1/traces", uncounted.traces));
+	assert.equal(without.errorCount, 100);
+	assert.ok(without.errorRate > 1, `error rate ${without.errorRate}`);
 });

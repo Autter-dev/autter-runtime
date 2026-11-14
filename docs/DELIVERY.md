@@ -63,7 +63,7 @@ Errors are never head-sampled. Healthy traffic is.
 | LLM prompt and completion content | failed or slow calls only | `llmContent: "always"` or `"never"` |
 | Logs, operation and request summaries | 100% | `logging.minLevel` |
 | Browser errors | 100% | `sampleRate`, `ignoreErrors`, `denyUrls` in `@autter/runtime-browser/filters` |
-| Python and other OTel SDKs | your sampler's ratio | Errors survive only if your sampler keeps them; `adapters/python/autter_tracing.py` keeps every error |
+| Python and other OTel SDKs | your sampler's ratio | With a plain OTel SDK, errors survive only if your sampler keeps them. Python: `init_tracing()` from `adapters/python/autter_tracing.py` keeps every error and counts every request |
 
 At the ingester, suppression rules (set in Autter) drop or sample matching
 errors, and loop collapse stores a looping error as one sample a minute with

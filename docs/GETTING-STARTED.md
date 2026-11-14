@@ -546,10 +546,14 @@ clickhouse-client --password dev`.
 - [ ] Request summaries are always kept: `ignore` health checks and metrics
       scrapes in `autterRequests`, and size `LOG_TTL_DAYS` at the ingester.
 - [ ] Error codes are stable and low-cardinality — never ids or user data.
-- [ ] Keep trace sampling at ~1% (`traceSampleRate`) — errors are always
-      captured regardless, and the full trace of an erroring request is
-      retained (`retainTracesOnError`, on by default), so cheap sampling
-      doesn't cost you debugging context.
+- [ ] Keep trace sampling at ~1% (`traceSampleRate`) — with the `@autter/*`
+      SDKs errors are captured regardless, and the full trace of an erroring
+      request is retained (`retainTracesOnError`, on by default), so cheap
+      sampling doesn't cost you debugging context. Python services get the
+      same from `init_tracing()` ([Python](INTEGRATIONS.md#python-django-fastapi-flask-celery)).
+      With a plain OpenTelemetry SDK and a ratio sampler, an error on an
+      unsampled trace is not sent: sample those services at 100% or see
+      [Sampling guidance](INTEGRATIONS.md#sampling-guidance-all-stacks).
 - [ ] The relay route keeps its built-in per-IP rate limit (or your WAF
       covers it: `perIpRateLimit: false`).
 - [ ] The relay's default `trustProxy: "auto"` keys each visitor behind

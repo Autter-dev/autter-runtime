@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
 	checkBrowserPayload,
 	createBrowserRelayFetchHandler,
 	createBrowserRelayHandler,
 } from "../dist/index.js";
+import { quietPeriod, until } from "./support/wait.mjs";
 
-const index = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+// A file: URL, not a path: the child imports it, and on Windows an absolute
+// path (D:\...) is not a valid import specifier.
+const index = new URL("../dist/index.js", import.meta.url).href;
 
 /** A stub ingester that records every request and answers with `answer`. */
 async function stubIngester(answer) {
@@ -144,7 +146,8 @@ test("relay without a key answers 500 with the fix and warns once; nothing is fo
 		assert.equal(body.error, "relay has no ingest key");
 		assert.match(body.fix, /AUTTER_RUNTIME_KEY/);
 		assert.equal(warnings.lines.filter((l) => l.includes("browser relay has no ingest key")).length, 1, warnings.lines.join("\n"));
-		await new Promise((r) => setTimeout(r, 50));
+		// Nothing is forwarded: give a stray forward a chance to arrive.
+		await quietPeriod(50);
 		assert.equal(ingester.requests.length, 0);
 	} finally {
 		warnings.restore();
@@ -191,9 +194,11 @@ test("relay logs the ingester's refusal of a forwarded batch once", async () => 
 			const response = await handler(new Request("http://app/r", { method: "POST", body: JSON.stringify(validPayload) }));
 			assert.equal(response.status, 202);
 		}
-		for (let i = 0; i < 50 && ingester.requests.length < 3; i++) await new Promise((r) => setTimeout(r, 20));
-		await new Promise((r) => setTimeout(r, 50));
-		const lines = warnings.lines.filter((l) => l.includes("refused the ingest key on /v1/browser"));
+		const refusals = () => warnings.lines.filter((l) => l.includes("refused the ingest key on /v1/browser"));
+		await until(() => ingester.requests.length >= 3 && refusals().length >= 1);
+		// Logged once: give a second warning a chance to appear.
+		await quietPeriod(50);
+		const lines = refusals();
 		// Once per process for a 401, whichever exporter saw it first.
 		assert.equal(lines.length, 1, warnings.lines.join("\n"));
 		assert.match(lines[0], /\(401: invalid ingest key\)\. Nothing is stored until it is fixed: browser events forwarded by the relay are dropped/);

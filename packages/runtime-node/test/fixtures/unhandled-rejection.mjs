@@ -42,7 +42,10 @@ setTimeout(() => {
 	Promise.reject(env.REASON === "string" ? "plain rejection reason" : new Error("rejection boom"));
 }, 20);
 
+// Survivors print "survived". The wait is longer than auto-flush's bounded
+// flush before a crash exit (3 s): on a loaded machine that flush can take a
+// while, and a crashing process must not reach this line while it flushes.
 setTimeout(async () => {
 	if (autter) await autter.shutdown();
 	process.stdout.write("survived\n");
-}, 400);
+}, 4000);

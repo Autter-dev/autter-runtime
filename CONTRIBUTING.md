@@ -82,6 +82,34 @@ docker compose exec clickhouse clickhouse-client --password dev \
 Or see it in the local dashboard: `docker compose up -d dashboard`, then open
 http://localhost:4319 and pick the `local` repository.
 
+### Running the tests
+
+```bash
+npm test                                   # runtime-core, -node, -edge, -next, -cli
+npm test -w @autter/runtime-node           # one package (builds what it needs first)
+npm test -w @autter/runtime-node -- test/sinks.test.mjs   # some of its files
+```
+
+`@autter/runtime-node` and `@autter/runtime-browser` run their tests through
+`scripts/run-tests.mjs`, which lists `test/*.test.mjs` itself: Windows'
+`cmd.exe` does not expand the glob and Node 20 does not either. Node options
+pass through with `=` (`-- --test-concurrency=1`).
+
+What CI covers (`.github/workflows/ci.yml`):
+
+| Job | Node | OS | Runs |
+| --- | --- | --- | --- |
+| `build (Node N)` | 20, 22, 24, 26 | Ubuntu | every package's tests; the browser size gate and the Python adapter on 22 only |
+| `runtime-node (OS, Node 24)` | 24 | macOS, Windows | `@autter/runtime-node`'s tests |
+
+Tests that wait for something poll for it (`until` in
+`packages/runtime-node/test/support/wait.mjs`) instead of sleeping a fixed
+time and asserting: a sleep that is long enough on a laptop is not on a
+loaded CI runner. A fixed wait is only for checking that something does
+*not* happen (`quietPeriod`), with a comment saying what it waits out. A
+test that cannot run on a platform is skipped there with the reason
+(POSIX signals and read-only directories on Windows).
+
 ### Dashboard (Rust)
 
 `dashboard/` is a standalone Rust crate, separate from the npm workspaces.
@@ -142,7 +170,9 @@ review checks the rest:
    ran (the curl + clickhouse-client read-back above is usually enough).
 5. Open the PR with a short description of *why*, not just what.
 
-CI runs build + the browser size gate on every PR. A maintainer will
+CI runs the build, every package's tests on Node 20, 22, 24 and 26
+(runtime-node's also on macOS and Windows) and the browser size gate on
+every PR. A maintainer will
 review — we aim to respond within a few days.
 
 ## Releases (maintainers)

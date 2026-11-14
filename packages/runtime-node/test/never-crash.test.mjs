@@ -85,7 +85,8 @@ async function observe(fn) {
 	console.warn = (...args) => warnings.push(args.map(String).join(" "));
 	try {
 		await fn(warnings);
-		// Give any stray rejection a chance to surface.
+		// Nothing rejects: a bounded wait (there is nothing to poll for) gives
+		// a stray rejection a chance to surface.
 		await new Promise((resolve) => setTimeout(resolve, 50));
 	} finally {
 		console.warn = warn;

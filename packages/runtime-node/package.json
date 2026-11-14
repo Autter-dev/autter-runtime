@@ -33,7 +33,7 @@
 	},
 	"scripts": {
 		"build": "node ../../scripts/ensure-built.mjs runtime-core && tsup",
-		"test": "npm run build -w @autter/runtime-core && npm run build && npm run build -w @autter/otlp-ingester && node --test test/*.test.mjs"
+		"test": "npm run build -w @autter/runtime-core && npm run build && npm run build -w @autter/otlp-ingester && node ../../scripts/run-tests.mjs"
 	},
 	"dependencies": {
 		"@opentelemetry/api": "~1.9.0",

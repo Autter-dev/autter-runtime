@@ -14,6 +14,7 @@ import {
 	toClientError,
 } from "../dist/index.js";
 import { captureRuntime, expectOperation } from "../dist/testing.js";
+import { quietPeriod, until } from "./support/wait.mjs";
 
 const billing = defineRuntimeErrors("billing", {
 	declined: {
@@ -38,7 +39,9 @@ async function listen(app) {
 			}),
 	};
 }
-const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+/** A request's summary is recorded when its response closes, which can be after the client has read the body. */
+const operationsNamed = (runtime, name) =>
+	runtime.operations.filter((e) => e.attributes["autter.operation.name"] === name);
 
 test("express requests: route summary, request id round trip, inline logs, children, CORS expose", async () => {
 	const runtime = captureRuntime();
@@ -76,7 +79,9 @@ test("express requests: route summary, request id round trip, inline logs, child
 		const generatedId = generated.headers.get("x-request-id");
 		assert.match(generatedId, /^[0-9a-f-]{36}$/);
 		await (await fetch(`${server.url}/healthz`)).text();
-		await settle();
+		await until(() => operationsNamed(runtime, "POST /api/users/:id").length === 2);
+		// The ignored health check: give a summary for it a chance to appear.
+		await quietPeriod(30);
 
 		const request = expectOperation(runtime, "POST /api/users/:id")
 			.toHaveKind("request")
@@ -149,7 +154,14 @@ test("coded errors: expected â†’ degraded with a client-safe body; unexpected â†
 		const boomBody = await boom.json();
 		assert.equal(boomBody.error.message, "Internal Server Error");
 		assert.equal(JSON.stringify(boomBody).includes("person@example.com"), false);
-		await settle();
+		await until(
+			() =>
+				operationsNamed(runtime, "POST /checkout").length &&
+				operationsNamed(runtime, "GET /boom").length &&
+				runtime.exceptions.length >= 2,
+		);
+		// Exactly two exceptions: give a third a chance to appear.
+		await quietPeriod(30);
 
 		expectOperation(runtime, "POST /checkout")
 			.toHaveOutcome("degraded")
@@ -247,7 +259,7 @@ test("fastify plugin (structural, no dependency) summarises requests", async () 
 		assert.match(res.headers.get("x-request-id"), /^[0-9a-f-]{36}$/);
 		await res.text();
 		await (await fetch(`${url}/items/fail`)).text();
-		await settle();
+		await until(() => operationsNamed(runtime, "GET /items/:id").length === 2);
 		const summaries = runtime.operations.filter((e) => e.attributes["autter.operation.name"] === "GET /items/:id");
 		assert.deepEqual(summaries.map((e) => e.attributes["autter.operation.outcome"]), ["succeeded", "degraded"]);
 		assert.equal(summaries[1].attributes["autter.error.code"], "billing.declined");
@@ -290,7 +302,7 @@ test("enrichers add coarse attributes to request summaries", async () => {
 				},
 			})
 		).text();
-		await settle();
+		await until(() => operationsNamed(runtime, "GET /ua").length);
 		expectOperation(runtime, "GET /ua").toHaveContext({
 			"user_agent.browser": "Chrome 121",
 			"user_agent.os": "macOS",

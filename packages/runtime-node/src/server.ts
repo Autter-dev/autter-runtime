@@ -61,6 +61,7 @@ import {
 	type Redactor,
 } from "./redact.js";
 import { RedactingMetricExporter, RedactingSpanExporter } from "./redact-exporter.js";
+import { clientIpHasher, type HashClientIpOption } from "./client-ip.js";
 import { authHeaders, resolveIngestKey, warnKeyKind, warnMissingKey } from "./ingest-auth.js";
 import { IngestMetricExporter, IngestSpanExporter } from "./ingest-exporters.js";
 import { makeUrlQueryPolicy } from "./url-query.js";
@@ -415,6 +416,24 @@ export interface AutterServerOptions {
 	 * environment variable (a comma-separated list), else none.
 	 */
 	dropAttributes?: string[];
+	/**
+	 * Count distinct clients without storing their IP addresses. Off by
+	 * default. When on, the client's address (first of `client.address`,
+	 * `http.client_ip`, then on server spans the socket peer `net.peer.ip` /
+	 * `network.peer.address` / `net.sock.peer.addr`, which behind a proxy is
+	 * the proxy) is normalised and exported only as `client.address_hash`:
+	 * HMAC-SHA256 with your secret salt, 32 hex characters. The raw address
+	 * is still dropped. A hashed IP is still pseudonymous personal data in
+	 * some readings of privacy law; treat the salt as a secret and use the
+	 * same one in every service of the project (the Python adapter and the
+	 * ingester compute the same hash from the same salt).
+	 *
+	 * `true` reads the salt from AUTTER_CLIENT_IP_SALT; `{ salt }` passes it.
+	 * A salt shorter than 16 characters, or none, turns hashing off with a
+	 * warning (never an unsalted hash). Default: AUTTER_HASH_CLIENT_IP=true,
+	 * else off.
+	 */
+	hashClientIp?: HashClientIpOption;
 	/**
 	 * Verbose lifecycle logging to stderr: "exported N spans", flushes and
 	 * auto-flush activity — handy while wiring the SDK up. Also enabled by
@@ -1305,6 +1324,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		options.keepIdentifyingAttributes ?? keepIdentifyingFromEnv(process.env[KEEP_IDENTIFYING_ATTRIBUTES_ENV]),
 		options.dropAttributes ?? dropAttributesFromEnv(process.env[DROP_ATTRIBUTES_ENV]),
 	);
+	// Opt-in keyed hash of the client IP (client-ip.ts); null when off.
+	const ipHasher = clientIpHasher(options.hashClientIp);
 	const slowPerMinute = Number.isFinite(options.retainSlowTracesPerMinute)
 		? Math.max(0, options.retainSlowTracesPerMinute!) : DEFAULT_SLOW_TRACES_PER_MINUTE;
 	// One policy for every trace exporter: LLM spans keep prompt/completion
@@ -1324,6 +1345,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 						() => redactor,
 						queryPolicy,
 						identifying,
+						ipHasher,
 					),
 					llmContent,
 				),

@@ -655,6 +655,38 @@ stored only when the ingester keeps it too: set
 ([otlp-ingester README](../otlp-ingester/README.md#identifying-attributes)).
 `IDENTIFYING_ATTRIBUTE_KEYS` exports the list.
 
+**Hashed client IP (opt-in).** To count distinct clients without storing
+their addresses, turn on `hashClientIp` with a secret salt. The client's
+address is normalised (port, brackets and zone id removed, IPv6 lower-cased
+and compressed, `::ffff:1.2.3.4` read as `1.2.3.4`) and exported only as
+`client.address_hash`: HMAC-SHA256 under the salt, the first 32 hex
+characters. The raw address is still dropped.
+
+```ts
+initAutterServer({ ..., hashClientIp: { salt: process.env.AUTTER_CLIENT_IP_SALT } });
+// or AUTTER_HASH_CLIENT_IP=true and AUTTER_CLIENT_IP_SALT=<secret>
+```
+
+- The address is the first valid one of `client.address`, `http.client_ip`
+  (both filled from `X-Forwarded-For` / `Forwarded` behind a proxy), then,
+  on server spans only, the socket peer `net.peer.ip` /
+  `network.peer.address` / `net.sock.peer.addr`. Behind a proxy that does
+  not forward the client address, the peer is the proxy, so every request
+  hashes to the proxy. On client spans the peer is the server being called
+  and is never hashed.
+- The salt is a secret of the project: at least 16 characters (32 random
+  ones recommended), the same in every service and instance of the
+  project, so the same client gives the same hash everywhere. It is never
+  logged, exported or written to a span. Without a usable salt nothing is
+  hashed and one warning is printed: there is no unsalted fallback, since
+  every IPv4 address can be hashed in a few minutes.
+- The Python adapter and the ingester compute the same hash from the same
+  salt. A span that already has `client.address_hash` keeps it.
+- A hashed IP is still pseudonymous personal data in some readings of
+  privacy law (GDPR, for one): whoever holds the salt can test a known
+  address against it. That is why it is opt-in; keep the salt with your
+  other secrets and rotate it to unlink old hashes.
+
 ### One SDK per process, however many copies are loaded
 
 Bundlers can load this package more than once: Next.js bundles one copy

@@ -310,6 +310,15 @@ exceptions never leave the process. `init_tracing()` keeps them:
   the ingester drops them too unless it is given the same setting.
   `drop_attributes=["host.name"]` (or `AUTTER_DROP_ATTRIBUTES`) drops more
   keys.
+- Opt-in: `init_tracing(hash_client_ip=True, client_ip_salt=...)` (or
+  `AUTTER_HASH_CLIENT_IP=true` and `AUTTER_CLIENT_IP_SALT`) adds
+  `client.address_hash`, an HMAC-SHA256 of the client's address under your
+  secret salt (16+ characters), the same value `@autter/runtime-node` and
+  the ingester compute from the same salt. The address is `client.address`,
+  then `http.client_ip` (from `X-Forwarded-For`), then on server spans
+  `net.peer.ip`. Without a salt nothing is hashed and a warning is logged.
+  A hashed IP is still pseudonymous personal data in some readings of
+  privacy law; keep the salt secret.
 
 Every request is recorded as if sampled (instrumentations collect their
 attributes), but only sampled and failing traces are exported. To wire the

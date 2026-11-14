@@ -7,7 +7,14 @@ import {
 	type ResourceMetrics,
 } from "@opentelemetry/sdk-metrics";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
-import { makeIdentifyingAttributeFilter, type IdentifyingAttributeFilter } from "@autter/runtime-core";
+import { SpanKind, type Attributes } from "@opentelemetry/api";
+import {
+	CLIENT_IP_HASH_ATTRIBUTE,
+	clientIpOf,
+	makeIdentifyingAttributeFilter,
+	type IdentifyingAttributeFilter,
+} from "@autter/runtime-core";
+import type { ClientIpHasher } from "./client-ip.js";
 import type { Redactor } from "./redact.js";
 import { makeUrlQueryPolicy, type UrlQueryPolicy } from "./url-query.js";
 
@@ -32,7 +39,9 @@ import { makeUrlQueryPolicy, type UrlQueryPolicy } from "./url-query.js";
  * user agent, host.id and the host's addresses, the command line and its owner: see
  * runtime-core's identifying.ts) are dropped from span, event and link
  * attributes and from the resource, unless `keepIdentifyingAttributes`
- * keeps them (and `dropAttributes` adds keys to drop).
+ * keeps them (and `dropAttributes` adds keys to drop). With `hashClientIp`,
+ * a keyed hash of the client's address is added as `client.address_hash`
+ * (client-ip.ts) before the raw address is dropped.
  *
  * The span is re-wrapped, never mutated (spans are shared with other
  * processors). `redactAttributes: false` disables the scrubbing but neither
@@ -69,16 +78,28 @@ function redactResource<R extends ReadableSpan["resource"]>(
 const DEFAULT_QUERY_POLICY = makeUrlQueryPolicy();
 const DEFAULT_IDENTIFYING = makeIdentifyingAttributeFilter();
 
-/** Without scrubbing (`redactAttributes: false`): the query policy and the
- * identifying attribute drop only. */
+/**
+ * `attributes` plus `client.address_hash` from the span's raw attributes,
+ * when hashing is on, the span names a client address and carries no hash
+ * already (one set by the app or an earlier hop is left alone).
+ */
+function withClientIpHash(span: ReadableSpan, attributes: Attributes, hasher: ClientIpHasher | null): Attributes {
+	if (!hasher || span.attributes[CLIENT_IP_HASH_ATTRIBUTE] !== undefined) return attributes;
+	const ip = clientIpOf(span.attributes, span.kind === SpanKind.SERVER);
+	return ip ? { ...attributes, [CLIENT_IP_HASH_ATTRIBUTE]: hasher(ip) } : attributes;
+}
+
+/** Without scrubbing (`redactAttributes: false`): the query policy, the
+ * identifying attribute drop and the client IP hash only. */
 function stripQueries(
 	span: ReadableSpan,
 	redactor: Redactor,
 	query: UrlQueryPolicy,
 	identifying: IdentifyingAttributeFilter,
+	hasher: ClientIpHasher | null,
 ): ReadableSpan {
 	const name = query.name(span.name);
-	const attributes = query.attributes(identifying.apply(span.attributes));
+	const attributes = withClientIpHash(span, query.attributes(identifying.apply(span.attributes)), hasher);
 	let eventsChanged = false;
 	const events = span.events.map((event) => {
 		if (!event.attributes) return event;
@@ -139,17 +160,18 @@ export function redactSpan(
 	redactor: Redactor,
 	query: UrlQueryPolicy = DEFAULT_QUERY_POLICY,
 	identifying: IdentifyingAttributeFilter = DEFAULT_IDENTIFYING,
+	hasher: ClientIpHasher | null = null,
 ): ReadableSpan {
-	if (!redactor.enabled) return stripQueries(span, redactor, query, identifying);
+	if (!redactor.enabled) return stripQueries(span, redactor, query, identifying, hasher);
 	const status = span.status.message
 		? { ...span.status, message: redactor.text(span.status.message) }
 		: span.status;
 	// Drop identifying keys, scrub (a `user:pass@` URL is recognised whole),
-	// then cut queries.
+	// cut queries, then add the client IP hash (from the raw address).
 	return wrap(span, {
 		name: query.name(redactor.text(span.name)),
 		status,
-		attributes: query.attributes(redactor.exported(identifying.apply(span.attributes))),
+		attributes: withClientIpHash(span, query.attributes(redactor.exported(identifying.apply(span.attributes))), hasher),
 		links: span.links.map((link) =>
 			link.attributes ? { ...link, attributes: redactor.exported(identifying.apply(link.attributes)) } : link,
 		),
@@ -168,6 +190,7 @@ export class RedactingSpanExporter implements SpanExporter {
 		private readonly redactor: () => Redactor,
 		private readonly query: UrlQueryPolicy = DEFAULT_QUERY_POLICY,
 		private readonly identifying: IdentifyingAttributeFilter = DEFAULT_IDENTIFYING,
+		private readonly hasher: ClientIpHasher | null = null,
 	) {}
 
 	export(
@@ -179,7 +202,7 @@ export class RedactingSpanExporter implements SpanExporter {
 		let failed = 0;
 		for (const span of spans) {
 			try {
-				scrubbed.push(redactSpan(span, redactor, this.query, this.identifying));
+				scrubbed.push(redactSpan(span, redactor, this.query, this.identifying, this.hasher));
 			} catch {
 				// Fail closed: a span we could not scrub is not exported.
 				failed++;

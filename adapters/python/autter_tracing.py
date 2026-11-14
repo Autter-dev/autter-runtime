@@ -89,7 +89,14 @@ from opentelemetry.trace.status import Status
 
 try:  # imported as part of a package
     from .redact import (
+        CLIENT_IP_HASH_ATTRIBUTE,
+        CLIENT_IP_SALT_ENV,
+        CLIENT_IP_SALT_MIN_LENGTH,
         DROP_ATTRIBUTES_ENV,
+        HASH_CLIENT_IP_ENV,
+        client_ip_of,
+        hash_client_ip,
+        usable_client_ip_salt,
         KEEP_IDENTIFYING_ATTRIBUTES_ENV,
         drop_attributes_from_env,
         drop_identifying_attributes,
@@ -100,7 +107,14 @@ try:  # imported as part of a package
     )
 except ImportError:  # copied next to the app as a plain module
     from redact import (
+        CLIENT_IP_HASH_ATTRIBUTE,
+        CLIENT_IP_SALT_ENV,
+        CLIENT_IP_SALT_MIN_LENGTH,
         DROP_ATTRIBUTES_ENV,
+        HASH_CLIENT_IP_ENV,
+        client_ip_of,
+        hash_client_ip,
+        usable_client_ip_salt,
         KEEP_IDENTIFYING_ATTRIBUTES_ENV,
         drop_attributes_from_env,
         drop_identifying_attributes,
@@ -561,10 +575,41 @@ def _without_identifying_resource(resource: Resource, dropped: frozenset) -> Res
     return result
 
 
-def _redacted(span: ReadableSpan, redact: bool = True, dropped: Optional[frozenset] = None) -> ReadableSpan:
+def _client_ip_hasher(enabled: Optional[bool], salt: Optional[str]) -> Optional[Any]:
+    """The hasher for ``hash_client_ip`` (default ``AUTTER_HASH_CLIENT_IP``)
+    with ``salt`` (default ``AUTTER_CLIENT_IP_SALT``), or ``None`` when off.
+    On without a usable salt it stays off with one warning: never an
+    unsalted hash. The salt is never logged."""
+    if enabled is None:
+        enabled = _env_flag(HASH_CLIENT_IP_ENV)
+    if not enabled:
+        return None
+    usable = usable_client_ip_salt(salt if salt is not None else os.environ.get(CLIENT_IP_SALT_ENV))
+    if usable is None:
+        LOGGER.warning(
+            "[autter-runtime] hash_client_ip is on but no salt of at least %d characters is set "
+            "(client_ip_salt= or %s): client IP addresses are dropped and not hashed.",
+            CLIENT_IP_SALT_MIN_LENGTH,
+            CLIENT_IP_SALT_ENV,
+        )
+        return None
+    return lambda ip: hash_client_ip(usable, ip)
+
+
+def _redacted(
+    span: ReadableSpan, redact: bool = True, dropped: Optional[frozenset] = None, hasher: Optional[Any] = None
+) -> ReadableSpan:
     def clean(attributes: Any) -> Any:
         kept = drop_identifying_attributes(attributes, dropped)
         return redact_attributes(kept) if redact else kept
+
+    attributes = clean(span.attributes)
+    if hasher is not None and (span.attributes or {}).get(CLIENT_IP_HASH_ATTRIBUTE) is None:
+        # From the raw address, before it was dropped; a hash already on the
+        # span (set upstream) is left alone.
+        ip = client_ip_of(span.attributes, span.kind == SpanKind.SERVER)
+        if ip:
+            attributes = {**(attributes or {}), CLIENT_IP_HASH_ATTRIBUTE: hasher(ip)}
 
     events = [Event(event.name, clean(event.attributes), event.timestamp) for event in span.events]
     links = [Link(link.context, clean(link.attributes)) for link in span.links]
@@ -574,7 +619,7 @@ def _redacted(span: ReadableSpan, redact: bool = True, dropped: Optional[frozens
     return _CopiedSpan(
         span,
         name=redact_text(span.name) if redact else span.name,
-        attributes=clean(span.attributes),
+        attributes=attributes,
         events=events,
         links=links,
         status=status,
@@ -601,6 +646,12 @@ class RedactingSpanExporter(SpanExporter):
     (``True`` or a list of keys; default ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``)
     keeps them; ``drop_attributes`` (default ``AUTTER_DROP_ATTRIBUTES``, a
     comma-separated list) drops more keys, such as ``host.name``.
+
+    ``hash_client_ip`` (default ``AUTTER_HASH_CLIENT_IP``, off) adds
+    ``client.address_hash``, HMAC-SHA256 of the client's normalised address
+    under ``client_ip_salt`` (default ``AUTTER_CLIENT_IP_SALT``, at least 16
+    characters; without one nothing is hashed). Same hash as
+    @autter/runtime-node and the ingester for the same salt.
     """
 
     def __init__(
@@ -610,13 +661,16 @@ class RedactingSpanExporter(SpanExporter):
         redact: bool = True,
         keep_identifying_attributes: Any = None,
         drop_attributes: Optional[Sequence[str]] = None,
+        hash_client_ip: Optional[bool] = None,
+        client_ip_salt: Optional[str] = None,
     ):
         self._exporter = exporter
         self._redact = redact
         self._dropped = _keys_to_drop(keep_identifying_attributes, drop_attributes)
+        self._hasher = _client_ip_hasher(hash_client_ip, client_ip_salt)
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._exporter.export([_redacted(span, self._redact, self._dropped) for span in spans])
+        return self._exporter.export([_redacted(span, self._redact, self._dropped, self._hasher) for span in spans])
 
     def shutdown(self) -> None:
         self._exporter.shutdown()
@@ -663,6 +717,8 @@ def init_tracing(
     metric_exporter: Optional[MetricExporter] = None,
     keep_identifying_attributes: Any = None,
     drop_attributes: Optional[Sequence[str]] = None,
+    hash_client_ip: Optional[bool] = None,
+    client_ip_salt: Optional[str] = None,
 ) -> TracerProvider:
     """A TracerProvider that head-samples as configured and always exports
     errors, registered as the global provider.
@@ -684,6 +740,10 @@ def init_tracing(
       them too unless it is given the same setting.
     * ``drop_attributes`` (default ``AUTTER_DROP_ATTRIBUTES``): more keys to
       drop the same way, such as ``["host.name"]``.
+    * ``hash_client_ip`` (default ``AUTTER_HASH_CLIENT_IP``, off) and
+      ``client_ip_salt`` (default ``AUTTER_CLIENT_IP_SALT``): add
+      ``client.address_hash``, a keyed hash of the client's address (see
+      :class:`RedactingSpanExporter`).
     * ``count_requests`` (default: on, unless ``AUTTER_COUNT_REQUESTS=false``;
       ``False`` turns it off): count every HTTP request, sampled or not
       (:class:`CountRequests`), in a delta histogram sent through
@@ -747,7 +807,12 @@ def init_tracing(
 
         exporter = OTLPSpanExporter()
     exporter = RedactingSpanExporter(
-        exporter, redact=redact, keep_identifying_attributes=keep_identifying_attributes, drop_attributes=drop_attributes
+        exporter,
+        redact=redact,
+        keep_identifying_attributes=keep_identifying_attributes,
+        drop_attributes=drop_attributes,
+        hash_client_ip=hash_client_ip,
+        client_ip_salt=client_ip_salt,
     )
     provider = TracerProvider(
         sampler=RecordUnsampled(sampler if sampler is not None else head_sampler_from_env()),

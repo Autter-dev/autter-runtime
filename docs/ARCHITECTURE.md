@@ -936,6 +936,15 @@ list, kept in parity by `test-vectors/redaction.json` (`identifying`).
 the SDK and the ingester; `dropAttributes` / `AUTTER_DROP_ATTRIBUTES` drops
 more keys.
 
+Opt-in, `hashClientIp` / `AUTTER_HASH_CLIENT_IP` with a secret salt
+(`AUTTER_CLIENT_IP_SALT`, 16+ characters) adds `client.address_hash`:
+HMAC-SHA256 of the normalised client address, 32 hex characters, the same in
+the Node SDK, the Python adapter and the ingester (vectors:
+`test-vectors/redaction.json`, `clientIpHash`). The ingester hashes only
+records without a hash. No salt, no hash: there is no unsalted fallback.
+A hashed IP is still pseudonymous personal data in some readings of privacy
+law, which is why it is off by default.
+
 ## Sink webhook (v1)
 
 When `AUTTER_SINK_URL` is set, each ingest batch POSTs:

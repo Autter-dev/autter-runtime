@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-11-15
+
+Packages: `runtime-node` 1.15.0, `otlp-ingester` 1.17.0, `runtime-next` 1.10.0, and the Python adapter (`adapters/python`, copied, not published). Deploy the ingester first: from 1.17.0 it drops identifying attributes for every sender, including SDKs that predate this release.
+
 ### Tests and CI: Node 20 to 26, macOS and Windows
 
 - CI ran on one configuration (Node 22, Ubuntu) although the packages support Node >= 20. Every package's tests now run on Node 20, 22, 24 and 26 on Ubuntu, and `@autter/runtime-node`'s on macOS and Windows (Node 24). No package code changed: what failed elsewhere was the tests.

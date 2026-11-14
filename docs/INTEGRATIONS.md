@@ -326,9 +326,9 @@ counts read a hundredth of the traffic and error rates (release health, the
 post-deploy fix watch) read a hundred times too high (a true 2% reads as
 about 200%). A Python meter provider's default **cumulative**
 `http.server.duration` is not counted at all. `init_tracing()` counts every
-request once, by default. Copies of `autter_tracing.py` taken before that
-default (see the CHANGELOG) count only with `init_tracing(count_requests=True)`
-or `AUTTER_COUNT_REQUESTS=true`, so setting the variable keeps any copy right:
+request once, by default. Copies of `autter_tracing.py` from release 1.18.0 or
+earlier count only with `init_tracing(count_requests=True)` or
+`AUTTER_COUNT_REQUESTS=true`, so setting the variable keeps any copy right:
 
 ```bash
 AUTTER_COUNT_REQUESTS=true    # the default; needs opentelemetry-exporter-otlp-proto-http

@@ -61,8 +61,11 @@ await runtime.shutdown();
 `withRuntimeOperation(name, fn, attributes?, options?)` runs the callback in an always-recorded
 process span and emits one completed operation summary (`autter.operation.kind =
 "operation"`; request middleware emits `"request"` summaries). `options.from`
-continues work from a `runtimeContext.carrier()` (parent link, request id, and an
-OTel span link to the producer trace); `options.waitUntil` receives the log flush
+continues work handed over from another operation (parent link, request id, and an
+OTel span link to the producer trace): it takes a `runtimeContext.carrier()` or
+anything `runtimeContext.inject()` produced, see
+[Queues, workers and other processes](#queues-workers-and-other-processes);
+`options.waitUntil` receives the log flush
 promise once the summary is emitted. It returns the callback's
 result and rethrows its original error. An unhandled callback error records an
 exception in the trace; the log summary is related evidence, not a second issue.
@@ -86,8 +89,8 @@ the existing `autter.outcome` trace event, including the reporting call site.
 
 `createRuntimeLogger(attributes?)` creates a logger with `debug`, `info`, `warn`,
 and `error` methods. `runtimeLogger` is the default instance; `runtimeContext`
-exposes the same methods plus `set`, `outcome`, `id`, `requestId`, `fork` and
-`carrier` for the current operation from anywhere in its call tree.
+exposes the same methods plus `set`, `outcome`, `id`, `requestId`, `fork`,
+`carrier` and `inject` for the current operation from anywhere in its call tree.
 
 **Inline messages (1.5.0).** Inside an operation, `debug` and `info` messages are
 folded into its summary as `autter.operation.logs` — `{ t, level, message,
@@ -100,11 +103,72 @@ diagnostic context; use `captureException` for exception grouping or declare a
 failed operation outcome for business-failure grouping. Logs inherit the
 active operation ID, name, parent operation ID, and application attributes, plus
 the active OTel trace/span IDs. Concurrent operations keep separate contexts.
-Async context does not cross a queue or process by itself: put
-`runtimeContext.carrier()` in the job payload and pass it as
-`withRuntimeOperation(name, fn, {}, { from: payload.autter })` in the consumer.
+Async context does not cross a queue or process by itself; see
+[Queues, workers and other processes](#queues-workers-and-other-processes).
 `runtimeContext.fork(name, fn)` links a child to its parent even when the child
 outlives it; `runInBackground(name, fn)` does the same without awaiting.
+
+## Queues, workers and other processes
+
+The producer adds the current operation's carrier to what it hands over with
+`runtimeContext.inject(target, format?)`; the consumer passes what it received
+as `withRuntimeOperation(name, fn, {}, { from })`. The consumer's summary then
+has `autter.operation.parent_id` (the producer operation), the producer's
+`autter.request.id` and `autter.parent_trace_id`. The consumer's trace is
+linked to the producer's (an OTel span link), not continued: it gets its own
+trace id, and the request id is what joins the two.
+
+The carrier is `{ v: 1, op, req?, traceparent? }` under the key `autter`: ids
+only, never operation attributes, user context or baggage. `inject` returns a
+copy and never changes `target`. Outside an operation, or when `target` is not a
+plain object or `Headers`, it returns `target` unchanged. It never throws.
+`from` ignores anything missing or malformed, and a carrier string over 1,024
+characters; the operation then starts unlinked.
+
+| `format` | Where the carrier goes | Consumer passes as `from` |
+| --- | --- | --- |
+| `"payload"` (default) | `{ ...data, autter: carrier }` | the payload |
+| `"headers"` | header `autter: <carrier JSON>` (a `Headers` instance is always treated as headers) | the headers (any case) |
+| `"sqs"` | `{ autter: { DataType: "String", StringValue: <carrier JSON> } }` | `MessageAttributes`, or the whole message |
+
+BullMQ (the job payload):
+
+```ts
+import { runtimeContext, withRuntimeOperation } from "@autter/runtime-node";
+
+// Producer, inside a request or operation
+await queue.add("resize", runtimeContext.inject({ imageId }));
+
+// Worker
+new Worker("images", (job) =>
+  withRuntimeOperation(job.name, () => resize(job.data.imageId), {}, { from: job.data }),
+);
+```
+
+SQS (a message attribute, so the body stays yours):
+
+```ts
+// Producer
+await sqs.send(new SendMessageCommand({
+  QueueUrl,
+  MessageBody: JSON.stringify(order),
+  MessageAttributes: runtimeContext.inject({}, "sqs"),
+}));
+
+// Consumer: ReceiveMessage needs MessageAttributeNames: ["autter"] (or ["All"]).
+// A Lambda SQS record works as is (its messageAttributes are read too).
+for (const message of Messages ?? []) {
+  await withRuntimeOperation("fulfil-order", () => fulfil(JSON.parse(message.Body!)), {}, {
+    from: message,
+  });
+}
+```
+
+Celery (Python): no Autter helper is needed. OpenTelemetry's Celery
+instrumentation already continues the trace from the code that sends the task
+to the worker that runs it: call `CeleryInstrumentor().instrument()` in both
+processes, after `init_tracing()`, as in
+[`examples/python/celery`](../examples/python/celery).
 
 ## Collection and privacy
 

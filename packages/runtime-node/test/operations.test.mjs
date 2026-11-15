@@ -6,6 +6,7 @@ import {
 	withRuntimeOperation,
 	runtimeContext,
 	runInBackground,
+	withRuntimeRequest,
 	withLlmCall,
 	trackLlmCall,
 	captureException,
@@ -109,6 +110,103 @@ test("carrier round trip links parent, request id and the producer trace", async
 	} finally {
 		runtime.stop();
 		await c.close();
+	}
+});
+
+test("a consumer started from an injected job payload is linked to the producer: parent op, request id, trace link", async () => {
+	const c = await collector();
+	const sdk = initAutterServer({
+		service: "queue",
+		apiKey: "k",
+		endpoint: c.endpoint,
+		captureGlobalErrors: false,
+		autoFlush: false,
+		memoryMetrics: false,
+		logging: { console: false },
+	});
+	const runtime = captureRuntime();
+	try {
+		const queue = [];
+		let producerId;
+		let producerTrace;
+		// The producer: an operation inside a request enqueues a job (a queue serialises it as JSON).
+		const handler = withRuntimeRequest(async () => {
+			await withRuntimeOperation("enqueue", async () => {
+				producerId = runtimeContext.id;
+				const data = { imageId: 7 };
+				const job = runtimeContext.inject(data);
+				assert.deepEqual(data, { imageId: 7 }, "inject does not mutate the payload");
+				producerTrace = job.autter.traceparent.split("-")[1];
+				queue.push(JSON.stringify({ name: "resize", data: job }));
+			});
+			return new Response("queued", { status: 202 });
+		});
+		const response = await handler(new Request("http://localhost/images", { method: "POST", headers: { "x-request-id": "req-carrier-1" } }));
+		assert.equal(response.status, 202);
+
+		// The consumer, as a worker would run it: `{ from: job.data }`.
+		const job = JSON.parse(queue.shift());
+		let seen;
+		await withRuntimeOperation(job.name, async () => {
+			seen = { id: runtimeContext.id, requestId: runtimeContext.requestId };
+		}, {}, { from: job.data });
+		assert.equal(seen.requestId, "req-carrier-1", "the request id is carried into the consumer");
+		assert.notEqual(seen.id, producerId, "the consumer is its own operation");
+		expectOperation(runtime, "resize")
+			.toHaveRequestId("req-carrier-1")
+			.toHaveContext({
+				"autter.operation.parent_id": producerId,
+				"autter.parent_trace_id": producerTrace,
+			});
+
+		// Headers and SQS message attributes link the same way.
+		let headers;
+		let attributes;
+		await withRuntimeOperation("produce-more", async () => {
+			producerId = runtimeContext.id;
+			headers = runtimeContext.inject({ "content-type": "application/json" }, "headers");
+			attributes = runtimeContext.inject({}, "sqs");
+		});
+		await withRuntimeOperation("from-headers", async () => {}, {}, { from: { AUTTER: headers.autter } });
+		expectOperation(runtime, "from-headers").toHaveContext({ "autter.operation.parent_id": producerId });
+		await withRuntimeOperation("from-sqs", async () => {}, {}, { from: { Body: "{}", MessageAttributes: attributes } });
+		expectOperation(runtime, "from-sqs").toHaveContext({ "autter.operation.parent_id": producerId });
+
+		await sdk.shutdown();
+		const consumer = c.spans().find((s) => s.name === "resize");
+		assert.ok(consumer, "consumer span exported");
+		assert.equal(consumer.links[0].traceId, producerTrace, "linked to the producer trace");
+		assert.notEqual(consumer.traceId, producerTrace, "linked, not continued");
+	} finally {
+		runtime.stop();
+		await c.close();
+	}
+});
+
+test("runtimeContext.inject outside an operation returns the target unchanged; a bad `from` starts unlinked", async () => {
+	const runtime = captureRuntime();
+	try {
+		const data = { imageId: 7 };
+		assert.equal(runtimeContext.carrier(), undefined);
+		assert.equal(runtimeContext.inject(data), data);
+		assert.deepEqual(data, { imageId: 7 }, "no autter key added");
+		assert.equal(runtimeContext.inject(data, "headers"), data);
+		assert.equal(runtimeContext.inject(data, "sqs"), data);
+		assert.equal(runtimeContext.inject(undefined), undefined);
+		assert.equal(runtimeContext.inject("text"), "text");
+		// Inside an operation, a target that cannot hold a key comes back as it was.
+		await withRuntimeOperation("producer", async () => {
+			const list = [1];
+			assert.equal(runtimeContext.inject(list), list);
+			assert.equal(runtimeContext.inject(null), null);
+		});
+		for (const from of ["not json", { autter: "junk" }, { autter: { v: 2, op: "x" } }, { other: 1 }, []]) {
+			await withRuntimeOperation("unlinked", async () => {}, {}, { from });
+			const summary = expectOperation(runtime, "unlinked");
+			assert.equal(summary.attributes["autter.operation.parent_id"], undefined, `from ${JSON.stringify(from)}`);
+		}
+	} finally {
+		runtime.stop();
 	}
 });
 

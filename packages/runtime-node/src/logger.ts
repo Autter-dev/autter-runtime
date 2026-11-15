@@ -14,11 +14,12 @@ import {
 	createInlineLogState,
 	createRuntimeEvent,
 	errorAttributes,
+	extractCarrier,
+	injectCarrier,
 	isError,
 	formatTraceparent,
 	maxLevel,
 	mergeContext,
-	parseCarrier,
 	parseTraceparent,
 	stackAttributesLast,
 	toSpanAttributes,
@@ -118,8 +119,14 @@ export interface RuntimeOperation {
 }
 
 export interface RuntimeOperationOptions {
-	/** Carrier from `runtimeContext.carrier()` (object or JSON string): links parent op, request id and trace. */
-	from?: RuntimeCarrier | string | null;
+	/**
+	 * Where this work was handed over from: links parent op, request id and
+	 * trace. A carrier from `runtimeContext.carrier()` (object or JSON
+	 * string), or what `runtimeContext.inject()` produced: a job payload,
+	 * HTTP headers, SQS `MessageAttributes` or a whole SQS message. Anything
+	 * malformed is ignored (the operation starts unlinked).
+	 */
+	from?: RuntimeCarrier | string | object | null;
 	/** Receives the log flush promise once the operation completes (serverless `waitUntil`). */
 	waitUntil?: (promise: Promise<unknown>) => void;
 }
@@ -672,7 +679,7 @@ function startOperation<T>(
 	internal: StartInternal = {},
 ): Promise<T> {
 	const parent = internal.forkParent ?? local.getStore();
-	const carrier = options.from ? parseCarrier(options.from) : null;
+	const carrier = options.from ? (extractCarrier(options.from) ?? null) : null;
 	const traceparent = carrier?.traceparent
 		? parseTraceparent(carrier.traceparent)
 		: null;
@@ -866,6 +873,30 @@ export const runtimeContext = {
 			...(state.requestId ? { req: state.requestId } : {}),
 			...(traceparent ? { traceparent } : {}),
 		});
+	},
+	/**
+	 * A copy of `target` carrying the current operation's carrier, for work
+	 * handed to a queue or another process:
+	 *
+	 *   queue.add("resize", runtimeContext.inject(data));             // payload: data.autter
+	 *   fetch(url, { headers: runtimeContext.inject(headers, "headers") });
+	 *   MessageAttributes: runtimeContext.inject({}, "sqs"),
+	 *
+	 * The consumer passes what it received as `withRuntimeOperation(name, fn,
+	 * {}, { from })`. Only `{ v: 1, op, req?, traceparent? }` is added, never
+	 * attributes or user context. Never mutates `target`; outside an
+	 * operation (or when `target` cannot hold it) returns `target` itself,
+	 * unchanged. Never throws.
+	 */
+	// The format is spelled out (not `CarrierFormat`) so declarations of
+	// packages that re-export runtimeContext can name the type.
+	inject<T>(target: T, format: "payload" | "headers" | "sqs" = "payload"): T {
+		try {
+			const carrier = runtimeContext.carrier();
+			return carrier ? injectCarrier(target, carrier, format) : target;
+		} catch {
+			return target;
+		}
 	},
 };
 export type RuntimeContextHandle = typeof runtimeContext;

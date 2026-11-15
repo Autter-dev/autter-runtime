@@ -34,7 +34,7 @@ import {
 	unregisterFlushTargets,
 	type AutoFlushHandle,
 } from "./lifecycle.js";
-import { resolveEnvironment, resolveRelease } from "./deployment.js";
+import { detectCommit, resolveEnvironment, resolveRelease } from "./deployment.js";
 import { makeRedactor, type RedactOptions } from "./redact.js";
 import { markCaptured } from "./requests.js";
 import {
@@ -138,6 +138,8 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 	const endpoint = (options.endpoint ?? "https://otlp.autter.dev").replace(/\/$/, "");
 	const environment = resolveEnvironment(options.environment);
 	const release = resolveRelease(options.release);
+	// Environment variables only (deployment.ts), as initAutterServer.
+	const commit = detectCommit();
 	const redact = makeRedactor(options.redactAttributes ?? true);
 	const mode = options.exceptions ?? "auto";
 	debugLog(`initialising logger-only service=${options.service} endpoint=${endpoint}`);
@@ -226,6 +228,7 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 		service: options.service,
 		environment,
 		...(release ? { release } : {}),
+		...(commit ? { commit } : {}),
 		...(options.logging ? { options: options.logging } : {}),
 		redact,
 		reportOutcome: (name, message, attributes) => {

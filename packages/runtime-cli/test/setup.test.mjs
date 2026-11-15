@@ -441,3 +441,40 @@ test("edits keep comments where they were and the list's trailing-comma style", 
 		].join("\n"),
 	);
 });
+
+test("browser setups get the trace-propagation step in next, with the CORS note", () => {
+	const tracing = (result) => result.next.filter((item) => /traceparent/.test(item));
+
+	// @autter/runtime-browser: opt-in, so the step names the call and the file.
+	const browser = setup(viteProject()).result;
+	assert.equal(tracing(browser).length, 1);
+	const [step] = tracing(browser);
+	assert.match(step, /^Link browser errors to the server request behind them: call enableTracePropagation\(\) from @autter\/runtime-browser\/tracing after initAutterBrowser in src\/main\.ts/);
+	assert.match(step, /\nFor a cross-origin API you control, list it in tracePropagationTargets and allow the header in its CORS response: Access-Control-Allow-Headers: traceparent\.$/);
+	assert.equal(step.split("\n").length, 2, "two lines");
+
+	// Already wired: nothing to add.
+	const wired = viteProject({
+		"src/main.ts":
+			'import { initAutterBrowser } from "@autter/runtime-browser";\nimport { enableTracePropagation } from "@autter/runtime-browser/tracing";\ninitAutterBrowser({ endpoint: "/api/autter-runtime", service: "web" });\nenableTracePropagation();\n',
+	});
+	assert.deepEqual(tracing(setup(wired).result), []);
+
+	// @autter/runtime-next: on by default in the client entry; the step says so and how to turn it off.
+	const nextApp = tempDir({
+		"package.json": pkg({ scripts: { build: "next build" }, dependencies: { next: "15.5.0", "@autter/runtime-next": "^1.6.1", react: "^19.0.0" } }),
+		"next.config.mjs": "export default {};\n",
+		"app/autter.tsx": '"use client";\nimport { initAutterBrowser } from "@autter/runtime-next/client";\ninitAutterBrowser({ endpoint: "/api/autter-runtime", service: "web", release: process.env.NEXT_PUBLIC_AUTTER_RELEASE });\n',
+	});
+	const [nextStep, ...more] = tracing(setup(nextApp).result);
+	assert.deepEqual(more, []);
+	assert.match(nextStep, /initAutterBrowser from @autter\/runtime-next\/client sends on same-origin requests \(tracePropagation: false turns it off/);
+	assert.match(nextStep, /Access-Control-Allow-Headers: traceparent\.$/);
+
+	// No browser SDK: no step.
+	const server = tempDir({
+		"package.json": pkg({ scripts: { build: "vite build" }, devDependencies: { vite: "^6.0.0" } }),
+		"vite.config.ts": "export default {}\n",
+	});
+	assert.deepEqual(tracing(setup(server).result), []);
+});

@@ -118,7 +118,11 @@ own stack, `next.router_kind` `Pages Router` and `next.route_path` such as
 `registerAutter` passes options straight to `initAutterServer`, so the
 server SDK's defaults apply out of the box: exporters are flushed on
 process exit (`autoFlush`) and custom attributes are scrubbed for PII
-before export (`redactAttributes`). The same goes for `sampleRate` and
+before export (`redactAttributes`). With no `release`, the server reports
+`AUTTER_RELEASE`, else the running commit (`VERCEL_GIT_COMMIT_SHA` on
+Vercel, `GIT_SHA`, and the other variables in the `@autter/runtime-node`
+README) as the release and as `deployment.commit`; `release: false`
+reports none. The same goes for `sampleRate` and
 `ignoreErrors` (1.8.0); in the browser, `@autter/runtime-next/client`
 re-exports `withFilters` for `sampleRate`, `ignoreErrors` and `denyUrls`
 (`initAutterBrowser(withFilters({ endpoint, service, sampleRate: 0.5 }))`),
@@ -160,23 +164,39 @@ export function Providers({ children }: { children: React.ReactNode }) {
 React render errors don't reach `window.onerror` — the boundary reports
 them via `captureException` and then renders your fallback.
 
-**Linking browser errors to server traces** (opt-in): call
-`enableTracePropagation` from `@autter/runtime-next/client`, next to
-`initAutterBrowser` and before the app sends requests. Same-origin `fetch`
-and XHR requests (your route handlers and server actions) then carry a W3C
-`traceparent`, which `registerAutter` continues, so a browser error links to
-the server trace of the request behind it. Cross-origin APIs get one only
-when listed in `tracePropagationTargets`, and must allow the header in CORS.
-`disableTracePropagation()` turns it off; the rules are in
-`@autter/runtime-browser`'s README ("Trace propagation").
+**Linking browser errors to server traces** (on by default):
+`initAutterBrowser` from `@autter/runtime-next/client` adds a W3C
+`traceparent` header to same-origin `fetch` and XHR requests (your route
+handlers and server actions). `registerAutter` continues it, so a browser
+error links to the server trace and request summary of the request behind
+it. Cross-origin requests never get the header unless you list them in
+`tracePropagationTargets`, so third-party APIs see no new CORS preflight.
+The tracker's own `endpoint` never gets one.
 
 ```tsx
 "use client";
-import { initAutterBrowser, enableTracePropagation } from "@autter/runtime-next/client";
+import { initAutterBrowser } from "@autter/runtime-next/client";
 
-initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web-app" });
-enableTracePropagation({ tracePropagationTargets: ["https://api.example.com/"] });
+initAutterBrowser({
+  endpoint: "/api/autter-runtime",
+  service: "web-app",
+  // Optional: a cross-origin API you control. It must allow the header in
+  // CORS (Access-Control-Allow-Headers: traceparent).
+  tracePropagationTargets: ["https://api.example.com/"],
+});
 ```
+
+- `tracePropagation: false` turns it off. With `withFilters`, spread its
+  result: `initAutterBrowser({ ...withFilters({ endpoint, service, sampleRate: 0.5 }), tracePropagation: false })`.
+- `fetch` is traced through the tracker's network observer, so
+  `captureNetworkFailures: false` turns it off for `fetch` too (XHR keeps it).
+- `enableTracePropagation({ tracePropagationTargets })` and
+  `disableTracePropagation()` are still exported, to change it at runtime.
+  An app that already calls `enableTracePropagation` keeps working: called
+  before `initAutterBrowser`, its targets are kept.
+- Plain `@autter/runtime-browser` stays opt-in. The rules (which trace id
+  each event carries, sampling, existing headers) are in its README
+  ("Trace propagation").
 
 Also re-exported for convenience: `captureException`, `captureMessage`,
 `trackEvent`, `setUser`, `setContext`, `flush` (from

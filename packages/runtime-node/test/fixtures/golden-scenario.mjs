@@ -116,14 +116,16 @@ export function normalise(bodies, { stripAdditive = false } = {}) {
 	return bodies.map((body) => ({
 		resourceLogs: body.resourceLogs.map((resourceLog) => ({
 			...resourceLog,
-			// telemetry.distro.* (SDK identity for the compat check) is
-			// additive resource metadata, not part of the 1.4.0 record shape.
+			// telemetry.distro.* (SDK identity for the compat check) and
+			// deployment.commit (the running commit, when a commit variable
+			// such as CI's GITHUB_SHA is set) are additive resource metadata,
+			// not part of the 1.4.0 record shape.
 			...(stripAdditive && resourceLog.resource
 				? {
 						resource: {
 							...resourceLog.resource,
 							attributes: resourceLog.resource.attributes.filter(
-								(attribute) => !attribute.key.startsWith("telemetry.distro."),
+								(attribute) => !attribute.key.startsWith("telemetry.distro.") && attribute.key !== "deployment.commit",
 							),
 						},
 					}

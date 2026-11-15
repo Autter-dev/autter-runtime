@@ -166,6 +166,8 @@ export interface LoggerConfig {
 	service: string;
 	environment: string;
 	release?: string;
+	/** The running commit (deployment.ts), sent as the `deployment.commit` resource attribute. */
+	commit?: string;
 	/** SDK identity for the `telemetry.distro.*` resource attributes. */
 	distro?: { name: string; version: string };
 	options?: RuntimeLoggingOptions;
@@ -353,6 +355,7 @@ export function configureRuntimeLogger(next: LoggerConfig): void {
 				service: next.service,
 				environment: next.environment,
 				...(next.release ? { release: next.release } : {}),
+				...(next.commit ? { commit: next.commit } : {}),
 				...(next.distro ? { distro: next.distro } : {}),
 			});
 		} catch {

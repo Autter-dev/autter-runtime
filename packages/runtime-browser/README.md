@@ -193,7 +193,10 @@ the server continues the browser's trace and a browser failure links to the
 server spans and request summary of the same request.
 `@autter/runtime-node` (OpenTelemetry HTTP instrumentation) continues it with
 no setup. It is a separate import because it does not fit the main tracker's
-10 KB budget (about 0.6 KB more, brotlied):
+10 KB budget (about 0.6 KB more, brotlied), so in this package it stays
+opt-in: call `enableTracePropagation()` once, after `initAutterBrowser`.
+(`@autter/runtime-next/client` turns it on by default for same-origin
+requests; `tracePropagation: false` turns it off there.)
 
 ```ts
 import { initAutterBrowser } from "@autter/runtime-browser";
@@ -229,8 +232,9 @@ Rules:
 - `fetch` is traced through the tracker's network observer, so
   `captureNetworkFailures: false` turns fetch propagation off;
   `XMLHttpRequest` is wrapped by the module itself. Call
-  `enableTracePropagation()` before your app sends requests;
-  `disableTracePropagation()` turns it off at runtime.
+  `enableTracePropagation()` before your app sends requests (requests
+  started earlier carry no header); `disableTracePropagation()` turns it off
+  at runtime.
 
 **CORS for cross-origin APIs.** `traceparent` is not a CORS-safelisted
 header, so a listed cross-origin API gets a preflight (`OPTIONS`) and must

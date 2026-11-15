@@ -278,10 +278,17 @@ import { initAutterLogging } from "@autter/runtime-node";
 
 initAutterLogging({
   apiKey: process.env.AUTTER_RUNTIME_KEY,   // omit → console/file only
-  service: "api", release: process.env.GIT_SHA,
+  service: "api",                           // release: AUTTER_RELEASE, else the running commit
   logging: { enrich: [enrichDeployment()] },
 });
 ```
+
+`initAutterLogging` takes the same `environment` and `release` defaults as
+`initAutterServer`: `NODE_ENV`, else `test` under Jest, Vitest or
+`node --test`, else `production`; `AUTTER_RELEASE`, else the running commit
+(`release: false` or `AUTTER_DETECT_RELEASE=false` for none). The commit is
+also sent as `deployment.commit` on every log record's resource, so request
+summaries and errors promoted from log records carry it.
 
 Requests, operations, `runtimeContext`, coded errors, sinks and enrichers all
 work; NodeSDK is never started (only `@opentelemetry/api` is read). Exceptions
@@ -307,7 +314,7 @@ logging: { enrich: [enrichUserAgent(), enrichRequestSize(), enrichEdgeGeo(), enr
 | `enrichUserAgent()` | `user_agent.browser` ("Chrome 120"), `user_agent.os`, `user_agent.device` (desktop/mobile/tablet/bot), `user_agent.bot` — same mapping as runtime-browser; never the raw string |
 | `enrichRequestSize()` | `http.request.body.size`, `http.response.body.size` from Content-Length |
 | `enrichEdgeGeo()` | `geo.country.iso_code` from Cloudflare/Vercel/CloudFront/Fastly headers — country only |
-| `enrichDeployment()` | `deployment.region`, `deployment.commit` from common platform env vars |
+| `enrichDeployment()` | `deployment.region` from common platform env vars; `deployment.commit` from the commit variables `initAutterServer` reads (`AUTTER_COMMIT`, `GITHUB_SHA`, `VERCEL_GIT_COMMIT_SHA`, `GIT_SHA`, …), only when the value is 7 to 40 hex characters |
 
 ## Sinks and local files
 

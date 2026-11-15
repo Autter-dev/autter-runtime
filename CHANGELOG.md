@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.20.1] - 2026-11-15
+
+Packages: `runtime-browser` 1.8.2, `runtime-node` 1.16.1, `runtime-edge` 1.4.3, `runtime-next` 1.11.1, `runtime-cli` 1.4.1, `otlp-ingester` 1.18.1. No code changes from 1.20.0.
+
+- Releases are published to npm with trusted publishing instead of a stored npm token, so a publish can no longer fail because a token expired. Every package is republished once so npm records the new publisher for each.
+
 ## [1.20.0] - 2026-11-15
 
 Packages: `runtime-node` 1.16.0, `runtime-next` 1.11.0 (now requires `runtime-node` 1.16.0 or later), `runtime-cli` 1.4.0, `otlp-ingester` 1.18.0, and the Python adapter (`adapters/python`, copied, not published). `runtime-core` (private, bundled into the others) changes too. `runtime-browser` and `runtime-edge` do not: their built `dist` is byte-identical to 1.19.0 (only `runtime-browser`'s README wording changed).

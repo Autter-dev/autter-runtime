@@ -10,6 +10,7 @@ import {
 	injectDir,
 	isInAppSource,
 	MAX_MAP_CHARS,
+	RELEASE_ENV_VARS,
 	resolveEndpoint,
 	resolveRelease,
 	servedFilename,
@@ -239,16 +240,29 @@ test("--delete-after-upload removes uploaded maps and their sourceMappingURL com
 	assert.match(read(dir, "app.js"), /\/\/# debugId=/);
 });
 
-test("release comes from --release, then CI variables, then git", () => {
-	assert.deepEqual(resolveRelease("v1.2.3", { GITHUB_SHA: "aaa" }), { release: "v1.2.3", source: "--release" });
+test("release comes from --release, then AUTTER_RELEASE, then CI variables (any value, as before), then other commit variables, then git", () => {
+	const a = "aaaaaaa", c = "cccccccccccccccccccccccccccccccccccccccc", d = "ddddddd";
+	assert.deepEqual(resolveRelease("v1.2.3", { GITHUB_SHA: "aaa", AUTTER_RELEASE: "r9" }), { release: "v1.2.3", source: "--release" });
+	assert.deepEqual(resolveRelease(undefined, { GITHUB_SHA: "aaa", AUTTER_RELEASE: "r9" }), { release: "r9", source: "AUTTER_RELEASE" });
+	// Unchanged for existing builds: the four CI variables, in their order, any value.
 	assert.deepEqual(resolveRelease(undefined, { GITHUB_SHA: "aaa", GIT_SHA: "ddd" }), { release: "aaa", source: "GITHUB_SHA" });
+	assert.deepEqual(resolveRelease(undefined, { GITHUB_SHA: a, GIT_SHA: d }), { release: a, source: "GITHUB_SHA" }, "both set and different: GITHUB_SHA wins, as before");
 	assert.deepEqual(resolveRelease(undefined, { VERCEL_GIT_COMMIT_SHA: "bbb", GIT_SHA: "ddd" }), { release: "bbb", source: "VERCEL_GIT_COMMIT_SHA" });
 	assert.deepEqual(resolveRelease(undefined, { CF_PAGES_COMMIT_SHA: "ccc", GIT_SHA: "ddd" }), { release: "ccc", source: "CF_PAGES_COMMIT_SHA" });
 	assert.deepEqual(resolveRelease(undefined, { GIT_SHA: "ddd" }), { release: "ddd", source: "GIT_SHA" });
+	assert.deepEqual(resolveRelease(undefined, { GIT_SHA: "v1.2.3" }), { release: "v1.2.3", source: "GIT_SHA" }, "a name, not a commit: still the release, as before");
+	assert.deepEqual(resolveRelease(undefined, { GIT_SHA: "v1.2.3", AUTTER_COMMIT: c }), { release: "v1.2.3", source: "GIT_SHA" });
+	assert.deepEqual([...RELEASE_ENV_VARS], ["GITHUB_SHA", "VERCEL_GIT_COMMIT_SHA", "CF_PAGES_COMMIT_SHA", "GIT_SHA"]);
+	// Then the SDK's other commit variables, in its order: only a commit counts.
+	assert.deepEqual(resolveRelease(undefined, { HEROKU_SLUG_COMMIT: c, AUTTER_COMMIT: d }), { release: d, source: "AUTTER_COMMIT" });
+	assert.deepEqual(resolveRelease(undefined, { SOURCE_VERSION: "refs/heads/main", RENDER_GIT_COMMIT: c }), { release: c, source: "RENDER_GIT_COMMIT" });
 	const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 	assert.deepEqual(resolveRelease(undefined, {}), { release: head, source: "git" });
+	assert.deepEqual(resolveRelease(undefined, { SOURCE_VERSION: "pr/12" }), { release: head, source: "git" });
 	assert.throws(() => resolveRelease(undefined, {}, tempDir()), /no release/);
 	assert.throws(() => resolveRelease("my app@1.0", {}), /not valid/);
+	assert.throws(() => resolveRelease(undefined, { AUTTER_RELEASE: "my app@1.0" }), /from AUTTER_RELEASE\) is not valid/);
+	assert.throws(() => resolveRelease(undefined, { GIT_SHA: "my app@1.0" }), /from GIT_SHA\) is not valid/);
 });
 
 test("served filenames and endpoints are normalised", () => {

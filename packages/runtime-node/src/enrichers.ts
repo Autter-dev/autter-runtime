@@ -1,4 +1,5 @@
 import { parseUserAgent } from "@autter/runtime-core";
+import { detectCommit } from "./deployment.js";
 import type { RuntimeEnricher } from "./logger.js";
 
 /**
@@ -80,29 +81,20 @@ const REGION_VARS = [
 	"RENDER_REGION",
 	"AZURE_REGION",
 ];
-const COMMIT_VARS = [
-	"AUTTER_COMMIT",
-	"GIT_SHA",
-	"GIT_COMMIT",
-	"COMMIT_SHA",
-	"SOURCE_COMMIT",
-	"VERCEL_GIT_COMMIT_SHA",
-	"GITHUB_SHA",
-	"RENDER_GIT_COMMIT",
-	"RAILWAY_GIT_COMMIT_SHA",
-	"CF_PAGES_COMMIT_SHA",
-	"HEROKU_SLUG_COMMIT",
-	"SOURCE_VERSION",
-];
 
-/** `deployment.region` and `deployment.commit` from common platform environment variables. */
+/**
+ * `deployment.region` and `deployment.commit` from common platform
+ * environment variables. The commit is read from COMMIT_ENV_VARS
+ * (deployment.ts), the same list initAutterServer uses, and only a 7-40
+ * character hexadecimal value counts.
+ */
 export function enrichDeployment(
 	env: Record<string, string | undefined> = process.env,
 ): RuntimeEnricher {
 	const pick = (names: string[]) =>
 		names.map((name) => env[name]?.trim()).find((value) => value);
 	const region = pick(REGION_VARS)?.slice(0, 64);
-	const commit = pick(COMMIT_VARS)?.slice(0, 64);
+	const commit = detectCommit(env);
 	return (event) => {
 		if (region) event.attributes["deployment.region"] = region;
 		if (commit) event.attributes["deployment.commit"] = commit;

@@ -7,7 +7,7 @@ import { uploadDir, type UploadSummary } from "./upload.js";
 
 /** Options shared by the Vite/Rollup, webpack and Next.js integrations. */
 export interface AutterSourceMapsOptions {
-	/** Default: GITHUB_SHA, VERCEL_GIT_COMMIT_SHA, CF_PAGES_COMMIT_SHA, GIT_SHA, then `git rev-parse HEAD`. */
+	/** Default: AUTTER_RELEASE, else GITHUB_SHA, VERCEL_GIT_COMMIT_SHA, CF_PAGES_COMMIT_SHA, GIT_SHA (any value), else a commit in @autter/runtime-node's other commit variables (AUTTER_COMMIT, GIT_COMMIT, ...), else `git rev-parse HEAD`. */
 	release?: string;
 	/** Where the build output is served from. Default: the bundler's public
 	 * path (Vite `base`, webpack `output.publicPath`, Next `/_next/`), else "/". */

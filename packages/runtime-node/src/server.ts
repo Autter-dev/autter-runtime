@@ -66,6 +66,7 @@ import { authHeaders, resolveIngestKey, warnKeyKind, warnMissingKey } from "./in
 import { IngestMetricExporter, IngestSpanExporter } from "./ingest-exporters.js";
 import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
+import { detectCommit, resolveEnvironment, resolveRelease } from "./deployment.js";
 import {
 	configureExportErrors,
 	exportErrorMark,
@@ -235,9 +236,20 @@ export interface AutterServerOptions {
 	service: string;
 	/** Stable for this process lifetime; use an ECS task/container ID or pod UID plus restart count to correlate platform events. */
 	instanceId?: string;
+	/**
+	 * Default: NODE_ENV; else `test` when a test runner is detected (Jest,
+	 * Vitest, `node --test`); else `production`.
+	 */
 	environment?: string;
-	/** e.g. a git SHA. Maps to service.version / release. */
-	release?: string;
+	/**
+	 * e.g. a git SHA. Maps to service.version / release. Default:
+	 * AUTTER_RELEASE, else the commit read from the platform's commit
+	 * variable (GIT_SHA, VERCEL_GIT_COMMIT_SHA, GITHUB_SHA, ...: see
+	 * COMMIT_ENV_VARS in deployment.ts). `false`, or AUTTER_DETECT_RELEASE=false,
+	 * reports no release. The detected commit is also sent as
+	 * `deployment.commit` whatever the release.
+	 */
+	release?: string | false;
 	/** Head-sampling ratio for regular traces. Default 0.01 (1%). */
 	traceSampleRate?: number;
 	/**
@@ -1352,12 +1364,15 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			),
 			"traces",
 		);
-	const environment = options.environment ?? process.env.NODE_ENV ?? "production";
+	const environment = resolveEnvironment(options.environment);
+	// Environment variables only: the SDK never runs git (deployment.ts).
+	const commit = detectCommit();
+	const release = resolveRelease(options.release);
 
 	// Debug mode: option OR AUTTER_DEBUG env (lifecycle seeds itself from the
 	// env at import time — never clobber an env-enabled session here).
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
-	debugLog(`initialising service=${options.service} endpoint=${endpoint}`);
+	debugLog(`initialising service=${options.service} endpoint=${endpoint} environment=${environment} release=${release ?? "none"}`);
 	if (apiKey === null) warnMissingKey("server", options.service);
 	else warnKeyKind(apiKey);
 	S.redactor = redactor;
@@ -1368,7 +1383,8 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const resource = resourceFromAttributes({
 		[ATTR_SERVICE_NAME]: options.service,
 		"service.instance.id": (options.instanceId || process.env.AUTTER_RUNTIME_INSTANCE_ID || randomUUID()).slice(0, 128),
-		...(options.release ? { [ATTR_SERVICE_VERSION]: options.release } : {}),
+		...(release ? { [ATTR_SERVICE_VERSION]: release } : {}),
+		...(commit ? { "deployment.commit": commit } : {}),
 		"deployment.environment": environment,
 		// OTel semconv for SDK distributions: the ingester records which
 		// Autter SDK version each service runs (version compatibility checks).
@@ -1711,7 +1727,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	}
 
 	configureRuntimeLogger({ endpoint, apiKey: apiKey ?? "", service: options.service, environment, distro,
-		release: options.release, options: options.logging, redact: redactor,
+		release, options: options.logging, redact: redactor,
 		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, redactor(attributes), links),
 		reportOutcome,
 	});

@@ -1,0 +1,411 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "telemetry.sdk.language",
+      "value": {
+       "stringValue": "python"
+      }
+     },
+     {
+      "key": "telemetry.sdk.name",
+      "value": {
+       "stringValue": "opentelemetry"
+      }
+     },
+     {
+      "key": "telemetry.sdk.version",
+      "value": {
+       "stringValue": "1.45.1"
+      }
+     },
+     {
+      "key": "service.instance.id",
+      "value": {
+       "stringValue": "cdfc7fa7-f26a-412c-a20e-9acdcdf13181"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "9c1e4f2a7b3d"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "shop-fastapi"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "opentelemetry.instrumentation.fastapi",
+      "version": "0.66b1"
+     },
+     "spans": [
+      {
+       "traceId": "550d1dd9795574c50e2b4652ef6cf997",
+       "spanId": "50ff69fca9ae13bc",
+       "parentSpanId": "75c53a052549811b",
+       "name": "POST /carts/{cart_id}/checkout http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1794719121763844000",
+       "endTimeUnixNano": "1794719121763862000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.start"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "500"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      },
+      {
+       "traceId": "550d1dd9795574c50e2b4652ef6cf997",
+       "spanId": "e7f739e307d69564",
+       "parentSpanId": "75c53a052549811b",
+       "name": "POST /carts/{cart_id}/checkout http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1794719121763928000",
+       "endTimeUnixNano": "1794719121763934000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.body"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {},
+       "flags": 256
+      },
+      {
+       "traceId": "550d1dd9795574c50e2b4652ef6cf997",
+       "spanId": "75c53a052549811b",
+       "name": "POST /carts/{cart_id}/checkout",
+       "kind": "SPAN_KIND_SERVER",
+       "startTimeUnixNano": "1794719121760429000",
+       "endTimeUnixNano": "1794719121764413000",
+       "attributes": [
+        {
+         "key": "http.scheme",
+         "value": {
+          "stringValue": "http"
+         }
+        },
+        {
+         "key": "http.host",
+         "value": {
+          "stringValue": "testserver"
+         }
+        },
+        {
+         "key": "net.host.port",
+         "value": {
+          "intValue": "80"
+         }
+        },
+        {
+         "key": "http.flavor",
+         "value": {
+          "stringValue": "1.1"
+         }
+        },
+        {
+         "key": "http.target",
+         "value": {
+          "stringValue": "/carts/12/checkout"
+         }
+        },
+        {
+         "key": "http.url",
+         "value": {
+          "stringValue": "http://testserver/carts/12/checkout"
+         }
+        },
+        {
+         "key": "http.method",
+         "value": {
+          "stringValue": "POST"
+         }
+        },
+        {
+         "key": "http.server_name",
+         "value": {
+          "stringValue": "testserver"
+         }
+        },
+        {
+         "key": "http.user_agent",
+         "value": {
+          "stringValue": "testclient"
+         }
+        },
+        {
+         "key": "http.route",
+         "value": {
+          "stringValue": "/carts/{cart_id}/checkout"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "500"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1794719121763792000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "inventory.OutOfStock"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "sku-1: 2 requested, 0 left"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/venv/lib/python3.14/site-packages/opentelemetry/instrumentation/fastapi/__init__.py\", line 360, in __call__\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/telemetry/_asgi.py\", line 151, in __call__\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/middleware/exceptions.py\", line 63, in __call__\n    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 53, in wrapped_app\n    raise exc\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 42, in wrapped_app\n    await app(scope, receive, sender)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/middleware/asyncexitstack.py\", line 18, in __call__\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/routing.py\", line 678, in __call__\n    await self.middleware_stack(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 2811, in app\n    await route.handle(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 1330, in handle\n    await super().handle(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/routing.py\", line 284, in handle\n    await self.app(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 166, in app\n    await wrap_app_handling_exceptions(app, request)(scope, receive, send)\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 53, in wrapped_app\n    raise exc\n  File \"/srv/venv/lib/python3.14/site-packages/starlette/_exception_handler.py\", line 42, in wrapped_app\n    await app(scope, receive, sender)\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 152, in app\n    response = await f(request)\n               ^^^^^^^^^^^^^^^^\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 745, in app\n    raw_response = await run_endpoint_function(\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n    )\n    ^\n  File \"/srv/venv/lib/python3.14/site-packages/fastapi/routing.py\", line 372, in run_endpoint_function\n    return await dependant.call(**values)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/srv/app/app.py\", line 36, in checkout\n    reserve(\"sku-1\", 2)  # frame: checkout\n    ~~~~~~~^^^^^^^^^^^^\n  File \"/srv/app/inventory.py\", line 17, in reserve\n    raise OutOfStock(f\"{sku}: {quantity} requested, {STOCK.get(sku, 0)} left\")  # frame: reserve\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ninventory.OutOfStock: sku-1: 2 requested, 0 left\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          }
+         ]
+        }
+       ],
+       "status": {
+        "code": "STATUS_CODE_ERROR"
+       },
+       "flags": 256
+      },
+      {
+       "traceId": "30d47486f4f685da0daa8d24539c418e",
+       "spanId": "d8cff7b6824b78db",
+       "parentSpanId": "b882fc6e690bc358",
+       "name": "GET /carts/{cart_id}/quote http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1794719121766313000",
+       "endTimeUnixNano": "1794719121766324000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.start"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "200"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {},
+       "flags": 256
+      },
+      {
+       "traceId": "30d47486f4f685da0daa8d24539c418e",
+       "spanId": "d12781cf29bfb254",
+       "parentSpanId": "b882fc6e690bc358",
+       "name": "GET /carts/{cart_id}/quote http send",
+       "kind": "SPAN_KIND_INTERNAL",
+       "startTimeUnixNano": "1794719121766358000",
+       "endTimeUnixNano": "1794719121766362000",
+       "attributes": [
+        {
+         "key": "asgi.event.type",
+         "value": {
+          "stringValue": "http.response.body"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "status": {},
+       "flags": 256
+      },
+      {
+       "traceId": "30d47486f4f685da0daa8d24539c418e",
+       "spanId": "b882fc6e690bc358",
+       "name": "GET /carts/{cart_id}/quote",
+       "kind": "SPAN_KIND_SERVER",
+       "startTimeUnixNano": "1794719121765657000",
+       "endTimeUnixNano": "1794719121766594000",
+       "attributes": [
+        {
+         "key": "http.scheme",
+         "value": {
+          "stringValue": "http"
+         }
+        },
+        {
+         "key": "http.host",
+         "value": {
+          "stringValue": "testserver"
+         }
+        },
+        {
+         "key": "net.host.port",
+         "value": {
+          "intValue": "80"
+         }
+        },
+        {
+         "key": "http.flavor",
+         "value": {
+          "stringValue": "1.1"
+         }
+        },
+        {
+         "key": "http.target",
+         "value": {
+          "stringValue": "/carts/12/quote"
+         }
+        },
+        {
+         "key": "http.url",
+         "value": {
+          "stringValue": "http://testserver/carts/12/quote"
+         }
+        },
+        {
+         "key": "http.method",
+         "value": {
+          "stringValue": "GET"
+         }
+        },
+        {
+         "key": "http.server_name",
+         "value": {
+          "stringValue": "testserver"
+         }
+        },
+        {
+         "key": "http.user_agent",
+         "value": {
+          "stringValue": "testclient"
+         }
+        },
+        {
+         "key": "http.route",
+         "value": {
+          "stringValue": "/carts/{cart_id}/quote"
+         }
+        },
+        {
+         "key": "http.status_code",
+         "value": {
+          "intValue": "200"
+         }
+        },
+        {
+         "key": "autter.tail_retained",
+         "value": {
+          "boolValue": true
+         }
+        }
+       ],
+       "events": [
+        {
+         "timeUnixNano": "1794719121766204000",
+         "name": "exception",
+         "attributes": [
+          {
+           "key": "exception.type",
+           "value": {
+            "stringValue": "inventory.PricingTimeout"
+           }
+          },
+          {
+           "key": "exception.message",
+           "value": {
+            "stringValue": "pricing for cart 12 timed out after 2.5s"
+           }
+          },
+          {
+           "key": "exception.stacktrace",
+           "value": {
+            "stringValue": "Traceback (most recent call last):\n  File \"/srv/app/app.py\", line 43, in quote\n    return {\"cart\": cart_id, \"total\": price(cart_id)}  # frame: quote\n                                      ~~~~~^^^^^^^^^\n  File \"/srv/app/inventory.py\", line 21, in price\n    raise PricingTimeout(f\"pricing for cart {cart_id} timed out after 2.5s\")  # frame: price\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ninventory.PricingTimeout: pricing for cart 12 timed out after 2.5s\n"
+           }
+          },
+          {
+           "key": "exception.escaped",
+           "value": {
+            "stringValue": "False"
+           }
+          },
+          {
+           "key": "autter.handled",
+           "value": {
+            "boolValue": true
+           }
+          }
+         ]
+        }
+       ],
+       "status": {},
+       "flags": 256
+      }
+     ],
+     "schemaUrl": "https://opentelemetry.io/schemas/1.11.0"
+    }
+   ]
+  }
+ ]
+}

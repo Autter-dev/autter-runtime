@@ -8,8 +8,9 @@ import {
 import { declaredLink, liftErrorFields } from "./error-fields.js";
 import { fingerprintOverrideOf } from "./fingerprint-override.js";
 import { normalizeRoute } from "./fingerprint.js";
+import { isTestClientRequest } from "./identifying.js";
 import { DEBUG_IDS_ATTRIBUTE, serverDebugIds, withoutDebugIdsAttribute } from "./source-maps.js";
-import type { RuntimeOccurrenceInput } from "./types.js";
+import { commitOf, withCommitAttribute, type RuntimeOccurrenceInput } from "./types.js";
 
 export interface RuntimeLogRecord {
 	id: string;
@@ -192,10 +193,14 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 				if (typeof attributes.path === "string")
 					attributes.path = normalizeRoute(attributes.path.split(/[?#]/)[0]!);
 				const service = String(info["service.name"] ?? "unknown").slice(0, 200);
+				const explicitEnvironment = info["deployment.environment.name"] ?? info["deployment.environment"];
+				// A record of a test client's request, by the record's own
+				// attributes (the exact host `testserver`, or the marker), is
+				// stored under `test`, as its trace is; only when the resource
+				// names no environment, which is never rewritten.
 				const environment = String(
-					info["deployment.environment.name"] ??
-						info["deployment.environment"] ??
-						"production",
+					explicitEnvironment ??
+						(isTestClientRequest((key) => attrs[key]) ? "test" : "production"),
 				).slice(0, 100);
 				const release = String(info["service.version"] ?? "").slice(0, 200);
 				const declared = liftErrorFields(attributes);
@@ -249,7 +254,7 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 								statusCode: statusCode || null,
 								traceId: traceId || null,
 								sessionId: null,
-								attributes,
+								...promotedCommit(attributes, attrs, info),
 								occurredAt,
 								...declared,
 								...fingerprintOverrideOf(attributes["autter.fingerprint"]),
@@ -321,6 +326,20 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 		}
 	}
 	return rows;
+}
+
+/** A promoted occurrence's attributes, with the running commit (record
+ * attributes first, then the resource; 7–40 hex) as `commit` and, when the
+ * attributes carry none, as `deployment.commit`. The record's own
+ * attributes are left as they are. */
+function promotedCommit(
+	attributes: Record<string, unknown>,
+	attrs: Record<string, unknown>,
+	info: Record<string, unknown>,
+): { attributes: Record<string, unknown>; commit?: string } {
+	const commit = commitOf((key) => attrs[key], (key) => info[key]);
+	if (!commit) return { attributes };
+	return { attributes: withCommitAttribute(attributes, commit) ?? attributes, commit };
 }
 
 function hasException(attributes: Record<string, unknown>): boolean {

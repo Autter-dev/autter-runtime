@@ -340,3 +340,48 @@ test("one error recorded on two spans reaches the sink once, with the same id wh
 	assert.equal(requests, 0);
 	assert.equal(errors, 0);
 });
+
+test("the running commit and test-client traffic reach the sink: hex SHA only, environment `test` only without an explicit one", async () => {
+	const now = String(Date.now() * 1_000_000);
+	const str = (key: string, value: string) => ({ key, value: { stringValue: value } });
+	const process = (n: number, resource: Array<ReturnType<typeof str>>, span: Array<ReturnType<typeof str>>, event: Array<ReturnType<typeof str>> = []) => ({
+		resource: { attributes: [str("service.name", "shop"), ...resource] },
+		scopeSpans: [{
+			spans: [{
+				traceId: String(n).repeat(32), spanId: String(n).repeat(16), name: "GET /orders", kind: 2,
+				startTimeUnixNano: now, endTimeUnixNano: now,
+				attributes: [str("http.route", "/orders"), ...span],
+				events: [{ name: "exception", timeUnixNano: now, attributes: [str("exception.type", `Error${n}`), str("exception.message", `boom ${n}`), ...event] }],
+			}],
+		}],
+	});
+	const sha = "9C1E4F2A7B3D9C1E4F2A7B3D9C1E4F2A7B3D9C1E";
+	const res = await fetch(`${ingestUrl}/v1/traces`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: "Bearer test-key" },
+		body: JSON.stringify({
+			resourceSpans: [
+				process(1, [str("deployment.commit", sha), str("deployment.environment", "production")], []),
+				process(2, [str("deployment.commit", sha)], [], [str("deployment.commit", "abcdef1")]),
+				process(3, [str("deployment.commit", "https://github.com/acme/shop"), str("vcs.repository.url.full", "https://github.com/acme/shop")], []),
+				process(4, [], [str("http.host", "testserver")]),
+				process(5, [str("deployment.environment", "staging")], [str("http.host", "testserver")]),
+				process(6, [], [str("http.host", "testserver.example.com"), str("user_agent.original", "Mozilla/5.0 (testclient)")]),
+			],
+		}),
+	});
+	assert.equal(res.status, 200);
+	const batch = await nextSinkBatch();
+	const byType = Object.fromEntries(batch.occurrences.map((o: Record<string, any>) => [o.errorType, o]));
+	assert.equal(byType.Error1.commit, sha.toLowerCase());
+	assert.equal(byType.Error1.attributes["deployment.commit"], sha.toLowerCase());
+	assert.equal(byType.Error2.commit, "abcdef1", "the event's commit wins");
+	for (const name of ["Error3", "Error4", "Error5", "Error6"]) assert.equal("commit" in byType[name], false, name);
+	assert.equal(JSON.stringify(byType.Error3).includes("github.com"), false, "nothing else of the resource is forwarded");
+	assert.deepEqual(
+		["Error1", "Error2", "Error3", "Error4", "Error5", "Error6"].map((name) => byType[name].environment),
+		["production", "production", "production", "test", "staging", "production"],
+	);
+	assert.equal(byType.Error4.attributes["autter.test_client"], true);
+	assert.equal(byType.Error6.attributes["user_agent.original"], undefined, "the user agent is dropped");
+});

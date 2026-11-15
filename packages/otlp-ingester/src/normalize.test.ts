@@ -237,3 +237,155 @@ test("warning occurrences outside a request count nothing", () => {
 
 	assert.deepEqual(metricPoints, []);
 });
+
+// ── Test-client traffic and the running commit ───────────────────────────
+
+const NOW_NANOS = NANOS;
+const kv = (attributes: Record<string, string | boolean>) =>
+	Object.entries(attributes).map(([key, value]) => ({
+		key,
+		value: typeof value === "boolean" ? { boolValue: value } : { stringValue: value },
+	}));
+
+/** One process: a request per entry of `requests`, each a server span with
+ * an exception event and an internal child span, in its own trace. */
+function processExport(
+	resource: Record<string, string>,
+	requests: Array<{ trace: string; attributes: Record<string, string | boolean>; event?: Record<string, string> }>,
+) {
+	return {
+		resourceSpans: [{
+			resource: { attributes: kv({ "service.name": "shop", ...resource }) },
+			scopeSpans: [{
+				spans: requests.flatMap(({ trace, attributes, event }) => [
+					{
+						traceId: trace, spanId: `${trace.slice(0, 15)}1`, name: "GET /carts/{cart_id}", kind: "SPAN_KIND_SERVER",
+						startTimeUnixNano: NOW_NANOS, endTimeUnixNano: NOW_NANOS,
+						attributes: kv({ "http.route": "/carts/{cart_id}", "http.method": "GET", "http.status_code": "500", ...attributes }),
+						status: { code: "STATUS_CODE_ERROR" },
+						events: [{ name: "exception", timeUnixNano: NOW_NANOS, attributes: kv({ "exception.type": "OutOfStock", "exception.message": "none left", ...event }) }],
+					},
+					{
+						traceId: trace, spanId: `${trace.slice(0, 15)}2`, parentSpanId: `${trace.slice(0, 15)}1`, name: "db", kind: "SPAN_KIND_INTERNAL",
+						startTimeUnixNano: NOW_NANOS, endTimeUnixNano: NOW_NANOS, attributes: [],
+					},
+				]),
+			}],
+		}],
+	};
+}
+
+const TRACE_A = "a".repeat(32);
+const TRACE_B = "b".repeat(32);
+
+test("test client: no environment and the exact host `testserver` → that request's spans, error and rollup are `test`", () => {
+	for (const host of ["server.address", "net.host.name", "http.host", "http.server_name"]) {
+		const result = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes: { [host]: "testserver" } }]));
+		assert.deepEqual(result.spans.map((s) => s.environment), ["test", "test"], host);
+		assert.deepEqual(result.occurrences.map((o) => o.environment), ["test"], host);
+		assert.deepEqual(result.metricPoints.map((p) => p.environment), ["test"], host);
+		// The server span says why; the child does not claim to be a request.
+		assert.equal(result.spans[0]!.attributes?.["autter.test_client"], true, host);
+		assert.equal(result.spans[1]!.attributes?.["autter.test_client"], undefined, host);
+		assert.equal(result.occurrences[0]!.attributes?.["autter.test_client"], true, host);
+	}
+});
+
+test("test client: the marker or the exact `testclient` user agent (kept) also classifies; an explicit environment never changes", () => {
+	for (const attributes of [{ "autter.test_client": true }, { "user_agent.original": "testclient" }, { "http.user_agent": "testclient" }]) {
+		const result = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes }]));
+		assert.deepEqual(result.occurrences.map((o) => o.environment), ["test"], JSON.stringify(attributes));
+		for (const explicit of [{ "deployment.environment": "staging" }, { "deployment.environment.name": "staging" }, { "deployment.environment": "production" }]) {
+			const kept = normalizeTraces(processExport(explicit, [{ trace: TRACE_A, attributes: { ...attributes, "http.host": "testserver" } }]));
+			const name = Object.values(explicit)[0];
+			assert.deepEqual(kept.spans.map((s) => s.environment), [name, name], JSON.stringify(explicit));
+			assert.deepEqual(kept.occurrences.map((o) => o.environment), [name]);
+			assert.deepEqual(kept.metricPoints.map((p) => p.environment), [name]);
+		}
+	}
+});
+
+test("test client: near misses stay `production`", () => {
+	const nearMisses: Array<Record<string, string>> = [
+		{ "user_agent.original": "Mozilla/5.0 (compatible; testclient/1.0)" },
+		{ "http.user_agent": "testclient " },
+		{ "user_agent.original": "TestClient" },
+		{ "http.host": "testserver.example.com" },
+		{ "server.address": "testserver.internal" },
+		{ "http.host": "testserver:8000" },
+		{ "http.server_name": "TESTSERVER" },
+		{ "net.peer.name": "testserver" },
+		{ "autter.test_client": "yes" },
+		{ "http.host": "shop.example.com", "http.user_agent": "python-httpx/0.28.1" },
+	];
+	for (const attributes of nearMisses) {
+		const result = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes }]));
+		assert.deepEqual(result.spans.map((s) => s.environment), ["production", "production"], JSON.stringify(attributes));
+		assert.deepEqual(result.occurrences.map((o) => o.environment), ["production"], JSON.stringify(attributes));
+		assert.notEqual(result.occurrences[0]!.attributes?.["autter.test_client"], true);
+		assert.notEqual(result.spans[0]!.attributes?.["autter.test_client"], true);
+	}
+});
+
+test("test client: only a SERVER span is evidence, and only its own trace follows it", () => {
+	// A request claiming to be a test client (its headers are the client's to
+	// choose) next to a real request of the same process, in one export.
+	const mixed = normalizeTraces(processExport({}, [
+		{ trace: TRACE_A, attributes: { "http.host": "testserver" } },
+		{ trace: TRACE_B, attributes: { "http.host": "shop.example.com" } },
+	]));
+	assert.deepEqual(mixed.spans.map((s) => [s.traceId[0], s.environment]), [["a", "test"], ["a", "test"], ["b", "production"], ["b", "production"]]);
+	assert.deepEqual(mixed.occurrences.map((o) => [o.traceId![0], o.environment]), [["a", "test"], ["b", "production"]]);
+
+	// An internal or client span naming testserver (a call made to it) is no evidence.
+	const request = processExport({}, [{ trace: TRACE_A, attributes: {} }]);
+	request.resourceSpans[0]!.scopeSpans[0]!.spans[1]!.attributes = kv({ "server.address": "testserver" });
+	assert.deepEqual(normalizeTraces(request).occurrences.map((o) => o.environment), ["production"]);
+	request.resourceSpans[0]!.scopeSpans[0]!.spans[1]!.kind = "SPAN_KIND_CLIENT";
+	assert.deepEqual(normalizeTraces(request).occurrences.map((o) => o.environment), ["production"]);
+});
+
+test("commit: deployment.commit (else vcs.ref.head.revision) from the resource, lower-cased, also in the attributes", () => {
+	const fromResource = normalizeTraces(processExport({ "deployment.commit": "9C1E4F2A7B3D" }, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal(fromResource.occurrences[0]!.commit, "9c1e4f2a7b3d");
+	assert.equal(fromResource.occurrences[0]!.attributes?.["deployment.commit"], "9c1e4f2a7b3d");
+
+	const sha = "0123456789abcdef0123456789abcdef01234567";
+	const vcs = normalizeTraces(processExport({ "vcs.ref.head.revision": sha }, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal(vcs.occurrences[0]!.commit, sha);
+	const both = normalizeTraces(processExport({ "vcs.ref.head.revision": sha, "deployment.commit": "abcdef1" }, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal(both.occurrences[0]!.commit, "abcdef1");
+});
+
+test("commit: an event attribute beats the span's and the resource's", () => {
+	const result = normalizeTraces(processExport(
+		{ "deployment.commit": "1111111111111111111111111111111111111111" },
+		[{ trace: TRACE_A, attributes: { "deployment.commit": "2222222" }, event: { "deployment.commit": "3333333" } }],
+	));
+	assert.equal(result.occurrences[0]!.commit, "3333333");
+	// Already in the attributes: kept as sent.
+	assert.equal(result.occurrences[0]!.attributes?.["deployment.commit"], "3333333");
+	const spanOnly = normalizeTraces(processExport(
+		{ "deployment.commit": "1111111111111111111111111111111111111111" },
+		[{ trace: TRACE_A, attributes: { "deployment.commit": "2222222" } }],
+	));
+	assert.equal(spanOnly.occurrences[0]!.commit, "2222222");
+});
+
+test("commit: anything but 7–40 hex is dropped; none means no field", () => {
+	for (const bad of ["https://github.com/acme/shop", "9c1e4f", "0".repeat(41), "main", "v1.2.3", "9c1e4f2-dirty"]) {
+		const result = normalizeTraces(processExport({ "deployment.commit": bad, "vcs.repository.url.full": "https://github.com/acme/shop" }, [{ trace: TRACE_A, attributes: {} }]));
+		const [occurrence] = result.occurrences;
+		assert.equal("commit" in occurrence!, false, bad);
+		// Resource attributes never reach the occurrence's attributes.
+		assert.equal(occurrence!.attributes?.["deployment.commit"], undefined, bad);
+		assert.equal(occurrence!.attributes?.["vcs.repository.url.full"], undefined, bad);
+	}
+	// An invalid event value does not hide a valid one below it.
+	const fallback = normalizeTraces(processExport({ "deployment.commit": "abcdef1234" }, [{ trace: TRACE_A, attributes: {}, event: { "deployment.commit": "not-a-sha" } }]));
+	assert.equal(fallback.occurrences[0]!.commit, "abcdef1234");
+
+	const none = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal("commit" in none.occurrences[0]!, false);
+	assert.equal(none.occurrences[0]!.attributes?.["deployment.commit"], undefined);
+});

@@ -121,17 +121,25 @@ export class IdentifyingAttributeFilter {
 		private readonly hasher: ClientIpHasher | null = null,
 	) {}
 
-	/** The attributes of a span or log record: the client IP hash added (from the raw list), then the drop. */
+	/**
+	 * The attributes of a span or log record: what is read from the raw list
+	 * added first (the client IP hash; on a SERVER span, the test-client
+	 * marker), then the drop.
+	 */
 	private recordAttributes = (obj: unknown, serverSpan: boolean): unknown => {
+		if (!isObject(obj)) return this.attributesOf(obj);
+		const added: Json[] = [];
 		const hasher = this.hasher;
-		if (!hasher || !isObject(obj) || hasKey(obj.attributes, CLIENT_IP_HASH_ATTRIBUTE)) return this.attributesOf(obj);
-		const ip = clientIpOfList(obj.attributes, serverSpan);
+		if (hasher && !hasKey(obj.attributes, CLIENT_IP_HASH_ATTRIBUTE)) {
+			const ip = clientIpOfList(obj.attributes, serverSpan);
+			if (ip) added.push({ key: CLIENT_IP_HASH_ATTRIBUTE, value: { stringValue: hasher(ip) } });
+		}
+		if (serverSpan && testClientUserAgentIn(obj.attributes) && !hasKey(obj.attributes, TEST_CLIENT_ATTRIBUTE)) {
+			added.push({ key: TEST_CLIENT_ATTRIBUTE, value: { boolValue: true } });
+		}
 		const filtered = this.attributesOf(obj);
-		if (!ip || !isObject(filtered) || !Array.isArray(filtered.attributes)) return filtered;
-		return {
-			...filtered,
-			attributes: [...filtered.attributes, { key: CLIENT_IP_HASH_ATTRIBUTE, value: { stringValue: hasher(ip) } }],
-		};
+		if (!added.length || !isObject(filtered) || !Array.isArray(filtered.attributes)) return filtered;
+		return { ...filtered, attributes: [...filtered.attributes, ...added] };
 	};
 
 	/** An OTLP key/value list without the dropped keys; the same array when none is present. */
@@ -149,6 +157,8 @@ export class IdentifyingAttributeFilter {
 
 	/** A traces request without identifying attributes (resource, spans, events, links). */
 	traces<T>(request: T): T {
+		// Nothing dropped: the raw user agent stays, and the normaliser reads
+		// it itself (isTestClientRequest).
 		if (!this.dropped.size && !this.hasher) return request;
 		const span = (item: unknown) =>
 			eachIn(
@@ -262,3 +272,39 @@ export function clientIpOfList(list: unknown, serverSpan: boolean): string | nul
 
 /** OTLP SERVER span kind, as a number or the enum name. */
 export const isServerKind = (kind: unknown) => kind === 2 || kind === "SPAN_KIND_SERVER";
+
+// ---------------------------------------------------------------------------
+// Test-client traffic
+
+/**
+ * On a SERVER span: the request came from a framework's in-process test
+ * client. Added by the ingester from the raw user agent before the drop
+ * (the user agent itself is still dropped), or sent by an SDK.
+ */
+export const TEST_CLIENT_ATTRIBUTE = "autter.test_client";
+/** The user agent Starlette's TestClient (and FastAPI's, which is Starlette's) sends, exactly. */
+export const TEST_CLIENT_USER_AGENT = "testclient";
+/** The host Starlette's TestClient requests (`http://testserver`), exactly. */
+export const TEST_CLIENT_HOST = "testserver";
+const USER_AGENT_KEYS: readonly string[] = ["user_agent.original", "http.user_agent"];
+/** Host attributes, none of them identifying (they name the app's own host). */
+export const TEST_CLIENT_HOST_KEYS: readonly string[] = ["server.address", "net.host.name", "http.host", "http.server_name"];
+
+/** The raw OTLP attribute list names the test client's user agent, exactly. */
+function testClientUserAgentIn(list: unknown): boolean {
+	return USER_AGENT_KEYS.some((key) => stringAttribute(list, key) === TEST_CLIENT_USER_AGENT);
+}
+
+/**
+ * Strong evidence, on one span or log record, that it is a test client's
+ * request: the marker, the exact test-client user agent (when it was kept),
+ * or the exact test-client host. Exact values only: a real user agent that
+ * merely contains "testclient", or a host such as `testserver.example.com`,
+ * is not evidence.
+ */
+export function isTestClientRequest(get: (key: string) => unknown): boolean {
+	const marker = get(TEST_CLIENT_ATTRIBUTE);
+	if (marker === true || marker === "true") return true;
+	if (USER_AGENT_KEYS.some((key) => get(key) === TEST_CLIENT_USER_AGENT)) return true;
+	return TEST_CLIENT_HOST_KEYS.some((key) => get(key) === TEST_CLIENT_HOST);
+}

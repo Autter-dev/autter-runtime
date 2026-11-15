@@ -319,3 +319,13 @@ test("1.6.0 sink fields: frames, fingerprints and the record ride along only whe
 		assert.equal(key in bare, false, key);
 	}
 });
+
+test("commit: a 7–40 hex SHA rides along lower-cased; anything else, or none, emits no field", () => {
+	assert.equal(sinkOccurrence(occ({ commit: "9c1e4f2a7b3d" })).commit, "9c1e4f2a7b3d");
+	const full = "0123456789abcdef0123456789ABCDEF01234567";
+	assert.equal(sinkOccurrence(occ({ commit: full })).commit, full.toLowerCase());
+	for (const bad of ["9c1e4f", "0".repeat(41), "https://github.com/acme/shop", "v1.2.3", "main", " ", ""]) {
+		assert.equal("commit" in sinkOccurrence(occ({ commit: bad })), false, bad);
+	}
+	assert.equal("commit" in sinkOccurrence(occ({})), false);
+});

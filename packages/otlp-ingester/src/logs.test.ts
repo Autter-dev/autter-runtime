@@ -230,3 +230,63 @@ test("server exceptions' autter.debug_ids locate source maps and are not kept (R
 	assert.equal("autter.debug_ids" in row!.attributes, false);
 	assert.equal("autter.debug_ids" in row!.occurrence!.attributes!, false);
 });
+
+// ── Test-client records and the running commit ──────────────────────────
+
+function oneRecord(resource: Record<string, string>, attributes: Record<string, string>) {
+	return normalizeLogs({
+		resourceLogs: [{
+			resource: { attributes: Object.entries({ "service.name": "shop", ...resource }).map(([k, v]) => attr(k, v)) },
+			scopeLogs: [{
+				logRecords: [{
+					timeUnixNano: "1760000000000000000",
+					severityText: "error",
+					body: { stringValue: "checkout failed" },
+					attributes: Object.entries({
+						"autter.capture.mode": "log",
+						"exception.type": "OutOfStock",
+						"exception.message": "none left",
+						...attributes,
+					}).map(([k, v]) => attr(k, v)),
+				}],
+			}],
+		}],
+	})[0]!;
+}
+
+test("a record naming the exact host `testserver`, with no environment, is `test` (its promoted error too)", () => {
+	for (const key of ["server.address", "net.host.name", "http.host", "http.server_name"]) {
+		const row = oneRecord({}, { [key]: "testserver" });
+		assert.equal(row.environment, "test", key);
+		assert.equal(row.occurrence?.environment, "test", key);
+	}
+	const marked = normalizeLogs({ resourceLogs: [{ scopeLogs: [{ logRecords: [{ body: { stringValue: "x" }, attributes: [{ key: "autter.test_client", value: { boolValue: true } }] }] }] }] });
+	assert.equal(marked[0]!.environment, "test");
+});
+
+test("an explicit environment is never rewritten; near misses and plain records stay `production`", () => {
+	assert.equal(oneRecord({ "deployment.environment": "staging" }, { "http.host": "testserver" }).environment, "staging");
+	assert.equal(oneRecord({ "deployment.environment.name": "production" }, { "http.host": "testserver" }).environment, "production");
+	for (const attributes of [{}, { "http.host": "testserver.example.com" }, { "server.address": "testserver:8000" }, { "user_agent.original": "Mozilla/5.0 testclient" }]) {
+		const row = oneRecord({}, attributes);
+		assert.equal(row.environment, "production", JSON.stringify(attributes));
+		assert.equal(row.occurrence?.environment, "production");
+	}
+});
+
+test("a promoted error carries the running commit: the record's beats the resource's; invalid or none, no field", () => {
+	const fromResource = oneRecord({ "deployment.commit": "ABCDEF1234567" }, {});
+	assert.equal(fromResource.occurrence?.commit, "abcdef1234567");
+	assert.equal(fromResource.occurrence?.attributes?.["deployment.commit"], "abcdef1234567");
+	// The log row's own attributes are left as they were.
+	assert.equal(fromResource.attributes["deployment.commit"], undefined);
+
+	assert.equal(oneRecord({ "deployment.commit": "1111111" }, { "deployment.commit": "2222222" }).occurrence?.commit, "2222222");
+	assert.equal(oneRecord({ "vcs.ref.head.revision": "3333333" }, {}).occurrence?.commit, "3333333");
+	for (const bad of ["https://github.com/acme/shop", "main", "123456"]) {
+		const row = oneRecord({ "deployment.commit": bad }, {});
+		assert.equal("commit" in row.occurrence!, false, bad);
+		assert.equal(row.occurrence?.attributes?.["deployment.commit"], undefined, bad);
+	}
+	assert.equal("commit" in oneRecord({}, {}).occurrence!, false);
+});

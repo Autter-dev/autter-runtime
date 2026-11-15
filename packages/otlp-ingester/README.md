@@ -227,6 +227,52 @@ hashing every IPv4 address) and the ingester warns at startup. A hashed IP
 is still pseudonymous personal data in some readings of privacy law: it is
 off by default, and the salt should be kept and rotated like any secret.
 
+## Test-client traffic (unreleased)
+
+A test suite that drives a FastAPI or Starlette app through its in-process
+`TestClient`, with an exporter configured and no environment set, used to
+send its errors as `production`. The ingester now stores them as
+environment `test`, which the platform leaves out of its default views,
+alerts and incidents:
+
+- Only when the resource names no environment (`deployment.environment.name`
+  or `deployment.environment`). An explicit environment, `staging` or even
+  `production`, is never changed.
+- Only on strong evidence, on a SERVER span: the exact user agent
+  `testclient` or the exact host `testserver` (`server.address`,
+  `net.host.name`, `http.host` or `http.server_name`), which is what
+  Starlette's `TestClient` sends. A user agent that merely contains
+  "testclient", or a host such as `testserver.example.com`, does not count.
+- Per request: every span and error of that request's trace is stored as
+  `test`; the process's other requests in the same export are not. The user
+  agent and the host are headers any client can send, so a request that
+  claims to be a test client only reclassifies itself.
+
+The raw user agent is read before the identifying attributes are dropped:
+the server span gets `autter.test_client: true` and the user agent itself is
+still dropped. The Python adapter (adapters/python) drops the user agent
+before export since Runtime 1.19.0, so for it the host is the evidence. A `/v1/logs` record is
+classified the same way only from its own attributes (the exact host
+`testserver`, or `autter.test_client: true`), and only when its resource
+names no environment.
+
+Known limit: the same process's `/v1/metrics` (the request-duration
+histogram that counts requests) carries nothing per request to tell a test
+client apart, so its request counts still default to `production`. Request
+counts and error rates for that process are exact only once the SDK sets
+`deployment.environment=test` itself under a test runner.
+
+## Running commit (unreleased)
+
+Each occurrence forwarded to the sink carries `commit` when the app reports
+the commit it runs: `deployment.commit`, else `vcs.ref.head.revision`, read
+from the exception event, then the span (or log record), then the resource.
+Only a value of 7 to 40 hexadecimal characters is forwarded, lower-cased;
+anything else (a repository URL, a branch name) is dropped, and nothing else
+of the resource is forwarded. When the occurrence's attributes have no
+`deployment.commit`, the SHA is also stored there. The field is optional on
+sink payload version 1: a platform that does not know it ignores it.
+
 ## Rate limits and key lookups (1.12.0)
 
 In the order a request meets them:

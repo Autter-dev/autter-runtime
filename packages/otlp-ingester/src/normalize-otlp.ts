@@ -9,8 +9,11 @@ import { dedupeTraceSignals, hasAutterKey, hasNextContext, type TraceSignal } fr
 import { requestMembership, type RequestMembership } from "./request-spans.js";
 import { DEBUG_IDS_ATTRIBUTE, serverDebugIds, withoutDebugIdsAttribute } from "./source-maps.js";
 import { histogramLatency, mergeLatency, requestLatency, type LatencySamples } from "./latency.js";
+import { isTestClientRequest, TEST_CLIENT_ATTRIBUTE } from "./identifying.js";
 import {
 	asSeverity,
+	commitOf,
+	withCommitAttribute,
 	type RuntimeLlmCall,
 	type RuntimeMetricPoint,
 	type RuntimeOccurrenceInput,
@@ -161,7 +164,12 @@ function spanKind(kind: number | string | undefined): string {
 interface ResourceInfo {
 	service: string;
 	environment: string;
+	/** `deployment.environment.name` or `deployment.environment` was set:
+	 * the environment is never rewritten (testClientTraces). */
+	explicitEnvironment: boolean;
 	release: string | null;
+	/** `deployment.commit`, else `vcs.ref.head.revision`, when 7–40 hex. */
+	commit: string | null;
 	/** `autter.metrics_wired` and `autter.metrics_routes` (runtime-node
 	 * 1.7.0+): the sender's delta HTTP-server duration histograms
 	 * (`/v1/metrics`) count every request it serves, and each request span
@@ -182,15 +190,15 @@ interface ResourceInfo {
 function resourceInfo(resource: OtlpResource | undefined): ResourceInfo {
 	const attrs = attrMap(resource?.attributes);
 	const service = attrs.get("service.name") ?? "unknown";
-	const environment =
-		attrs.get("deployment.environment.name") ??
-		attrs.get("deployment.environment") ??
-		"production";
+	const explicit = attrs.get("deployment.environment.name") ?? attrs.get("deployment.environment");
+	const environment = explicit ?? "production";
 	const release = attrs.get("service.version") ?? null;
 	return {
 		service,
 		environment,
+		explicitEnvironment: explicit !== undefined,
 		release,
+		commit: commitOf((key) => attrs.get(key)),
 		metricsCountRoutedRequests:
 			attrs.get("autter.metrics_wired") === "true" && attrs.get("autter.metrics_routes") === "true",
 		metricsWired: attrs.get("autter.metrics_wired") === "true",
@@ -279,12 +287,17 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 
 	for (const resourceSpan of request.resourceSpans ?? []) {
 		const resource = resourceInfo(resourceSpan.resource);
+		const testTraces = resource.explicitEnvironment ? NO_TRACES : testClientTraces(resourceSpan.scopeSpans);
 		for (const scopeSpan of resourceSpan.scopeSpans ?? []) {
 			for (const span of scopeSpan.spans ?? []) {
 				if (spanCount >= MAX_SPANS_PER_REQUEST) break;
 				spanCount += 1;
 
 				const attrs = attrMap(span.attributes);
+				// A test client's request (testClientTraces): every span and
+				// error of its trace is stored under environment `test`.
+				const testClient = testTraces.has(span.traceId ?? "");
+				const environment = testClient ? TEST_ENVIRONMENT : resource.environment;
 				const route = routeOf(attrs);
 				const statusCode = statusCodeOf(attrs);
 				const startedAt = nanosToDate(span.startTimeUnixNano);
@@ -303,7 +316,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 
 				spans.push({
 					service: resource.service,
-					environment: resource.environment,
+					environment,
 					release: resource.release,
 					traceId: span.traceId ?? "",
 					spanId: span.spanId ?? "",
@@ -317,6 +330,10 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					attributes: {
 						...decodeOtlpAttributes(span.attributes),
 						"http.request.method": (attrs.get("http.request.method") ?? attrs.get("http.method") ?? "").slice(0, 20),
+						// The span that made the trace a test client's says why.
+						...(testClient && kind === "server" && isTestClientRequest((key) => attrs.get(key))
+							? { [TEST_CLIENT_ATTRIBUTE]: true }
+							: {}),
 					},
 					startedAt,
 				});
@@ -342,6 +359,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				for (const event of exceptionEvents) {
 					const eventAttrs = attrMap(event.attributes);
 					const handled = eventAttrs.get("autter.handled") === "true";
+					const commit = commitOf((key) => eventAttrs.get(key), (key) => attrs.get(key), () => resource.commit);
 					const eventAutter = hasAutterKey(eventAttrs);
 					signalRollups.push(rollup);
 					signals.push({
@@ -356,7 +374,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							source: "server",
 							severity: severityOf(eventAttrs, attrs),
 							service: resource.service,
-							environment: resource.environment,
+							environment,
 							release: resource.release,
 							errorType: eventAttrs.get("exception.type") ?? "Error",
 							message:
@@ -370,8 +388,9 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							statusCode,
 							traceId: span.traceId ?? null,
 							sessionId: null,
-							attributes: withoutDebugIdsAttribute(sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
-								...(handled ? { "autter.handled": true, ...(eventAttrs.has("autter.sampled") ? { "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) } : {}) })),
+							attributes: occurrenceAttributes(withoutDebugIdsAttribute(sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
+								...(handled ? { "autter.handled": true, ...(eventAttrs.has("autter.sampled") ? { "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) } : {}) })), commit, testClient),
+							...(commit ? { commit } : {}),
 							// Server SDKs (runtime-core errorAttributes): the debug ids of the bundles in the
 							// stack (RF-05), which locate their source maps.
 							...serverDebugIds(eventAttrs.get(DEBUG_IDS_ATTRIBUTE)),
@@ -391,6 +410,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				for (const event of failedOutcomes) {
 					const outcome = attrMap(event.attributes);
 					const name = (outcome.get("autter.outcome.name") ?? "operation").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 200);
+					const commit = commitOf((key) => outcome.get(key), (key) => attrs.get(key), () => resource.commit);
 					signalRollups.push(rollup);
 					signals.push({
 						traceId,
@@ -402,18 +422,20 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 						handled: false,
 						occurrence: {
 							source: "server", severity: "error", service: resource.service,
-							environment: resource.environment, release: resource.release,
+							environment, release: resource.release,
 							errorType: "OutcomeFailure",
 							message: `${name}: ${(outcome.get("autter.outcome.message") ?? "failed").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 1000)}`,
 							stack: String(decodeOtlpAttributes(event.attributes)["autter.outcome.stack"] ?? "") || null, route, method: methodOf(attrs), statusCode,
 							traceId: span.traceId ?? null, sessionId: null,
-							attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }),
+							attributes: occurrenceAttributes(sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }), commit, testClient),
+							...(commit ? { commit } : {}),
 							occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 							...liftErrorFields(outcome, attrs),
 						},
 					});
 				}
 				if (exceptionEvents.length === 0 && failedOutcomes.length === 0 && isError) {
+					const commit = commitOf((key) => attrs.get(key), () => resource.commit);
 					signalRollups.push(rollup);
 					signals.push({
 						traceId,
@@ -427,7 +449,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							source: "server",
 							severity: severityOf(new Map(), attrs),
 							service: resource.service,
-							environment: resource.environment,
+							environment,
 							release: resource.release,
 							errorType: statusCode !== null && statusCode >= 500 ? "HttpServerError" : "SpanError",
 							message: span.status?.message || (statusCode !== null && statusCode >= 500
@@ -439,7 +461,8 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							statusCode,
 							traceId: span.traceId ?? null,
 							sessionId: null,
-							attributes: decodeOtlpAttributes(span.attributes),
+							attributes: occurrenceAttributes(decodeOtlpAttributes(span.attributes), commit, testClient),
+							...(commit ? { commit } : {}),
 							occurredAt: startedAt,
 							...liftErrorFields(attrs),
 						},
@@ -462,7 +485,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 					durationMs,
 					startedAt,
 					service: resource.service,
-					environment: resource.environment,
+					environment,
 					release: resource.release,
 					spanKind: kind,
 				});
@@ -586,6 +609,49 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 		llmCalls,
 		spanCount,
 	};
+}
+
+const TEST_ENVIRONMENT = "test";
+const NO_TRACES: ReadonlySet<string> = new Set();
+
+/**
+ * The traces of one resource (one process) that are a test client's
+ * requests: a SERVER span of the trace carries strong evidence
+ * (isTestClientRequest: `autter.test_client`, which the identifying filter
+ * adds from the exact `testclient` user agent before dropping it, or the
+ * exact host `testserver`, as Starlette's and FastAPI's TestClient send).
+ * Only called for a resource with no environment: an explicit one is never
+ * rewritten.
+ *
+ * Per trace, not per resource: the user agent and the host are request
+ * headers any client can send, so a request to a production process that
+ * names no environment can claim to be a test client, and only its own
+ * trace follows that claim; the process's other requests in the same
+ * export stay where they were.
+ */
+function testClientTraces(scopeSpans: Array<{ spans?: OtlpSpan[] }> | undefined): ReadonlySet<string> {
+	let traces: Set<string> | null = null;
+	for (const scopeSpan of scopeSpans ?? []) {
+		for (const span of scopeSpan.spans ?? []) {
+			if (!span.traceId || spanKind(span.kind) !== "server") continue;
+			const attrs = attrMap(span.attributes);
+			if (!isTestClientRequest((key) => attrs.get(key))) continue;
+			(traces ??= new Set()).add(span.traceId);
+		}
+	}
+	return traces ?? NO_TRACES;
+}
+
+/** An occurrence's attributes with the running commit (when absent) and,
+ * in a test client's trace, the test-client marker. */
+function occurrenceAttributes(
+	attributes: Record<string, unknown> | null,
+	commit: string | null,
+	testClient: boolean,
+): Record<string, unknown> | null {
+	const withCommit = withCommitAttribute(attributes, commit);
+	if (!testClient || withCommit?.[TEST_CLIENT_ATTRIBUTE] === true) return withCommit;
+	return { ...(withCommit ?? {}), [TEST_CLIENT_ATTRIBUTE]: true };
 }
 
 /**

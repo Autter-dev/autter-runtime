@@ -23,6 +23,11 @@ import type { RuntimeMetricPoint, RuntimeOccurrenceInput, StackFrame } from "./t
  * source, not from the parser under test.
  * Regenerate: AUTTER_CAPTURE_FIXTURES=<this dir> python -m unittest in each
  * examples/python/<framework> directory.
+ *
+ * `fastapi-testclient*.otlp.*`: the FastAPI recipe app exercised in-process
+ * through `fastapi.testclient.TestClient`, as a test suite does, with no
+ * environment and with `deployment.environment=staging`; recorded by
+ * test-fixtures/python/record_fastapi_testclient.py (no expectations file).
  */
 
 const FIXTURES = new URL("../test-fixtures/python/", import.meta.url);
@@ -260,6 +265,75 @@ describe("python request counting and dedupe on real spans", () => {
 		assert.equal(frames[0]!.inApp, false);
 		assert.ok(!frames.some((f) => f.function === "check_warehouse"), "sub-exception frames are not the group's");
 		assert.deepEqual(frames.filter((f) => f.inApp).map(frameToken), ["availability@app.py"]);
+	});
+});
+
+// ── FastAPI's TestClient: test traffic stored as environment `test` ───────
+
+type OtlpAttributeList = NonNullable<NonNullable<OtlpTraceRequest["resourceSpans"]>[number]["resource"]>["attributes"];
+
+/** `request` with `keys` removed from every span's attributes and the resource's. */
+function withoutAttributes(request: OtlpTraceRequest, keys: string[]): OtlpTraceRequest {
+	const strip = (list: OtlpAttributeList) => list?.filter((kv) => !keys.includes(kv.key ?? ""));
+	return {
+		resourceSpans: request.resourceSpans?.map((rs) => ({
+			resource: { attributes: strip(rs.resource?.attributes) },
+			scopeSpans: rs.scopeSpans?.map((ss) => ({
+				spans: ss.spans?.map((span) => ({ ...span, attributes: strip(span.attributes) })),
+			})),
+		})),
+	};
+}
+
+describe("python fastapi TestClient (real OTel export)", () => {
+	const environments = (result: ReturnType<typeof normalizeTraces>) => ({
+		spans: [...new Set(result.spans.map((s) => s.environment))],
+		occurrences: result.occurrences.map((o) => o.environment),
+		rollups: [...new Set(result.metricPoints.map((p) => p.environment))],
+	});
+
+	test("what TestClient sends: user agent `testclient`, host `testserver`, no environment", () => {
+		const request = loadJson("fastapi-testclient");
+		const resource = request.resourceSpans!.flatMap((rs) => rs.resource?.attributes ?? []).map((kv) => kv.key);
+		assert.ok(!resource.includes("deployment.environment") && !resource.includes("deployment.environment.name"));
+		const servers = request.resourceSpans!.flatMap((rs) => rs.scopeSpans!.flatMap((ss) => ss.spans!)).filter((s) => s.kind === "SPAN_KIND_SERVER");
+		assert.equal(servers.length, 2);
+		for (const span of servers) {
+			const attrs = Object.fromEntries((span.attributes ?? []).map((kv) => [kv.key, kv.value?.stringValue]));
+			assert.equal(attrs["http.user_agent"], "testclient");
+			assert.equal(attrs["http.host"], "testserver");
+			assert.equal(attrs["http.server_name"], "testserver");
+		}
+	});
+
+	test("no environment: occurrences, spans and rollups are stored as `test`, from JSON and protobuf", () => {
+		for (const result of [normalizeTraces(loadJson("fastapi-testclient")), normalizeTraces(decodeTraceRequest(loadProto("fastapi-testclient")))]) {
+			assert.deepEqual(environments(result), { spans: ["test"], occurrences: ["test", "test"], rollups: ["test"] });
+			assert.deepEqual(result.occurrences.map((o) => o.errorType).sort(), ["inventory.OutOfStock", "inventory.PricingTimeout"]);
+			for (const occurrence of result.occurrences) assert.equal(occurrence.attributes?.["autter.test_client"], true);
+		}
+	});
+
+	test("without the user agent (adapters/python 1.19.0 drops it before export) the host alone still classifies", () => {
+		const result = normalizeTraces(withoutAttributes(loadJson("fastapi-testclient"), ["http.user_agent", "user_agent.original"]));
+		assert.deepEqual(environments(result), { spans: ["test"], occurrences: ["test", "test"], rollups: ["test"] });
+		// Neither user agent nor host: nothing says test, so production as before.
+		const neither = normalizeTraces(withoutAttributes(loadJson("fastapi-testclient"), ["http.user_agent", "http.host", "http.server_name"]));
+		assert.deepEqual(environments(neither), { spans: ["production"], occurrences: ["production", "production"], rollups: ["production"] });
+	});
+
+	test("deployment.environment=staging: unchanged, `staging`", () => {
+		for (const result of [normalizeTraces(loadJson("fastapi-testclient-staging")), normalizeTraces(decodeTraceRequest(loadProto("fastapi-testclient-staging")))]) {
+			assert.deepEqual(environments(result), { spans: ["staging"], occurrences: ["staging", "staging"], rollups: ["staging"] });
+		}
+	});
+
+	test("a normal request (uvicorn, a real client) with no environment stays `production`", () => {
+		const fastapi = expectations.find((e) => e.framework === "fastapi")!.scenarios;
+		const request = withoutAttributes(loadJson(fastapi.unhandled!.fixture), ["deployment.environment"]);
+		const result = normalizeTraces(request);
+		assert.deepEqual(environments(result), { spans: ["production"], occurrences: ["production"], rollups: ["production"] });
+		assert.equal(result.occurrences[0]!.attributes?.["autter.test_client"], undefined);
 	});
 });
 

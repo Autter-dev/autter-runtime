@@ -341,7 +341,7 @@ test("one error recorded on two spans reaches the sink once, with the same id wh
 	assert.equal(errors, 0);
 });
 
-test("the running commit and test-client traffic reach the sink: hex SHA only, environment `test` only without an explicit one", async () => {
+test("the running commit reaches the sink as a hex SHA only; what a request says about itself never changes the environment", async () => {
 	const now = String(Date.now() * 1_000_000);
 	const str = (key: string, value: string) => ({ key, value: { stringValue: value } });
 	const process = (n: number, resource: Array<ReturnType<typeof str>>, span: Array<ReturnType<typeof str>>, event: Array<ReturnType<typeof str>> = []) => ({
@@ -380,8 +380,7 @@ test("the running commit and test-client traffic reach the sink: hex SHA only, e
 	assert.equal(JSON.stringify(byType.Error3).includes("github.com"), false, "nothing else of the resource is forwarded");
 	assert.deepEqual(
 		["Error1", "Error2", "Error3", "Error4", "Error5", "Error6"].map((name) => byType[name].environment),
-		["production", "production", "production", "test", "staging", "production"],
+		["production", "production", "production", "production", "staging", "production"],
 	);
-	assert.equal(byType.Error4.attributes["autter.test_client"], true);
 	assert.equal(byType.Error6.attributes["user_agent.original"], undefined, "the user agent is dropped");
 });

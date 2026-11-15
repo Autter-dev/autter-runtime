@@ -231,7 +231,7 @@ test("server exceptions' autter.debug_ids locate source maps and are not kept (R
 	assert.equal("autter.debug_ids" in row!.occurrence!.attributes!, false);
 });
 
-// ── Test-client records and the running commit ──────────────────────────
+// ── Environment from the resource only, and the running commit ──────────────────────────
 
 function oneRecord(resource: Record<string, string>, attributes: Record<string, string>) {
 	return normalizeLogs({
@@ -254,24 +254,16 @@ function oneRecord(resource: Record<string, string>, attributes: Record<string, 
 	})[0]!;
 }
 
-test("a record naming the exact host `testserver`, with no environment, is `test` (its promoted error too)", () => {
-	for (const key of ["server.address", "net.host.name", "http.host", "http.server_name"]) {
-		const row = oneRecord({}, { [key]: "testserver" });
-		assert.equal(row.environment, "test", key);
-		assert.equal(row.occurrence?.environment, "test", key);
-	}
-	const marked = normalizeLogs({ resourceLogs: [{ scopeLogs: [{ logRecords: [{ body: { stringValue: "x" }, attributes: [{ key: "autter.test_client", value: { boolValue: true } }] }] }] }] });
-	assert.equal(marked[0]!.environment, "test");
-});
-
-test("an explicit environment is never rewritten; near misses and plain records stay `production`", () => {
-	assert.equal(oneRecord({ "deployment.environment": "staging" }, { "http.host": "testserver" }).environment, "staging");
-	assert.equal(oneRecord({ "deployment.environment.name": "production" }, { "http.host": "testserver" }).environment, "production");
-	for (const attributes of [{}, { "http.host": "testserver.example.com" }, { "server.address": "testserver:8000" }, { "user_agent.original": "Mozilla/5.0 testclient" }]) {
+test("a record's own attributes never change its environment", () => {
+	for (const attributes of [{ "http.host": "testserver" }, { "server.address": "testserver" }, { "user_agent.original": "testclient" }]) {
 		const row = oneRecord({}, attributes);
 		assert.equal(row.environment, "production", JSON.stringify(attributes));
 		assert.equal(row.occurrence?.environment, "production");
+		assert.equal(oneRecord({ "deployment.environment": "test" }, attributes).environment, "test");
+		assert.equal(oneRecord({ "deployment.environment": "staging" }, attributes).environment, "staging");
 	}
+	const marked = normalizeLogs({ resourceLogs: [{ scopeLogs: [{ logRecords: [{ body: { stringValue: "x" }, attributes: [{ key: "autter.test_client", value: { boolValue: true } }] }] }] }] });
+	assert.equal(marked[0]!.environment, "production");
 });
 
 test("a promoted error carries the running commit: the record's beats the resource's; invalid or none, no field", () => {

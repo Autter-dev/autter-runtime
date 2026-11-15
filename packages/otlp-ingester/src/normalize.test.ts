@@ -278,71 +278,29 @@ function processExport(
 const TRACE_A = "a".repeat(32);
 const TRACE_B = "b".repeat(32);
 
-test("test client: no environment and the exact host `testserver` → that request's spans, error and rollup are `test`", () => {
-	for (const host of ["server.address", "net.host.name", "http.host", "http.server_name"]) {
-		const result = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes: { [host]: "testserver" } }]));
-		assert.deepEqual(result.spans.map((s) => s.environment), ["test", "test"], host);
-		assert.deepEqual(result.occurrences.map((o) => o.environment), ["test"], host);
-		assert.deepEqual(result.metricPoints.map((p) => p.environment), ["test"], host);
-		// The server span says why; the child does not claim to be a request.
-		assert.equal(result.spans[0]!.attributes?.["autter.test_client"], true, host);
-		assert.equal(result.spans[1]!.attributes?.["autter.test_client"], undefined, host);
-		assert.equal(result.occurrences[0]!.attributes?.["autter.test_client"], true, host);
-	}
-});
-
-test("test client: the marker or the exact `testclient` user agent (kept) also classifies; an explicit environment never changes", () => {
-	for (const attributes of [{ "autter.test_client": true }, { "user_agent.original": "testclient" }, { "http.user_agent": "testclient" }]) {
-		const result = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes }]));
-		assert.deepEqual(result.occurrences.map((o) => o.environment), ["test"], JSON.stringify(attributes));
-		for (const explicit of [{ "deployment.environment": "staging" }, { "deployment.environment.name": "staging" }, { "deployment.environment": "production" }]) {
-			const kept = normalizeTraces(processExport(explicit, [{ trace: TRACE_A, attributes: { ...attributes, "http.host": "testserver" } }]));
-			const name = Object.values(explicit)[0];
-			assert.deepEqual(kept.spans.map((s) => s.environment), [name, name], JSON.stringify(explicit));
-			assert.deepEqual(kept.occurrences.map((o) => o.environment), [name]);
-			assert.deepEqual(kept.metricPoints.map((p) => p.environment), [name]);
-		}
-	}
-});
-
-test("test client: near misses stay `production`", () => {
-	const nearMisses: Array<Record<string, string>> = [
-		{ "user_agent.original": "Mozilla/5.0 (compatible; testclient/1.0)" },
-		{ "http.user_agent": "testclient " },
-		{ "user_agent.original": "TestClient" },
-		{ "http.host": "testserver.example.com" },
-		{ "server.address": "testserver.internal" },
-		{ "http.host": "testserver:8000" },
-		{ "http.server_name": "TESTSERVER" },
-		{ "net.peer.name": "testserver" },
-		{ "autter.test_client": "yes" },
-		{ "http.host": "shop.example.com", "http.user_agent": "python-httpx/0.28.1" },
+test("what a request says about itself never changes the environment: no environment is `production`, an explicit one is kept", () => {
+	const claims: Array<Record<string, string | boolean>> = [
+		{ "autter.test_client": true },
+		{ "user_agent.original": "testclient" },
+		{ "http.user_agent": "testclient" },
+		{ "http.host": "testserver", "http.server_name": "testserver", "server.address": "testserver", "net.host.name": "testserver" },
 	];
-	for (const attributes of nearMisses) {
+	for (const attributes of claims) {
 		const result = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes }]));
 		assert.deepEqual(result.spans.map((s) => s.environment), ["production", "production"], JSON.stringify(attributes));
 		assert.deepEqual(result.occurrences.map((o) => o.environment), ["production"], JSON.stringify(attributes));
-		assert.notEqual(result.occurrences[0]!.attributes?.["autter.test_client"], true);
-		assert.notEqual(result.spans[0]!.attributes?.["autter.test_client"], true);
+		assert.deepEqual(result.metricPoints.map((p) => p.environment), ["production"], JSON.stringify(attributes));
+		for (const name of ["test", "staging"]) {
+			const explicit = normalizeTraces(processExport({ "deployment.environment": name }, [{ trace: TRACE_A, attributes }]));
+			assert.deepEqual(explicit.occurrences.map((o) => o.environment), [name]);
+		}
 	}
-});
-
-test("test client: only a SERVER span is evidence, and only its own trace follows it", () => {
-	// A request claiming to be a test client (its headers are the client's to
-	// choose) next to a real request of the same process, in one export.
+	// Two requests of one process, one claiming to be a test client: both production.
 	const mixed = normalizeTraces(processExport({}, [
 		{ trace: TRACE_A, attributes: { "http.host": "testserver" } },
 		{ trace: TRACE_B, attributes: { "http.host": "shop.example.com" } },
 	]));
-	assert.deepEqual(mixed.spans.map((s) => [s.traceId[0], s.environment]), [["a", "test"], ["a", "test"], ["b", "production"], ["b", "production"]]);
-	assert.deepEqual(mixed.occurrences.map((o) => [o.traceId![0], o.environment]), [["a", "test"], ["b", "production"]]);
-
-	// An internal or client span naming testserver (a call made to it) is no evidence.
-	const request = processExport({}, [{ trace: TRACE_A, attributes: {} }]);
-	request.resourceSpans[0]!.scopeSpans[0]!.spans[1]!.attributes = kv({ "server.address": "testserver" });
-	assert.deepEqual(normalizeTraces(request).occurrences.map((o) => o.environment), ["production"]);
-	request.resourceSpans[0]!.scopeSpans[0]!.spans[1]!.kind = "SPAN_KIND_CLIENT";
-	assert.deepEqual(normalizeTraces(request).occurrences.map((o) => o.environment), ["production"]);
+	assert.deepEqual(mixed.occurrences.map((o) => o.environment), ["production", "production"]);
 });
 
 test("commit: deployment.commit (else vcs.ref.head.revision) from the resource, lower-cased, also in the attributes", () => {

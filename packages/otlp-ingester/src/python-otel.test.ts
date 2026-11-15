@@ -28,6 +28,7 @@ import type { RuntimeMetricPoint, RuntimeOccurrenceInput, StackFrame } from "./t
  * through `fastapi.testclient.TestClient`, as a test suite does, with no
  * environment and with `deployment.environment=staging`; recorded by
  * test-fixtures/python/record_fastapi_testclient.py (no expectations file).
+ * The environment comes from the resource only, never from the request.
  */
 
 const FIXTURES = new URL("../test-fixtures/python/", import.meta.url);
@@ -268,16 +269,16 @@ describe("python request counting and dedupe on real spans", () => {
 	});
 });
 
-// ── FastAPI's TestClient: test traffic stored as environment `test` ───────
+// ── FastAPI's TestClient: the environment comes from the resource only ────
 
 type OtlpAttributeList = NonNullable<NonNullable<OtlpTraceRequest["resourceSpans"]>[number]["resource"]>["attributes"];
 
-/** `request` with `keys` removed from every span's attributes and the resource's. */
-function withoutAttributes(request: OtlpTraceRequest, keys: string[]): OtlpTraceRequest {
+/** `request` with `keys` removed from every span's attributes and the resource's, and `add` added to the resource. */
+function withAttributes(request: OtlpTraceRequest, keys: string[], add: OtlpAttributeList = []): OtlpTraceRequest {
 	const strip = (list: OtlpAttributeList) => list?.filter((kv) => !keys.includes(kv.key ?? ""));
 	return {
 		resourceSpans: request.resourceSpans?.map((rs) => ({
-			resource: { attributes: strip(rs.resource?.attributes) },
+			resource: { attributes: [...(strip(rs.resource?.attributes) ?? []), ...(add ?? [])] },
 			scopeSpans: rs.scopeSpans?.map((ss) => ({
 				spans: ss.spans?.map((span) => ({ ...span, attributes: strip(span.attributes) })),
 			})),
@@ -306,20 +307,16 @@ describe("python fastapi TestClient (real OTel export)", () => {
 		}
 	});
 
-	test("no environment: occurrences, spans and rollups are stored as `test`, from JSON and protobuf", () => {
+	test("no environment: stored as `production`, whatever the request says about itself (JSON and protobuf)", () => {
 		for (const result of [normalizeTraces(loadJson("fastapi-testclient")), normalizeTraces(decodeTraceRequest(loadProto("fastapi-testclient")))]) {
-			assert.deepEqual(environments(result), { spans: ["test"], occurrences: ["test", "test"], rollups: ["test"] });
+			assert.deepEqual(environments(result), { spans: ["production"], occurrences: ["production", "production"], rollups: ["production"] });
 			assert.deepEqual(result.occurrences.map((o) => o.errorType).sort(), ["inventory.OutOfStock", "inventory.PricingTimeout"]);
-			for (const occurrence of result.occurrences) assert.equal(occurrence.attributes?.["autter.test_client"], true);
 		}
 	});
 
-	test("without the user agent (adapters/python 1.19.0 drops it before export) the host alone still classifies", () => {
-		const result = normalizeTraces(withoutAttributes(loadJson("fastapi-testclient"), ["http.user_agent", "user_agent.original"]));
-		assert.deepEqual(environments(result), { spans: ["test"], occurrences: ["test", "test"], rollups: ["test"] });
-		// Neither user agent nor host: nothing says test, so production as before.
-		const neither = normalizeTraces(withoutAttributes(loadJson("fastapi-testclient"), ["http.user_agent", "http.host", "http.server_name"]));
-		assert.deepEqual(environments(neither), { spans: ["production"], occurrences: ["production", "production"], rollups: ["production"] });
+	test("deployment.environment=test set explicitly (as test runs will): stored as `test`", () => {
+		const request = withAttributes(loadJson("fastapi-testclient"), [], [{ key: "deployment.environment", value: { stringValue: "test" } }]);
+		assert.deepEqual(environments(normalizeTraces(request)), { spans: ["test"], occurrences: ["test", "test"], rollups: ["test"] });
 	});
 
 	test("deployment.environment=staging: unchanged, `staging`", () => {
@@ -328,12 +325,10 @@ describe("python fastapi TestClient (real OTel export)", () => {
 		}
 	});
 
-	test("a normal request (uvicorn, a real client) with no environment stays `production`", () => {
+	test("a normal request (uvicorn, a real client) with no environment is `production` too", () => {
 		const fastapi = expectations.find((e) => e.framework === "fastapi")!.scenarios;
-		const request = withoutAttributes(loadJson(fastapi.unhandled!.fixture), ["deployment.environment"]);
-		const result = normalizeTraces(request);
+		const result = normalizeTraces(withAttributes(loadJson(fastapi.unhandled!.fixture), ["deployment.environment"]));
 		assert.deepEqual(environments(result), { spans: ["production"], occurrences: ["production"], rollups: ["production"] });
-		assert.equal(result.occurrences[0]!.attributes?.["autter.test_client"], undefined);
 	});
 });
 

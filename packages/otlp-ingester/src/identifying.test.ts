@@ -264,12 +264,20 @@ async function backgroundInserts(rows: Record<string, unknown[]>) {
 }
 const attributesOf = (row: Record<string, unknown>) => JSON.parse(String(row.attributes ?? "{}")) as Record<string, unknown>;
 
-test("TestClient traffic with no environment is stored as `test`: the server spans carry autter.test_client and no user agent", async () => {
+/** The recorded no-environment export, as OTLP/JSON, with `deployment.environment` set to `name`. */
+function testClientWithEnvironment(name: string): string {
+	const request = JSON.parse(readFileSync(new URL("../test-fixtures/python/fastapi-testclient.otlp.json", import.meta.url), "utf8"));
+	for (const rs of request.resourceSpans) rs.resource.attributes.push({ key: "deployment.environment", value: { stringValue: name } });
+	return JSON.stringify(request);
+}
+
+test("TestClient traffic with no environment is stored as `production`: the server spans carry the autter.test_client hint and no user agent", async () => {
 	await withIngester({}, async (post, rows) => {
 		assert.equal(await post("/v1/traces", TESTCLIENT, "application/x-protobuf"), 200);
 		const spans = rows.runtime_spans ?? [];
 		assert.equal(spans.length, 6);
-		assert.deepEqual(new Set(spans.map((row) => row.environment)), new Set(["test"]));
+		// The user agent and host are the caller's to send: they never change the environment.
+		assert.deepEqual(new Set(spans.map((row) => row.environment)), new Set(["production"]));
 		const servers = spans.filter((row) => row.kind === "server");
 		assert.equal(servers.length, 2);
 		for (const row of servers) {
@@ -277,39 +285,45 @@ test("TestClient traffic with no environment is stored as `test`: the server spa
 			assert.equal(attributes["autter.test_client"], true);
 			assert.equal(attributes["http.user_agent"], undefined, "the user agent is still dropped");
 			assert.equal(attributes["user_agent.original"], undefined);
-			assert.equal(attributes["http.host"], "testserver", "the host is kept");
 		}
+		for (const row of spans.filter((r) => r.kind !== "server")) assert.equal(attributesOf(row)["autter.test_client"], undefined);
 		const occurrences = rows.runtime_error_occurrences ?? [];
-		assert.deepEqual(occurrences.map((row) => row.environment), ["test", "test"]);
-		for (const row of occurrences) {
-			assert.equal(attributesOf(row)["autter.test_client"], true);
-			assert.equal(attributesOf(row)["http.user_agent"], undefined);
-		}
+		assert.deepEqual(occurrences.map((row) => row.environment), ["production", "production"]);
 		for (const table of ["runtime_spans", "runtime_error_occurrences"])
 			for (const key of vectors.drop) assert.ok(!storedKeys(rows, table).has(key), `${key} stored in ${table}`);
 		await backgroundInserts(rows);
 	});
 });
 
-test("the same TestClient export with deployment.environment=staging stays `staging`", async () => {
+test("the same TestClient export with deployment.environment=test set explicitly is stored as `test`", async () => {
+	await withIngester({}, async (post, rows) => {
+		assert.equal(await post("/v1/traces", testClientWithEnvironment("test"), "application/json"), 200);
+		assert.deepEqual(new Set((rows.runtime_spans ?? []).map((row) => row.environment)), new Set(["test"]));
+		assert.deepEqual((rows.runtime_error_occurrences ?? []).map((row) => row.environment), ["test", "test"]);
+		await backgroundInserts(rows);
+	});
+});
+
+test("the TestClient export with deployment.environment=staging stays `staging`", async () => {
 	await withIngester({}, async (post, rows) => {
 		assert.equal(await post("/v1/traces", TESTCLIENT_STAGING, "application/x-protobuf"), 200);
 		assert.deepEqual(new Set((rows.runtime_spans ?? []).map((row) => row.environment)), new Set(["staging"]));
 		assert.deepEqual((rows.runtime_error_occurrences ?? []).map((row) => row.environment), ["staging", "staging"]);
-		// The request still came from a test client, and says so.
 		for (const row of (rows.runtime_spans ?? []).filter((r) => r.kind === "server"))
 			assert.equal(attributesOf(row)["autter.test_client"], true);
 		await backgroundInserts(rows);
 	});
 });
 
-test("with the user agent kept (AUTTER_KEEP_IDENTIFYING_ATTRIBUTES) TestClient traffic is still `test`", async () => {
+test("with the user agent kept (AUTTER_KEEP_IDENTIFYING_ATTRIBUTES) it is stored, and the environment is still `production`", async () => {
 	await withIngester({ keepIdentifyingAttributes: true }, async (post, rows) => {
 		assert.equal(await post("/v1/traces", TESTCLIENT, "application/x-protobuf"), 200);
-		assert.deepEqual(new Set((rows.runtime_spans ?? []).map((row) => row.environment)), new Set(["test"]));
+		assert.deepEqual(new Set((rows.runtime_spans ?? []).map((row) => row.environment)), new Set(["production"]));
 		for (const row of (rows.runtime_spans ?? []).filter((r) => r.kind === "server")) {
 			assert.equal(attributesOf(row)["http.user_agent"], "testclient");
-			assert.equal(attributesOf(row)["autter.test_client"], true);
+			// Nothing is dropped, so the filter passes the request through:
+			// the raw user agent is stored instead of the hint.
+			assert.equal(attributesOf(row)["autter.test_client"], undefined);
 		}
 		await backgroundInserts(rows);
 	});

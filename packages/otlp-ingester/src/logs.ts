@@ -8,7 +8,6 @@ import {
 import { declaredLink, liftErrorFields } from "./error-fields.js";
 import { fingerprintOverrideOf } from "./fingerprint-override.js";
 import { normalizeRoute } from "./fingerprint.js";
-import { isTestClientRequest } from "./identifying.js";
 import { DEBUG_IDS_ATTRIBUTE, serverDebugIds, withoutDebugIdsAttribute } from "./source-maps.js";
 import { commitOf, withCommitAttribute, type RuntimeOccurrenceInput } from "./types.js";
 
@@ -193,14 +192,10 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 				if (typeof attributes.path === "string")
 					attributes.path = normalizeRoute(attributes.path.split(/[?#]/)[0]!);
 				const service = String(info["service.name"] ?? "unknown").slice(0, 200);
-				const explicitEnvironment = info["deployment.environment.name"] ?? info["deployment.environment"];
-				// A record of a test client's request, by the record's own
-				// attributes (the exact host `testserver`, or the marker), is
-				// stored under `test`, as its trace is; only when the resource
-				// names no environment, which is never rewritten.
 				const environment = String(
-					explicitEnvironment ??
-						(isTestClientRequest((key) => attrs[key]) ? "test" : "production"),
+					info["deployment.environment.name"] ??
+						info["deployment.environment"] ??
+						"production",
 				).slice(0, 100);
 				const release = String(info["service.version"] ?? "").slice(0, 200);
 				const declared = liftErrorFields(attributes);

@@ -27,6 +27,7 @@ import { until } from "./support/wait.mjs";
 const {
 	COMMIT_ENV_VARS,
 	COMMIT_RE,
+	LEGACY_RELEASE_ENV_VARS,
 	TEST_RUNNER_ENV_VARS,
 	defaultRelease,
 	detectCommit,
@@ -56,11 +57,14 @@ test("environment: an explicit option wins, then NODE_ENV, then test under a run
 });
 
 test("commit: only 7 to 40 hexadecimal characters, first valid variable in the shared order", () => {
+	// Autter's own, then the source-map CLI's four in its order, then the rest.
 	assert.deepEqual([...COMMIT_ENV_VARS], [
-		"AUTTER_COMMIT", "GIT_SHA", "GIT_COMMIT", "COMMIT_SHA", "SOURCE_COMMIT", "VERCEL_GIT_COMMIT_SHA",
-		"GITHUB_SHA", "RENDER_GIT_COMMIT", "RAILWAY_GIT_COMMIT_SHA", "CF_PAGES_COMMIT_SHA", "HEROKU_SLUG_COMMIT",
+		"AUTTER_COMMIT", "GITHUB_SHA", "VERCEL_GIT_COMMIT_SHA", "CF_PAGES_COMMIT_SHA", "GIT_SHA", "GIT_COMMIT",
+		"COMMIT_SHA", "SOURCE_COMMIT", "RENDER_GIT_COMMIT", "RAILWAY_GIT_COMMIT_SHA", "HEROKU_SLUG_COMMIT",
 		"SOURCE_VERSION",
 	]);
+	assert.deepEqual([...LEGACY_RELEASE_ENV_VARS], ["GITHUB_SHA", "VERCEL_GIT_COMMIT_SHA", "CF_PAGES_COMMIT_SHA", "GIT_SHA"]);
+	assert.deepEqual(COMMIT_ENV_VARS.slice(1, 5), [...LEGACY_RELEASE_ENV_VARS]);
 	assert.equal(detectCommit({}), undefined);
 	assert.equal(detectCommit({ GIT_SHA: SHA }), SHA);
 	assert.equal(detectCommit({ GIT_SHA: `  ${SHORT}\n` }), SHORT);
@@ -71,6 +75,7 @@ test("commit: only 7 to 40 hexadecimal characters, first valid variable in the s
 	}
 	// An earlier variable wins; one that is not a commit is skipped.
 	assert.deepEqual(detectCommitFrom({ AUTTER_COMMIT: SHORT, GITHUB_SHA: SHA }), { commit: SHORT, source: "AUTTER_COMMIT" });
+	assert.deepEqual(detectCommitFrom({ GIT_SHA: SHORT, GITHUB_SHA: SHA }), { commit: SHA, source: "GITHUB_SHA" }, "GITHUB_SHA before GIT_SHA, as the CLI");
 	assert.deepEqual(detectCommitFrom({ SOURCE_VERSION: "pr/12", GIT_SHA: "main", HEROKU_SLUG_COMMIT: SHA }), { commit: SHA, source: "HEROKU_SLUG_COMMIT" });
 	for (const name of COMMIT_ENV_VARS) assert.equal(detectCommit({ [name]: SHA }), SHA, name);
 });
@@ -89,6 +94,21 @@ test("release: explicit wins, then AUTTER_RELEASE, then the full commit; false o
 	assert.equal(resolveRelease(undefined, { GITHUB_SHA: SHA, AUTTER_DETECT_RELEASE: "true" }), SHA);
 	assert.equal(resolveRelease(undefined, { GIT_SHA: "main" }), undefined, "a value that is not a commit is not a release");
 	assert.equal(defaultRelease({ AUTTER_RELEASE: "  r1 " }), "r1");
+});
+
+test("the SDK's default release is the release the source-map CLI uploads under, for a commit in any one variable", async () => {
+	// The CLI's resolver from source (it bundles src/deployment.ts by path).
+	const cli = await tsImport("../../runtime-cli/src/release.ts", import.meta.url);
+	assert.deepEqual([...cli.RELEASE_ENV_VARS], [...LEGACY_RELEASE_ENV_VARS]);
+	for (const name of COMMIT_ENV_VARS) {
+		for (const commit of [SHA, SHORT]) {
+			const env = { [name]: commit };
+			assert.equal(defaultRelease(env), commit, name);
+			assert.deepEqual(cli.resolveRelease(undefined, env), { release: commit, source: name }, name);
+		}
+	}
+	const named = { AUTTER_RELEASE: "r9", GITHUB_SHA: SHA };
+	assert.equal(defaultRelease(named), cli.resolveRelease(undefined, named).release);
 });
 
 test("enrichDeployment: deployment.commit only for a commit, from the shared list", () => {

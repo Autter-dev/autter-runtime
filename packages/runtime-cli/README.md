@@ -180,9 +180,13 @@ autter-runtime sourcemaps upload <dir> [--release <r>] [--url-prefix <prefix>]
   as fit the 32 MB limit), so issues show the lines around each frame;
   `--no-sources-content` leaves it out. For server output, `--url-prefix` is
   any tail of the path the server runs the files from (`/dist/` for
-  `/app/dist/server.js`), or `/`. Release: `--release`, else `GITHUB_SHA`,
-  `VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `GIT_SHA`, then
-  `git rev-parse HEAD`.
+  `/app/dist/server.js`), or `/`. Release: `--release`, else `AUTTER_RELEASE`, else
+  the first of `GITHUB_SHA`, `VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`,
+  `GIT_SHA` that is set (any value), else the first commit (7 to 40
+  hexadecimal characters) in the other commit variables `@autter/runtime-node`
+  reads (`AUTTER_COMMIT`, `GIT_COMMIT`, `COMMIT_SHA`, `SOURCE_COMMIT`,
+  `RENDER_GIT_COMMIT`, `RAILWAY_GIT_COMMIT_SHA`, `HEROKU_SLUG_COMMIT`,
+  `SOURCE_VERSION`), else `git rev-parse HEAD`.
 - **upload --best-effort** is for build scripts that also run locally and in
   fork PRs: without a key, or when the upload fails, it says so and exits 0;
   with `--delete-after-upload`, every `.map` under `<dir>` is then deleted

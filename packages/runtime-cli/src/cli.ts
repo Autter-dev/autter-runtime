@@ -60,8 +60,11 @@ upload  Sends every map to <endpoint>/v1/sourcemaps with AUTTER_RUNTIME_KEY,
         dependencies'), so issues show the lines around each frame.
 
 Options:
-  --release <r>          Default: $GITHUB_SHA, $VERCEL_GIT_COMMIT_SHA,
-                         $CF_PAGES_COMMIT_SHA, $GIT_SHA, then git rev-parse HEAD
+  --release <r>          Default: $AUTTER_RELEASE, else $GITHUB_SHA,
+                         $VERCEL_GIT_COMMIT_SHA, $CF_PAGES_COMMIT_SHA, $GIT_SHA
+                         (any value), else a commit in the SDK's other commit
+                         variables ($AUTTER_COMMIT, $GIT_COMMIT, ...), else
+                         git rev-parse HEAD
   --url-prefix <prefix>  Where <dir> is served from: "/" (default), "/static/",
                          or "https://cdn.example.com/app/". For server output,
                          any tail of the path the server runs it from

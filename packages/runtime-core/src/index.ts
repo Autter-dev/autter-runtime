@@ -97,10 +97,14 @@ export {
 	type OtlpResource,
 } from "./otlp-logs.js";
 export {
+	CARRIER_KEY,
 	createCarrier,
+	extractCarrier,
+	injectCarrier,
 	parseCarrier,
 	formatTraceparent,
 	parseTraceparent,
+	type CarrierFormat,
 	type RuntimeCarrier,
 } from "./carrier.js";
 export {

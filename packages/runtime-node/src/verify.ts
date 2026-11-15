@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { compatRequest, fetchIngesterCompat, SDK_IDENTITY, type HttpResult } from "./compat.js";
 import { diagnoseConnectivity } from "./connectivity.js";
 import { checkStorage, resolveEndpoint, versionSkew, installedSdks } from "./doctor.js";
+import { defaultRelease, detectCommit } from "./deployment.js";
 import { refusalReason, resolveIngestKey } from "./ingest-auth.js";
 import { versionAtLeast } from "../../otlp-ingester/src/compat.js";
 
@@ -49,6 +50,8 @@ export interface VerifyReport {
 	service: string;
 	environment: string;
 	release: string | null;
+	/** The commit read from the commit variables (deployment.ts), sent as `deployment.commit`. */
+	commit: string | null;
 	traceId: string;
 	steps: VerifyStep[];
 	firstFailure: VerifyStep | null;
@@ -84,32 +87,28 @@ function defaultService(cwd: string, env: NodeJS.ProcessEnv): string {
 	return "autter-verify";
 }
 
-function defaultRelease(env: NodeJS.ProcessEnv): string | null {
-	return (
-		env.AUTTER_RELEASE ||
-		env.GIT_SHA ||
-		env.VERCEL_GIT_COMMIT_SHA ||
-		env.RENDER_GIT_COMMIT ||
-		env.RAILWAY_GIT_COMMIT_SHA ||
-		env.CF_PAGES_COMMIT_SHA ||
-		env.GITHUB_SHA ||
-		null
-	);
-}
-
 const nowNanos = () => (BigInt(Date.now()) * 1_000_000n).toString();
 const str = (key: string, value: string) => ({ key, value: { stringValue: value } });
 
-function resourceAttributes(opts: { service: string; environment: string; release: string | null; traceId: string }) {
+interface TestResource {
+	service: string;
+	environment: string;
+	release: string | null;
+	commit: string | null;
+	traceId: string;
+}
+
+function resourceAttributes(opts: TestResource) {
 	return [
 		str("service.name", opts.service),
 		str("deployment.environment", opts.environment),
 		...(opts.release ? [str("service.version", opts.release)] : []),
+		...(opts.commit ? [str("deployment.commit", opts.commit)] : []),
 		str("autter.verify.id", opts.traceId),
 	];
 }
 
-function testTraces(opts: { service: string; environment: string; release: string | null; traceId: string; withError: boolean }) {
+function testTraces(opts: TestResource & { withError: boolean }) {
 	const end = nowNanos();
 	const start = (BigInt(end) - 1_000_000n).toString();
 	return {
@@ -153,7 +152,7 @@ function testTraces(opts: { service: string; environment: string; release: strin
 	};
 }
 
-function testLogs(opts: { service: string; environment: string; release: string | null; traceId: string }) {
+function testLogs(opts: TestResource) {
 	return {
 		resourceLogs: [
 			{
@@ -214,7 +213,10 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 	const cwd = options.cwd ?? process.cwd();
 	const service = options.service || defaultService(cwd, env);
 	const environment = options.environment || "verify";
-	const release = options.release || defaultRelease(env);
+	// The same default as the SDK (deployment.ts): AUTTER_RELEASE, else the
+	// detected commit, unless AUTTER_DETECT_RELEASE=false.
+	const release = options.release || defaultRelease(env) || null;
+	const commit = detectCommit(env) ?? null;
 	const traceId = randomBytes(16).toString("hex");
 	const key = resolveIngestKey(options.key, env);
 	const steps: VerifyStep[] = [];
@@ -230,6 +232,7 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 			service,
 			environment,
 			release,
+			commit,
 			traceId,
 			steps,
 			firstFailure,
@@ -327,7 +330,7 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 
 	// ingest
 	const ingestRes = await compatRequest("POST", `${endpoint}/v1/traces`, {
-		body: JSON.stringify(testTraces({ service, environment, release, traceId, withError: lookupSupported })),
+		body: JSON.stringify(testTraces({ service, environment, release, commit, traceId, withError: lookupSupported })),
 		headers,
 		unref: false,
 		timeoutMs,
@@ -397,7 +400,7 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 			step: "release",
 			status: "warn",
 			detail: "no release set: errors are not tied to a deploy, so \"broke in release X\" can't work",
-			fix: "Pass `release` to initAutterServer (and initAutterBrowser), e.g. process.env.GIT_SHA; run verify with --release or GIT_SHA set.",
+			fix: "The SDK reports AUTTER_RELEASE, else the commit in a commit variable (GIT_SHA, VERCEL_GIT_COMMIT_SHA, GITHUB_SHA, ...), unless AUTTER_DETECT_RELEASE=false. Set one of them where the app runs (or pass `release` to initAutterServer, and initAutterBrowser); run verify with --release or the same variable set.",
 		});
 	} else if (stored.occurrences.releases.includes(release) && stored.spans.releases.includes(release)) {
 		add({ step: "release", status: "pass", detail: `release ${release} stored on the error and the span` });
@@ -417,7 +420,7 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 		return finish();
 	}
 	const logRes = await compatRequest("POST", `${endpoint}/v1/logs`, {
-		body: JSON.stringify(testLogs({ service, environment, release, traceId })),
+		body: JSON.stringify(testLogs({ service, environment, release, commit, traceId })),
 		headers,
 		unref: false,
 		timeoutMs,
@@ -488,7 +491,7 @@ Options:
   --key <key>           Server ingest key (default: $AUTTER_RUNTIME_KEY)
   --service <name>      Service name (default: $AUTTER_SERVICE, $OTEL_SERVICE_NAME, or package.json name)
   --environment <name>  Environment for the test event (default: verify)
-  --release <id>        Release to check (default: $AUTTER_RELEASE, $GIT_SHA or your platform's commit variable)
+  --release <id>        Release to check (default, as the SDK: $AUTTER_RELEASE, else the commit in $GIT_SHA or your platform's commit variable)
   --wait <ms>           How long to wait for the event to be stored (default 20000)
   --timeout <ms>        Per-request timeout (default 5000)
   --json                Machine-readable output

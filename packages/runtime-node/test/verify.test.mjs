@@ -18,11 +18,15 @@ import { createIngesterApp } from "../../otlp-ingester/dist/server.js";
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const cwd = mkdtempSync(join(tmpdir(), "autter-verify-"));
 const KEY = `autter_rt_${"5".repeat(48)}`;
+// The commit variables the SDK reads (src/deployment.ts), cleared in the
+// child unless a test sets them: CI itself sets GITHUB_SHA.
+const COMMIT_VARS = ["AUTTER_COMMIT", "GIT_SHA", "GIT_COMMIT", "COMMIT_SHA", "SOURCE_COMMIT", "VERCEL_GIT_COMMIT_SHA", "GITHUB_SHA",
+	"RENDER_GIT_COMMIT", "RAILWAY_GIT_COMMIT_SHA", "CF_PAGES_COMMIT_SHA", "HEROKU_SLUG_COMMIT", "SOURCE_VERSION"];
 
 function runCli(args, env = {}) {
 	return new Promise((resolve) => {
 		const childEnv = { ...process.env, ...env };
-		for (const name of ["AUTTER_RUNTIME_KEY", "AUTTER_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "GIT_SHA", "AUTTER_RELEASE", "GITHUB_SHA", "AUTTER_SERVICE", "OTEL_SERVICE_NAME"]) {
+		for (const name of ["AUTTER_RUNTIME_KEY", "AUTTER_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "AUTTER_RELEASE", "AUTTER_DETECT_RELEASE", ...COMMIT_VARS, "AUTTER_SERVICE", "OTEL_SERVICE_NAME"]) {
 			if (!(name in env)) delete childEnv[name];
 		}
 		const child = spawn(process.execPath, [cli, "verify", ...args], { cwd, env: childEnv });
@@ -101,6 +105,33 @@ test("verify: every step passes against a working ingester", async () => {
 		assert.equal(span.environment, "verify");
 		assert.equal(ing.rows.occurrences[0].errorType, "AutterVerifyTestEvent");
 		assert.equal(ing.rows.logs.length, 1);
+	} finally {
+		await ing.close();
+	}
+});
+
+test("verify: the release defaults like the SDK's (AUTTER_RELEASE, else the commit) and the commit is sent", async () => {
+	const ing = await ingester();
+	const sha = "0123456789abcdef0123456789abcdef01234567";
+	try {
+		const detected = JSON.parse((await runCli(["--endpoint", ing.url, "--key", KEY, "--json"], { RENDER_GIT_COMMIT: sha })).stdout);
+		assert.equal(detected.release, sha);
+		assert.equal(detected.commit, sha);
+		assert.equal(stepOf(detected, "release").status, "pass", JSON.stringify(stepOf(detected, "release")));
+
+		const named = JSON.parse((await runCli(["--endpoint", ing.url, "--key", KEY, "--json"], { RENDER_GIT_COMMIT: sha, AUTTER_RELEASE: "r9" })).stdout);
+		assert.equal(named.release, "r9");
+		assert.equal(named.commit, sha);
+
+		const off = JSON.parse((await runCli(["--endpoint", ing.url, "--key", KEY, "--json"], { GIT_SHA: sha, AUTTER_DETECT_RELEASE: "false" })).stdout);
+		assert.equal(off.release, null);
+		assert.equal(off.commit, sha);
+		assert.equal(stepOf(off, "release").status, "warn");
+
+		// Only 7-40 hexadecimal characters are a commit.
+		const notCommit = JSON.parse((await runCli(["--endpoint", ing.url, "--key", KEY, "--json"], { GIT_SHA: "main" })).stdout);
+		assert.equal(notCommit.release, null);
+		assert.equal(notCommit.commit, null);
 	} finally {
 		await ing.close();
 	}

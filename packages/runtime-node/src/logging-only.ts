@@ -34,6 +34,7 @@ import {
 	unregisterFlushTargets,
 	type AutoFlushHandle,
 } from "./lifecycle.js";
+import { resolveEnvironment, resolveRelease } from "./deployment.js";
 import { makeRedactor, type RedactOptions } from "./redact.js";
 import { markCaptured } from "./requests.js";
 import {
@@ -77,8 +78,10 @@ export interface AutterLoggingOptions {
 	/** Ingester base URL. Default: https://otlp.autter.dev */
 	endpoint?: string;
 	service: string;
+	/** Same default as initAutterServer: NODE_ENV, else `test` under a test runner, else `production`. */
 	environment?: string;
-	release?: string;
+	/** Same default as initAutterServer: AUTTER_RELEASE, else the detected commit; `false` for none. */
+	release?: string | false;
 	logging?: RuntimeLoggingOptions;
 	/** Same semantics as initAutterServer. Default true. */
 	redactAttributes?: boolean | RedactOptions;
@@ -133,7 +136,8 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 	}
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
 	const endpoint = (options.endpoint ?? "https://otlp.autter.dev").replace(/\/$/, "");
-	const environment = options.environment ?? process.env.NODE_ENV ?? "production";
+	const environment = resolveEnvironment(options.environment);
+	const release = resolveRelease(options.release);
 	const redact = makeRedactor(options.redactAttributes ?? true);
 	const mode = options.exceptions ?? "auto";
 	debugLog(`initialising logger-only service=${options.service} endpoint=${endpoint}`);
@@ -221,7 +225,7 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 		apiKey: resolveIngestKey(options.apiKey, {}) ?? "",
 		service: options.service,
 		environment,
-		...(options.release ? { release: options.release } : {}),
+		...(release ? { release } : {}),
 		...(options.logging ? { options: options.logging } : {}),
 		redact,
 		reportOutcome: (name, message, attributes) => {

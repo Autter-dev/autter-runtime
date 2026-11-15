@@ -135,6 +135,8 @@ export function serverStandIns(build: RootBuild): ServerStandIns {
 				return fn(operation());
 			},
 			carrier: () => undefined,
+			// No operation here, so nothing to carry: the target comes back unchanged.
+			inject: (target) => target,
 		},
 		flushRuntimeLogs: async () => ({ ok: true, errors: [] }),
 		runtimeLogStats: () => ({ buffered: 0, dropped: 0 }),

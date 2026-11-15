@@ -16,6 +16,9 @@ import {
 	codeFingerprint,
 	parseCarrier,
 	createCarrier,
+	injectCarrier,
+	extractCarrier,
+	CARRIER_KEY,
 	resolveRequestId,
 	normalizeRoutePath,
 	compileIgnore,
@@ -156,6 +159,116 @@ test("carriers round-trip and reject malformed input", () => {
 	assert.equal(parseCarrier({ v: 2, op: "x" }), null);
 	assert.equal(parseCarrier("not json"), null);
 	assert.deepEqual(parseCarrier({ v: 1, op: "op-1", req: "bad id!", traceparent: "junk" }), { v: 1, op: "op-1" });
+});
+
+const CARRIER = createCarrier({
+	op: "6f1c2b9e-1111-4222-8333-944455556666",
+	req: "req-abcdef12",
+	traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+});
+
+test("injectCarrier/extractCarrier round-trip a job payload under the autter key, without mutating it", () => {
+	assert.equal(CARRIER_KEY, "autter");
+	const data = { imageId: 42, sizes: [1, 2] };
+	const job = injectCarrier(data, CARRIER);
+	assert.notEqual(job, data, "a shallow copy, not the input");
+	assert.deepEqual(data, { imageId: 42, sizes: [1, 2] }, "the input is untouched");
+	assert.deepEqual(job, { imageId: 42, sizes: [1, 2], autter: CARRIER });
+	assert.equal(job.sizes, data.sizes, "shallow: nested values are shared");
+	assert.deepEqual(extractCarrier(job), CARRIER);
+	// Through a queue that serialises payloads as JSON.
+	assert.deepEqual(extractCarrier(JSON.parse(JSON.stringify(job))), CARRIER);
+	// A payload whose own fields look like a carrier: the autter key wins.
+	assert.deepEqual(extractCarrier({ v: 1, op: "resize", autter: CARRIER }), CARRIER);
+	// The carrier itself, as an object or a JSON string, is accepted too.
+	assert.deepEqual(extractCarrier(CARRIER), CARRIER);
+	assert.deepEqual(extractCarrier(JSON.stringify(CARRIER)), CARRIER);
+	// An existing carrier is replaced, not merged.
+	const again = injectCarrier({ autter: { v: 1, op: "older" } }, CARRIER);
+	assert.deepEqual(again.autter, CARRIER);
+});
+
+test("injectCarrier writes only the carrier fields (no attributes, user context or baggage)", () => {
+	const job = injectCarrier({}, { ...CARRIER, user: { email: "a@example.com" }, attributes: { x: 1 }, baggage: "k=v" });
+	assert.deepEqual(Object.keys(job.autter).sort(), ["op", "req", "traceparent", "v"]);
+	const headers = injectCarrier({}, { ...CARRIER, user: "a@example.com" }, "headers");
+	assert.deepEqual(Object.keys(JSON.parse(headers.autter)).sort(), ["op", "req", "traceparent", "v"]);
+});
+
+test("injectCarrier/extractCarrier round-trip HTTP headers (case-insensitive name, string value)", () => {
+	const headers = { "content-type": "application/json", Autter: "stale" };
+	const out = injectCarrier(headers, CARRIER, "headers");
+	assert.deepEqual(headers, { "content-type": "application/json", Autter: "stale" }, "input untouched");
+	assert.equal(typeof out.autter, "string");
+	assert.equal(out.Autter, undefined, "a differently-cased old header is replaced, not duplicated");
+	assert.equal(out["content-type"], "application/json");
+	assert.deepEqual(extractCarrier(out), CARRIER);
+	// Received with another case, or as Node's single-entry header list.
+	assert.deepEqual(extractCarrier({ AUTTER: out.autter }), CARRIER);
+	assert.deepEqual(extractCarrier({ autter: [out.autter] }), CARRIER);
+	assert.equal(extractCarrier({ autter: [out.autter, out.autter] }), undefined);
+	// A fetch Headers instance: a new Headers comes back, the input is untouched.
+	const fetchHeaders = new Headers({ accept: "text/plain" });
+	const copy = injectCarrier(fetchHeaders, CARRIER);
+	assert.ok(copy instanceof Headers);
+	assert.notEqual(copy, fetchHeaders);
+	assert.equal(fetchHeaders.has("autter"), false);
+	assert.equal(copy.get("accept"), "text/plain");
+	assert.deepEqual(extractCarrier(copy), CARRIER);
+	assert.deepEqual(extractCarrier(new Headers({ AUTTER: JSON.stringify(CARRIER) })), CARRIER);
+});
+
+test("injectCarrier/extractCarrier round-trip SQS MessageAttributes and whole SQS messages", () => {
+	const attributes = { tenant: { DataType: "String", StringValue: "t1" } };
+	const out = injectCarrier(attributes, CARRIER, "sqs");
+	assert.deepEqual(Object.keys(attributes), ["tenant"], "input untouched");
+	assert.equal(out.tenant, attributes.tenant);
+	assert.equal(out.autter.DataType, "String");
+	assert.deepEqual(JSON.parse(out.autter.StringValue), CARRIER);
+	assert.deepEqual(extractCarrier(out), CARRIER);
+	// A received message (AWS SDK) and a Lambda SQS event record (lower-case keys).
+	assert.deepEqual(extractCarrier({ Body: "{}", MessageAttributes: out }), CARRIER);
+	assert.deepEqual(
+		extractCarrier({ body: "{}", messageAttributes: { autter: { dataType: "String", stringValue: out.autter.StringValue } } }),
+		CARRIER,
+	);
+	// A non-string attribute type is not a carrier.
+	assert.equal(extractCarrier({ autter: { DataType: "Binary", StringValue: out.autter.StringValue } }), undefined);
+});
+
+test("extractCarrier returns undefined for missing, malformed or oversized input and never throws", () => {
+	const hostile = new Proxy({}, { get() { throw new Error("boom"); }, has() { throw new Error("boom"); }, ownKeys() { throw new Error("boom"); }, getOwnPropertyDescriptor() { throw new Error("boom"); } });
+	const malformed = [
+		undefined, null, 0, 42, true, "", "not json", "[]", [], [CARRIER], {}, { other: 1 },
+		{ autter: null }, { autter: 7 }, { autter: "not json" }, { autter: { v: 2, op: "x" } },
+		{ autter: { v: 1, op: "bad op id!" } }, { autter: { v: 1 } }, { v: 1, op: "x".repeat(129) },
+		{ autter: JSON.stringify({ ...CARRIER, pad: "x".repeat(1100) }) },
+		{ MessageAttributes: { autter: { DataType: "String", StringValue: "x".repeat(2000) } } },
+		{ MessageAttributes: { MessageAttributes: { autter: { DataType: "String", StringValue: JSON.stringify(CARRIER) } } } },
+		{ autter: { StringValue: 5 } },
+		Object.create({ autter: CARRIER }),
+		hostile,
+		{ autter: hostile },
+	];
+	malformed.forEach((input, index) => assert.equal(extractCarrier(input), undefined, `malformed input #${index}`));
+	// Invalid optional fields are dropped, as parseCarrier does.
+	assert.deepEqual(extractCarrier({ autter: { v: 1, op: "op-1", req: "bad id!", traceparent: "junk" } }), { v: 1, op: "op-1" });
+});
+
+test("injectCarrier leaves the target unchanged when there is nothing to inject or nowhere to put it", () => {
+	const data = { a: 1 };
+	assert.equal(injectCarrier(data, undefined), data);
+	assert.equal(injectCarrier(data, null), data);
+	assert.equal(injectCarrier(data, { v: 2, op: "x" }), data);
+	assert.deepEqual(data, { a: 1 });
+	const list = [1, 2];
+	assert.equal(injectCarrier(list, CARRIER), list);
+	assert.equal(injectCarrier("text", CARRIER), "text");
+	assert.equal(injectCarrier(null, CARRIER), null);
+	class Job { constructor() { this.id = 1; } }
+	const instance = new Job();
+	assert.equal(injectCarrier(instance, CARRIER), instance, "class instances are not copied (that would drop their prototype)");
+	assert.equal(injectCarrier(Object.freeze({ a: 1 }), CARRIER).autter.op, CARRIER.op, "frozen input is fine: it is copied");
 });
 
 test("request helpers: ids, route normalisation, ignore globs, outcomes", () => {

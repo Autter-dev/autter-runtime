@@ -257,6 +257,7 @@ test("initAutterServer: the detected commit is deployment.commit and, by default
 	assert.equal(only(detected.spans, "deployment.commit"), SHA);
 	assert.equal(only(detected.spans, "service.version"), SHA);
 	assert.equal(only(detected.logs, "service.version"), SHA, "log records carry the same release");
+	assert.equal(only(detected.logs, "deployment.commit"), SHA, "and the same commit");
 
 	const explicit = await run("server", { release: "v2" }, { GITHUB_SHA: SHA, AUTTER_RELEASE: "r9" });
 	assert.equal(only(explicit.spans, "service.version"), "v2");
@@ -269,6 +270,7 @@ test("initAutterServer: the detected commit is deployment.commit and, by default
 	assert.equal(only(off.spans, "service.version"), undefined);
 	assert.equal(only(off.logs, "service.version"), undefined);
 	assert.equal(only(off.spans, "deployment.commit"), SHORT);
+	assert.equal(only(off.logs, "deployment.commit"), SHORT, "the commit is on log records whatever the release");
 
 	const envOff = await run("server", {}, { GIT_SHA: SHORT, AUTTER_RELEASE: "r9", AUTTER_DETECT_RELEASE: "false" });
 	assert.equal(only(envOff.spans, "service.version"), undefined);
@@ -277,16 +279,19 @@ test("initAutterServer: the detected commit is deployment.commit and, by default
 	const notCommit = await run("server", {}, { GIT_SHA: "main" });
 	assert.equal(only(notCommit.spans, "service.version"), undefined);
 	assert.equal(only(notCommit.spans, "deployment.commit"), undefined);
+	assert.equal(only(notCommit.logs, "deployment.commit"), undefined);
 });
 
 test("initAutterLogging: the same environment and release defaults", async () => {
 	const outside = await run("logging");
 	assert.equal(only(outside.logs, "deployment.environment"), "production");
 	assert.equal(only(outside.logs, "service.version"), undefined);
+	assert.equal(only(outside.logs, "deployment.commit"), undefined);
 
 	const vitest = await run("logging", {}, { VITEST: "true", RAILWAY_GIT_COMMIT_SHA: SHA });
 	assert.equal(only(vitest.logs, "deployment.environment"), "test");
 	assert.equal(only(vitest.logs, "service.version"), SHA);
+	assert.equal(only(vitest.logs, "deployment.commit"), SHA, "logger-only mode sends the commit too");
 
 	const explicit = await run("logging", { environment: "eu", release: "v3" }, { VITEST: "true", GIT_SHA: SHA, NODE_ENV: "development" });
 	assert.equal(only(explicit.logs, "deployment.environment"), "eu");
@@ -294,4 +299,5 @@ test("initAutterLogging: the same environment and release defaults", async () =>
 
 	const off = await run("logging", { release: false }, { GIT_SHA: SHA });
 	assert.equal(only(off.logs, "service.version"), undefined);
+	assert.equal(only(off.logs, "deployment.commit"), SHA);
 });

@@ -43,6 +43,8 @@ export interface RuntimeSinkContext {
 	service: string;
 	environment: string;
 	release?: string;
+	/** The running commit (7-40 hex), sent as the `deployment.commit` resource attribute, as on spans. */
+	commit?: string;
 	/** SDK identity for the `telemetry.distro.*` resource attributes. */
 	distro?: { name: string; version: string };
 }
@@ -75,6 +77,19 @@ export interface OtlpSinkOptions {
 interface QueuedLog {
 	record: OtlpLogRecord;
 	bytes: number;
+}
+
+/**
+ * The logs request with `deployment.commit` on its resource, as the trace
+ * resource has it, so request summaries and errors promoted from log records
+ * carry the commit too. Added here rather than in runtime-core's encoder,
+ * which runtime-edge shares and which stays as it is.
+ */
+function withCommit(request: Record<string, unknown>, commit: string | undefined): Record<string, unknown> {
+	const attributes = (request.resourceLogs as Array<{ resource: { attributes: unknown[] } }> | undefined)?.[0]?.resource
+		.attributes;
+	if (commit && Array.isArray(attributes)) attributes.push({ key: "deployment.commit", value: { stringValue: commit } });
+	return request;
 }
 
 /**
@@ -138,14 +153,17 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 				remaining -= batch.length;
 				inFlight = batch.length;
 				const body = JSON.stringify(
-					buildOtlpLogsRequest(
-						{
-							service: active.service,
-							environment: active.environment,
-							...(active.release ? { release: active.release } : {}),
-							...(active.distro ? { distro: active.distro } : {}),
-						},
-						batch.map((entry) => entry.record),
+					withCommit(
+						buildOtlpLogsRequest(
+							{
+								service: active.service,
+								environment: active.environment,
+								...(active.release ? { release: active.release } : {}),
+								...(active.distro ? { distro: active.distro } : {}),
+							},
+							batch.map((entry) => entry.record),
+						),
+						active.commit,
 					),
 				);
 				let failure: unknown;

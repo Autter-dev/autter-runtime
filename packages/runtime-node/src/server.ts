@@ -1727,7 +1727,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	}
 
 	configureRuntimeLogger({ endpoint, apiKey: apiKey ?? "", service: options.service, environment, distro,
-		release, options: options.logging, redact: redactor,
+		release, ...(commit ? { commit } : {}), options: options.logging, redact: redactor,
 		run: (name, fn, attributes, links) => runWithSpan(processTracer, name, fn, redactor(attributes), links),
 		reportOutcome,
 	});

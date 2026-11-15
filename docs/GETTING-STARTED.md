@@ -160,8 +160,7 @@ initAutterServer({
   apiKey: process.env.AUTTER_RUNTIME_KEY,        // server key
   endpoint: process.env.AUTTER_ENDPOINT,          // your ingester URL (below)
   service: "payments-api",
-  environment: process.env.NODE_ENV,
-  release: process.env.GIT_SHA,                   // enables "broke in release X"
+  // environment: NODE_ENV by default; release: the running commit (below)
 });
 ```
 
@@ -177,6 +176,21 @@ AUTTER_ENDPOINT=http://localhost:4318 AUTTER_RUNTIME_KEY=autter_rt_local_dev_onl
 
 `AUTTER_ENDPOINT` is the ingester's base URL, without `/v1/...`. If you
 leave `endpoint` out, the SDK sends to Autter cloud (`https://otlp.autter.dev`).
+
+You don't need to pass `release`. On Vercel, Render, Railway, Cloudflare
+Pages, Heroku, GitHub Actions, or anywhere you set `GIT_SHA` or
+`AUTTER_COMMIT`, the SDK reports the running commit as the release and as
+`deployment.commit`, so Autter can link errors to the commit and its pull
+request (and "broke in release X" works). Only a 7 to 40 character hex SHA
+counts, and the SDK never runs git. Set `AUTTER_RELEASE` to use a different
+name, or `release: false` / `AUTTER_DETECT_RELEASE=false` to report none.
+Source maps uploaded with `autter-runtime sourcemaps upload` without
+`--release` land under the same release when the build sees the same commit
+variable; set `AUTTER_RELEASE` in both places to name releases yourself.
+
+Errors from your own test runs stay out of production: under Jest, Vitest
+or `node --test`, with no `environment` and no `NODE_ENV`, the SDK reports
+environment `test`. See [Test runs](#test-runs).
 
 That alone gives you: every incoming HTTP request traced-and-sampled,
 request/error/duration rollups per route, crashes and unhandled promise
@@ -360,13 +374,39 @@ Then in your frontend entry point:
 
 ```ts
 import { initAutterBrowser } from "@autter/runtime-browser";
+import { enableTracePropagation } from "@autter/runtime-browser/tracing";
 
 initAutterBrowser({
   endpoint: "/api/autter-runtime",   // same-origin — no key here
   service: "web-app",
   release: import.meta.env.VITE_GIT_SHA,
 });
+enableTracePropagation();            // link browser errors to the server request behind them
 ```
+
+### Link browser errors to server requests
+
+`enableTracePropagation()` adds a W3C `traceparent` header to your app's
+same-origin `fetch` and XHR requests. Your server continues that trace
+(`@autter/runtime-node`, `@autter/runtime-next` and OpenTelemetry's HTTP
+instrumentation do this with no setup), so a browser error links to the
+server trace, and the server error, of the same request.
+
+- Other origins never get the header, so third-party APIs see no new CORS
+  preflight. The tracker's own endpoint never gets one either.
+- An API on another origin that you control: list it, and allow the header
+  in its CORS response (`Access-Control-Allow-Headers: traceparent`; FastAPI
+  and Django snippets in
+  [INTEGRATIONS.md](INTEGRATIONS.md#browser-requests-from-another-origin-cors)):
+
+  ```ts
+  enableTracePropagation({ tracePropagationTargets: ["https://api.example.com/"] });
+  ```
+- `fetch` is traced through the tracker's network observer, so
+  `captureNetworkFailures: false` turns it off for `fetch` (XHR keeps it).
+
+It is a separate import because it does not fit the main tracker's size
+budget. In Next.js it is on by default (next section).
 
 ### Option B — direct (static sites, no backend)
 
@@ -415,6 +455,13 @@ routes share the SDK that `registerAutter` starts either way (1.6.1+).
 Wrap route handlers in `withRuntimeRequest` for request summaries;
 `middleware.ts` uses `@autter/runtime-next/edge`.
 
+Trace propagation is on by default here: `initAutterBrowser` from
+`@autter/runtime-next/client` adds a `traceparent` to same-origin requests
+(route handlers, server actions), so browser errors link to the server
+request behind them. `tracePropagation: false` turns it off;
+`tracePropagationTargets: ["https://api.example.com/"]` adds a cross-origin
+API you control (it must allow the header in CORS).
+
 Errors Next catches itself — in server components, server actions, route
 handlers and middleware — reach Autter with their stack through Next 15's
 `onRequestError`. Add it to `instrumentation.ts`, next to `register()`:
@@ -442,10 +489,16 @@ package at all — configure the SDK you already use:
 OTEL_EXPORTER_OTLP_ENDPOINT=https://your-ingester.example.com
 OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer ${AUTTER_RUNTIME_KEY}"
 OTEL_SERVICE_NAME=payments-api
-OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment=production
+OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.commit=${GIT_SHA},deployment.environment=production
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.01
 ```
+
+`deployment.commit` (a 7 to 40 character hex SHA) lets Autter map each
+release to the commit it runs. Python services that use
+`adapters/python/autter_tracing.py` get the commit, the release and the
+test environment filled in for them
+([Python](INTEGRATIONS.md#python-django-fastapi-flask-celery)).
 
 Errors become issues when spans record exceptions
 (`span.RecordError(err)` in Go, `record_exception` in Python, …) or carry
@@ -462,6 +515,24 @@ doesn't drop them — the 1% ratio above applies to everything, so either
 exempt GenAI spans in a custom sampler or route them through an always-on
 tracer provider. See
 [INTEGRATIONS.md § LLM / GenAI calls](INTEGRATIONS.md#llm--genai-calls-any-language).
+
+### Test runs
+
+A test suite that runs with telemetry on would otherwise report its errors
+as production. Test runs are separated by the environment the process
+reports, `test`:
+
+| Sender | Under a test runner | Turn it off |
+| --- | --- | --- |
+| `@autter/runtime-node` (and `@autter/runtime-next` on the server) | Jest, Vitest or `node --test`, with no `environment` option and no `NODE_ENV` | pass `environment` or set `NODE_ENV` |
+| `autter_tracing.py` | pytest or Django's `manage.py test`, with no environment on the resource | `AUTTER_DETECT_TEST_ENV=false` or `init_tracing(detect_test_env=False)` |
+| Any other OpenTelemetry SDK | set it yourself, e.g. `OTEL_RESOURCE_ATTRIBUTES=deployment.environment=test` in the CI job | |
+
+An explicit environment always wins. Autter leaves the `test` environment
+out of its default views and never pages on it. The ingester never changes
+the environment because of what a request says about itself (user agent,
+host, client address): a caller could use that to hide its errors from
+production views and alerts.
 
 ## 7. See your own events
 
@@ -541,8 +612,14 @@ clickhouse-client --password dev`.
 - [ ] Client keys have `allowedOrigins` set to your exact app origins (a
       client key with none accepts no origin; add your dev origin, e.g.
       `http://localhost:3000`, if you test locally with it).
-- [ ] `release` is wired to your git SHA in **both** frontend and backend —
-      it's what powers regression detection ("broke in release X").
+- [ ] Both frontend and backend report a release — it's what powers
+      regression detection ("broke in release X"). The Node SDK and the
+      Python adapter report the running commit when your platform sets a
+      commit variable (`npx @autter/runtime-node verify` shows it); the
+      browser tracker needs `release` passed in at build time.
+- [ ] Browser requests carry `traceparent` (`enableTracePropagation()`, on
+      by default with `@autter/runtime-next/client`), and cross-origin APIs
+      you list allow the header in CORS.
 - [ ] Request summaries are always kept: `ignore` health checks and metrics
       scrapes in `autterRequests`, and size `LOG_TTL_DAYS` at the ingester.
 - [ ] Error codes are stable and low-cardinality — never ids or user data.

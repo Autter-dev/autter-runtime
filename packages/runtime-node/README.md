@@ -170,8 +170,8 @@ import { initAutterServer } from "@autter/runtime-node";
 const autter = initAutterServer({
   apiKey: process.env.AUTTER_RUNTIME_KEY!,
   service: "payments-api",
-  environment: process.env.NODE_ENV,
-  release: process.env.GIT_SHA,
+  // environment: NODE_ENV by default; release: AUTTER_RELEASE, else the
+  // running commit (GIT_SHA, VERCEL_GIT_COMMIT_SHA, ...). See Defaults below.
 });
 
 // handled errors — always recorded, never sampled out:
@@ -220,6 +220,9 @@ Defaults (cheap by construction):
 | Query strings in span URLs | parameter names only (`keepQueryParams`) |
 | Client IP, raw user agent, host id, command line | dropped (`keepIdentifyingAttributes`, `dropAttributes`) |
 | Forgotten `shutdown()` | exporters still flushed on exit (`autoFlush`) |
+| Release (`release` unset) | `AUTTER_RELEASE`, else the running commit as the full SHA; `release: false` or `AUTTER_DETECT_RELEASE=false` reports none |
+| Running commit | the first of `AUTTER_COMMIT`, `GITHUB_SHA`, `VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `GIT_SHA`, `GIT_COMMIT`, `COMMIT_SHA`, `SOURCE_COMMIT`, `RENDER_GIT_COMMIT`, `RAILWAY_GIT_COMMIT_SHA`, `HEROKU_SLUG_COMMIT`, `SOURCE_VERSION` holding 7 to 40 hex characters, sent as `deployment.commit` (never runs git) |
+| Environment (`environment` unset) | `NODE_ENV`, else `test` under Jest, Vitest or `node --test` (`JEST_WORKER_ID`, `VITEST`, `NODE_TEST_CONTEXT`), else `production` |
 
 **Error-linked trace retention.** Errors export at 100% while traces are
 head-sampled — on its own that strands a retained error without the trace

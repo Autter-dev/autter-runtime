@@ -208,6 +208,34 @@ function releaseSnippet(detected: Detected): { file: string | undefined; snippet
 	}
 }
 
+const TRACE_CORS_NOTE =
+	"For a cross-origin API you control, list it in tracePropagationTargets and allow the header in its CORS response: Access-Control-Allow-Headers: traceparent.";
+
+/**
+ * The trace-propagation step for a browser setup: a traceparent on the app's
+ * requests links a browser error to the server request behind it. Null when
+ * there is no browser SDK, or the file that starts the tracker already
+ * configures it.
+ */
+export function tracePropagationStep(detected: Pick<Detected, "dir" | "sdk" | "release">): string | null {
+	const pkg = detected.sdk.package;
+	if (!pkg) return null;
+	const file = detected.release.file;
+	const code = file ? (readText(join(detected.dir, file)) ?? "") : "";
+	if (code.includes("enableTracePropagation")) return null;
+	if (pkg === "@autter/runtime-next") {
+		if (code.includes("tracePropagation")) return null;
+		return (
+			"Browser errors link to the server request behind them through a traceparent header, which initAutterBrowser from @autter/runtime-next/client sends on same-origin requests (tracePropagation: false turns it off; older versions need enableTracePropagation() after it).\n" +
+			TRACE_CORS_NOTE
+		);
+	}
+	return (
+		`Link browser errors to the server request behind them: call enableTracePropagation() from @autter/runtime-browser/tracing after initAutterBrowser${file ? ` in ${file}` : ""}, so same-origin requests carry a traceparent header.\n` +
+		TRACE_CORS_NOTE
+	);
+}
+
 function secretTargets(detected: Detected): SecretTarget[] {
 	const where: SecretTarget[] = [];
 	for (const ci of detected.ci) {
@@ -572,6 +600,8 @@ export function runSetup(dir: string, options: SetupOptions = {}): SetupResult {
 			addCommand(detected, `${detected.sdk.package}@latest`, false).command,
 		);
 	}
+	const tracing = tracePropagationStep(detected);
+	if (tracing) next.push(tracing);
 	if (!detected.sdk.package) {
 		next.push("No Autter browser SDK in package.json: source maps resolve browser errors that @autter/runtime-browser (or @autter/runtime-next) 1.6.0+ reports. Set it up first, or alongside.");
 	}

@@ -6,26 +6,37 @@ import * as tracing from "@autter/runtime-browser/tracing";
 import * as filters from "@autter/runtime-browser/filters";
 import * as client from "../dist/client.js";
 
-test("the client entry re-exports opt-in trace propagation, like breadcrumbs", () => {
-	// The very functions of @autter/runtime-browser/tracing, so they hook into
-	// the same tracker instance initAutterBrowser starts.
-	assert.equal(client.enableTracePropagation, tracing.enableTracePropagation);
-	assert.equal(client.disableTracePropagation, tracing.disableTracePropagation);
+test("the client entry's trace propagation switches drive @autter/runtime-browser/tracing", () => {
+	// Thin wrappers (they remember that the app chose, so initAutterBrowser's
+	// default keeps that choice) over the tracing module, which hooks into the
+	// same tracker instance initAutterBrowser starts. Breadcrumbs are the very
+	// functions.
 	assert.equal(client.enableBreadcrumbs, breadcrumbs.enableBreadcrumbs);
+	assert.equal(typeof tracing.enableTracePropagation, "function");
 	// Callable without a browser (no XMLHttpRequest here): a no-op wrap.
 	client.enableTracePropagation({ tracePropagationTargets: ["https://api.example.com", /^https:\/\/internal\./] });
 	client.disableTracePropagation();
 });
 
-test("the client entry's types include TracePropagationOptions, for ESM and CJS", () => {
+test("initAutterBrowser outside a browser (server rendering a client component) does nothing and never throws", () => {
+	assert.equal(typeof globalThis.window, "undefined");
+	client.initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web" });
+	client.initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web", tracePropagation: false });
+	assert.equal(typeof globalThis.XMLHttpRequest, "undefined", "nothing was wrapped or defined");
+});
+
+test("the client entry's types include the trace propagation options, for ESM and CJS", () => {
 	for (const file of ["client.d.ts", "client.d.cts"]) {
 		const types = readFileSync(new URL(`../dist/${file}`, import.meta.url), "utf8");
 		assert.match(types, /enableTracePropagation/);
 		assert.match(types, /disableTracePropagation/);
 		assert.match(types, /TracePropagationOptions/);
+		assert.match(types, /AutterNextBrowserOptions/);
+		assert.match(types, /tracePropagation\?: boolean/);
+		assert.match(types, /tracePropagationTargets\?:/);
 	}
-	// The bundle keeps the subpath import, so the tracing code stays out of
-	// apps that never call it.
+	// The bundle imports the tracing subpath (it is on by default here), so
+	// the app's bundler resolves the same module instance the tracker uses.
 	assert.match(readFileSync(new URL("../dist/client.js", import.meta.url), "utf8"), /@autter\/runtime-browser\/tracing/);
 });
 

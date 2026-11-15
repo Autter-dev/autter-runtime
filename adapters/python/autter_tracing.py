@@ -53,6 +53,26 @@ ignores the marks and counts the sampled requests a second time, from their
 spans. :func:`init_tracing` registers its meter provider as the global one:
 an app that registers its own afterwards should turn counting off.
 
+Test runs, commit and release. :func:`init_tracing` fills in three resource
+attributes the service did not set itself (an explicit value always wins):
+
+* ``deployment.environment = test`` when the process runs under a test
+  runner (pytest, or Django's ``manage.py test``) and the resource has no
+  environment at all (neither ``deployment.environment.name`` nor
+  ``deployment.environment``). Off with ``AUTTER_DETECT_TEST_ENV=false`` or
+  ``init_tracing(detect_test_env=False)``. A request made through
+  Starlette's or FastAPI's ``TestClient`` (user agent ``testclient``, host
+  ``testserver``), or through Django's test ``Client`` where the
+  instrumentation records its host ``testserver`` (old HTTP semantic
+  conventions), is marked ``autter.test_client = true`` on its server span,
+  whatever the environment.
+* ``deployment.commit``: the running commit, from the first of
+  :data:`COMMIT_ENV_VARS` holding 7 to 40 hexadecimal characters
+  (environment variables only: no git, no subprocess).
+* ``service.version`` (the release) when it is absent: ``AUTTER_RELEASE``,
+  else the detected commit, in full. Off with ``AUTTER_DETECT_RELEASE=false``
+  or ``init_tracing(detect_release=False)``.
+
 Copy this file and ``redact.py`` into your project. Needs ``opentelemetry-sdk``
 (tested with 1.20, 1.27 and 1.41 on Python 3.9, 1.45 on Python 3.14) and, for
 :func:`init_tracing`'s default exporter, ``opentelemetry-exporter-otlp-proto-http``.
@@ -62,6 +82,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import sys
 import threading
 import time
 import weakref
@@ -127,7 +149,11 @@ except ImportError:  # copied next to the app as a plain module
 __all__ = [
     "TAIL_RETAINED_ATTRIBUTE",
     "METRIC_COUNTED_ATTRIBUTE",
+    "TEST_CLIENT_ATTRIBUTE",
+    "COMMIT_ENV_VARS",
     "REQUEST_COUNT_RESOURCE_ATTRIBUTES",
+    "detect_commit",
+    "detect_test_runner",
     "CountRequests",
     "request_meter_provider",
     "RecordUnsampled",
@@ -158,6 +184,46 @@ REQUEST_COUNT_RESOURCE_ATTRIBUTES = {"autter.metrics_wired": True, "autter.metri
 #: view) as ``http.server.duration``, the instrument the ingester counts.
 _REQUEST_INSTRUMENT = "autter.http.server.duration"
 _HTTP_SERVER_DURATIONS = ("http.server.duration", "http.server.request.duration")
+
+#: On a server span of a request made by a test client: Starlette's and
+#: FastAPI's ``TestClient`` (user agent ``testclient``, host ``testserver``)
+#: or Django's test ``Client`` (host ``testserver``). Read from the raw
+#: attributes, before the user agent is dropped. A hint for people reading
+#: the trace, nothing more: a caller can send any user agent or host, so
+#: nothing may act on it (alerting, paging, the environment). The
+#: environment comes from the process alone (:func:`detect_test_runner`).
+TEST_CLIENT_ATTRIBUTE = "autter.test_client"
+_TEST_CLIENT_USER_AGENT = "testclient"
+_TEST_CLIENT_HOST = "testserver"
+_USER_AGENT_KEYS = ("http.user_agent", "user_agent.original")
+_HOST_KEYS = ("server.address", "net.host.name", "http.host", "http.server_name")
+
+_ENVIRONMENT_KEYS = ("deployment.environment.name", "deployment.environment")
+_TEST_ENVIRONMENT = "test"
+DETECT_TEST_ENV_ENV = "AUTTER_DETECT_TEST_ENV"
+
+#: Environment variables that carry the running commit, in the order they are
+#: tried (the order @autter/runtime-node and the source-map CLI use). The first one holding 7 to 40
+#: hexadecimal characters is the commit; other values are ignored.
+COMMIT_ENV_VARS = (
+    "AUTTER_COMMIT",
+    "GITHUB_SHA",
+    "VERCEL_GIT_COMMIT_SHA",
+    "CF_PAGES_COMMIT_SHA",
+    "GIT_SHA",
+    "GIT_COMMIT",
+    "COMMIT_SHA",
+    "SOURCE_COMMIT",
+    "RENDER_GIT_COMMIT",
+    "RAILWAY_GIT_COMMIT_SHA",
+    "HEROKU_SLUG_COMMIT",
+    "SOURCE_VERSION",
+)
+_COMMIT_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+_COMMIT_ATTRIBUTE = "deployment.commit"
+_RELEASE_ATTRIBUTE = "service.version"
+RELEASE_ENV = "AUTTER_RELEASE"
+DETECT_RELEASE_ENV = "AUTTER_DETECT_RELEASE"
 
 MAX_SPANS_PER_TRACE = 256
 MAX_BUFFERED_SPANS = 5_000
@@ -550,6 +616,86 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
+def _from_test_client(span: ReadableSpan) -> bool:
+    """A server span whose raw user agent is exactly ``testclient`` or whose
+    host is exactly ``testserver``: a request a test client made."""
+    if span.kind is not SpanKind.SERVER:
+        return False
+    attributes = span.attributes or {}
+    return any(attributes.get(key) == _TEST_CLIENT_USER_AGENT for key in _USER_AGENT_KEYS) or any(
+        attributes.get(key) == _TEST_CLIENT_HOST for key in _HOST_KEYS
+    )
+
+
+def detect_test_runner(
+    environ: Optional[Any] = None, modules: Optional[Any] = None, argv: Optional[Sequence[str]] = None
+) -> Optional[str]:
+    """The test runner this process runs under, or ``None``: ``"pytest"``
+    (``PYTEST_VERSION`` or ``PYTEST_CURRENT_TEST`` set, or ``pytest``
+    imported) or ``"manage.py test"`` (Django's test command). Defaults to
+    ``os.environ``, ``sys.modules`` and ``sys.argv``."""
+    environ = os.environ if environ is None else environ
+    modules = sys.modules if modules is None else modules
+    argv = sys.argv if argv is None else argv
+    if environ.get("PYTEST_VERSION") or environ.get("PYTEST_CURRENT_TEST") or "pytest" in modules:
+        return "pytest"
+    if len(argv) >= 2 and os.path.basename(str(argv[0])) == "manage.py" and argv[1] == "test":
+        return "manage.py test"
+    return None
+
+
+def detect_commit(environ: Optional[Any] = None) -> Optional[str]:
+    """The running commit (lower case): the first of :data:`COMMIT_ENV_VARS`
+    whose value is 7 to 40 hexadecimal characters, or ``None``. Reads
+    environment variables only (default ``os.environ``): never git."""
+    environ = os.environ if environ is None else environ
+    for name in COMMIT_ENV_VARS:
+        value = (environ.get(name) or "").strip()
+        if _COMMIT_RE.fullmatch(value):
+            return value.lower()
+    return None
+
+
+def _has_value(attributes: Any, key: str) -> bool:
+    value = attributes.get(key)
+    return value is not None and value != ""
+
+
+def _with_deployment(resource: Resource, detect_test_env: Optional[bool], detect_release: Optional[bool]) -> Resource:
+    """``resource`` with the test environment, the running commit and the
+    release added where it has none (an explicit value always wins)."""
+    attributes = resource.attributes
+    added: dict = {}
+    if not any(_has_value(attributes, key) for key in _ENVIRONMENT_KEYS):
+        if detect_test_env if detect_test_env is not None else _env_flag(DETECT_TEST_ENV_ENV, True):
+            runner = detect_test_runner()
+            if runner is not None:
+                added["deployment.environment"] = _TEST_ENVIRONMENT
+                LOGGER.info(
+                    "[autter-runtime] test run detected (%s): reporting deployment.environment=test. Set "
+                    "deployment.environment, or AUTTER_DETECT_TEST_ENV=false, to report another environment.",
+                    runner,
+                )
+    if _has_value(attributes, _COMMIT_ATTRIBUTE):
+        # Set explicitly (OTEL_RESOURCE_ATTRIBUTES): kept as it is, and the
+        # release defaults to it (when it is a commit), never to a variable
+        # that may disagree.
+        explicit = str(attributes[_COMMIT_ATTRIBUTE]).strip()
+        commit = explicit.lower() if _COMMIT_RE.fullmatch(explicit) else None
+    else:
+        commit = detect_commit()
+        if commit is not None:
+            added[_COMMIT_ATTRIBUTE] = commit
+    if not _has_value(attributes, _RELEASE_ATTRIBUTE):
+        if detect_release if detect_release is not None else _env_flag(DETECT_RELEASE_ENV, True):
+            release = (os.environ.get(RELEASE_ENV) or "").strip() or commit
+            if release:
+                added[_RELEASE_ATTRIBUTE] = release
+    if not added:
+        return resource
+    return Resource({**attributes, **added}, getattr(resource, "schema_url", None))
+
+
 def _keys_to_drop(keep: Any, drop: Optional[Sequence[str]]) -> frozenset:
     """``keep`` / ``drop`` as given, else from the environment."""
     if keep is None:
@@ -604,6 +750,9 @@ def _redacted(
         return redact_attributes(kept) if redact else kept
 
     attributes = clean(span.attributes)
+    if _from_test_client(span):
+        # From the raw user agent and host, before the user agent is dropped.
+        attributes = {**(attributes or {}), TEST_CLIENT_ATTRIBUTE: True}
     if hasher is not None and (span.attributes or {}).get(CLIENT_IP_HASH_ATTRIBUTE) is None:
         # From the raw address, before it was dropped; a hash already on the
         # span (set upstream) is left alone.
@@ -719,6 +868,8 @@ def init_tracing(
     drop_attributes: Optional[Sequence[str]] = None,
     hash_client_ip: Optional[bool] = None,
     client_ip_salt: Optional[str] = None,
+    detect_test_env: Optional[bool] = None,
+    detect_release: Optional[bool] = None,
 ) -> TracerProvider:
     """A TracerProvider that head-samples as configured and always exports
     errors, registered as the global provider.
@@ -729,7 +880,20 @@ def init_tracing(
       ``OTEL_EXPORTER_OTLP_ENDPOINT`` (or ``…_TRACES_ENDPOINT``) and
       ``OTEL_EXPORTER_OTLP_HEADERS``.
     * ``resource``: default ``Resource.create()``, which reads
-      ``OTEL_SERVICE_NAME`` and ``OTEL_RESOURCE_ATTRIBUTES``.
+      ``OTEL_SERVICE_NAME`` and ``OTEL_RESOURCE_ATTRIBUTES``. What it does
+      not set, the three below fill in; its own values always win.
+    * ``detect_test_env`` (default: on, unless ``AUTTER_DETECT_TEST_ENV=false``;
+      ``False`` turns it off): under a test runner (:func:`detect_test_runner`:
+      pytest, Django's ``manage.py test``), a resource with neither
+      ``deployment.environment.name`` nor ``deployment.environment`` gets
+      ``deployment.environment=test``, logged once at info level.
+    * ``deployment.commit``: the running commit, :func:`detect_commit` (the
+      first of :data:`COMMIT_ENV_VARS` holding 7 to 40 hexadecimal
+      characters; environment variables only), when the resource has none.
+    * ``detect_release`` (default: on, unless ``AUTTER_DETECT_RELEASE=false``;
+      ``False`` turns it off): a resource without ``service.version`` gets
+      ``AUTTER_RELEASE``, else the commit (the full SHA, which the platform
+      resolves to the commit and its pull request).
     * ``redact``: scrub secrets and PII in :class:`RedactingSpanExporter`.
     * ``keep_identifying_attributes`` (default
       ``AUTTER_KEEP_IDENTIFYING_ATTRIBUTES``: ``true`` or a comma-separated
@@ -785,6 +949,9 @@ def init_tracing(
             return existing
     if resource is None:
         resource = Resource.create()
+    # Before the meter provider's resource is derived from it, so request
+    # counts carry the same environment, commit and release as the spans.
+    resource = _with_deployment(resource, detect_test_env, detect_release)
     dropped = _keys_to_drop(keep_identifying_attributes, drop_attributes)
     resource = _without_identifying_resource(resource, dropped)
     meter_provider = None

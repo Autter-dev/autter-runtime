@@ -237,3 +237,113 @@ test("warning occurrences outside a request count nothing", () => {
 
 	assert.deepEqual(metricPoints, []);
 });
+
+// ── Test-client traffic and the running commit ───────────────────────────
+
+const NOW_NANOS = NANOS;
+const kv = (attributes: Record<string, string | boolean>) =>
+	Object.entries(attributes).map(([key, value]) => ({
+		key,
+		value: typeof value === "boolean" ? { boolValue: value } : { stringValue: value },
+	}));
+
+/** One process: a request per entry of `requests`, each a server span with
+ * an exception event and an internal child span, in its own trace. */
+function processExport(
+	resource: Record<string, string>,
+	requests: Array<{ trace: string; attributes: Record<string, string | boolean>; event?: Record<string, string> }>,
+) {
+	return {
+		resourceSpans: [{
+			resource: { attributes: kv({ "service.name": "shop", ...resource }) },
+			scopeSpans: [{
+				spans: requests.flatMap(({ trace, attributes, event }) => [
+					{
+						traceId: trace, spanId: `${trace.slice(0, 15)}1`, name: "GET /carts/{cart_id}", kind: "SPAN_KIND_SERVER",
+						startTimeUnixNano: NOW_NANOS, endTimeUnixNano: NOW_NANOS,
+						attributes: kv({ "http.route": "/carts/{cart_id}", "http.method": "GET", "http.status_code": "500", ...attributes }),
+						status: { code: "STATUS_CODE_ERROR" },
+						events: [{ name: "exception", timeUnixNano: NOW_NANOS, attributes: kv({ "exception.type": "OutOfStock", "exception.message": "none left", ...event }) }],
+					},
+					{
+						traceId: trace, spanId: `${trace.slice(0, 15)}2`, parentSpanId: `${trace.slice(0, 15)}1`, name: "db", kind: "SPAN_KIND_INTERNAL",
+						startTimeUnixNano: NOW_NANOS, endTimeUnixNano: NOW_NANOS, attributes: [],
+					},
+				]),
+			}],
+		}],
+	};
+}
+
+const TRACE_A = "a".repeat(32);
+const TRACE_B = "b".repeat(32);
+
+test("what a request says about itself never changes the environment: no environment is `production`, an explicit one is kept", () => {
+	const claims: Array<Record<string, string | boolean>> = [
+		{ "autter.test_client": true },
+		{ "user_agent.original": "testclient" },
+		{ "http.user_agent": "testclient" },
+		{ "http.host": "testserver", "http.server_name": "testserver", "server.address": "testserver", "net.host.name": "testserver" },
+	];
+	for (const attributes of claims) {
+		const result = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes }]));
+		assert.deepEqual(result.spans.map((s) => s.environment), ["production", "production"], JSON.stringify(attributes));
+		assert.deepEqual(result.occurrences.map((o) => o.environment), ["production"], JSON.stringify(attributes));
+		assert.deepEqual(result.metricPoints.map((p) => p.environment), ["production"], JSON.stringify(attributes));
+		for (const name of ["test", "staging"]) {
+			const explicit = normalizeTraces(processExport({ "deployment.environment": name }, [{ trace: TRACE_A, attributes }]));
+			assert.deepEqual(explicit.occurrences.map((o) => o.environment), [name]);
+		}
+	}
+	// Two requests of one process, one claiming to be a test client: both production.
+	const mixed = normalizeTraces(processExport({}, [
+		{ trace: TRACE_A, attributes: { "http.host": "testserver" } },
+		{ trace: TRACE_B, attributes: { "http.host": "shop.example.com" } },
+	]));
+	assert.deepEqual(mixed.occurrences.map((o) => o.environment), ["production", "production"]);
+});
+
+test("commit: deployment.commit (else vcs.ref.head.revision) from the resource, lower-cased, also in the attributes", () => {
+	const fromResource = normalizeTraces(processExport({ "deployment.commit": "9C1E4F2A7B3D" }, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal(fromResource.occurrences[0]!.commit, "9c1e4f2a7b3d");
+	assert.equal(fromResource.occurrences[0]!.attributes?.["deployment.commit"], "9c1e4f2a7b3d");
+
+	const sha = "0123456789abcdef0123456789abcdef01234567";
+	const vcs = normalizeTraces(processExport({ "vcs.ref.head.revision": sha }, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal(vcs.occurrences[0]!.commit, sha);
+	const both = normalizeTraces(processExport({ "vcs.ref.head.revision": sha, "deployment.commit": "abcdef1" }, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal(both.occurrences[0]!.commit, "abcdef1");
+});
+
+test("commit: an event attribute beats the span's and the resource's", () => {
+	const result = normalizeTraces(processExport(
+		{ "deployment.commit": "1111111111111111111111111111111111111111" },
+		[{ trace: TRACE_A, attributes: { "deployment.commit": "2222222" }, event: { "deployment.commit": "3333333" } }],
+	));
+	assert.equal(result.occurrences[0]!.commit, "3333333");
+	// Already in the attributes: kept as sent.
+	assert.equal(result.occurrences[0]!.attributes?.["deployment.commit"], "3333333");
+	const spanOnly = normalizeTraces(processExport(
+		{ "deployment.commit": "1111111111111111111111111111111111111111" },
+		[{ trace: TRACE_A, attributes: { "deployment.commit": "2222222" } }],
+	));
+	assert.equal(spanOnly.occurrences[0]!.commit, "2222222");
+});
+
+test("commit: anything but 7–40 hex is dropped; none means no field", () => {
+	for (const bad of ["https://github.com/acme/shop", "9c1e4f", "0".repeat(41), "main", "v1.2.3", "9c1e4f2-dirty"]) {
+		const result = normalizeTraces(processExport({ "deployment.commit": bad, "vcs.repository.url.full": "https://github.com/acme/shop" }, [{ trace: TRACE_A, attributes: {} }]));
+		const [occurrence] = result.occurrences;
+		assert.equal("commit" in occurrence!, false, bad);
+		// Resource attributes never reach the occurrence's attributes.
+		assert.equal(occurrence!.attributes?.["deployment.commit"], undefined, bad);
+		assert.equal(occurrence!.attributes?.["vcs.repository.url.full"], undefined, bad);
+	}
+	// An invalid event value does not hide a valid one below it.
+	const fallback = normalizeTraces(processExport({ "deployment.commit": "abcdef1234" }, [{ trace: TRACE_A, attributes: {}, event: { "deployment.commit": "not-a-sha" } }]));
+	assert.equal(fallback.occurrences[0]!.commit, "abcdef1234");
+
+	const none = normalizeTraces(processExport({}, [{ trace: TRACE_A, attributes: {} }]));
+	assert.equal("commit" in none.occurrences[0]!, false);
+	assert.equal(none.occurrences[0]!.attributes?.["deployment.commit"], undefined);
+});

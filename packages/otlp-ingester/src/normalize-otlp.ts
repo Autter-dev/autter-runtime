@@ -11,6 +11,8 @@ import { DEBUG_IDS_ATTRIBUTE, serverDebugIds, withoutDebugIdsAttribute } from ".
 import { histogramLatency, mergeLatency, requestLatency, type LatencySamples } from "./latency.js";
 import {
 	asSeverity,
+	commitOf,
+	withCommitAttribute,
 	type RuntimeLlmCall,
 	type RuntimeMetricPoint,
 	type RuntimeOccurrenceInput,
@@ -162,6 +164,8 @@ interface ResourceInfo {
 	service: string;
 	environment: string;
 	release: string | null;
+	/** `deployment.commit`, else `vcs.ref.head.revision`, when 7–40 hex. */
+	commit: string | null;
 	/** `autter.metrics_wired` and `autter.metrics_routes` (runtime-node
 	 * 1.7.0+): the sender's delta HTTP-server duration histograms
 	 * (`/v1/metrics`) count every request it serves, and each request span
@@ -191,6 +195,7 @@ function resourceInfo(resource: OtlpResource | undefined): ResourceInfo {
 		service,
 		environment,
 		release,
+		commit: commitOf((key) => attrs.get(key)),
 		metricsCountRoutedRequests:
 			attrs.get("autter.metrics_wired") === "true" && attrs.get("autter.metrics_routes") === "true",
 		metricsWired: attrs.get("autter.metrics_wired") === "true",
@@ -342,6 +347,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				for (const event of exceptionEvents) {
 					const eventAttrs = attrMap(event.attributes);
 					const handled = eventAttrs.get("autter.handled") === "true";
+					const commit = commitOf((key) => eventAttrs.get(key), (key) => attrs.get(key), () => resource.commit);
 					const eventAutter = hasAutterKey(eventAttrs);
 					signalRollups.push(rollup);
 					signals.push({
@@ -370,8 +376,9 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							statusCode,
 							traceId: span.traceId ?? null,
 							sessionId: null,
-							attributes: withoutDebugIdsAttribute(sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
-								...(handled ? { "autter.handled": true, ...(eventAttrs.has("autter.sampled") ? { "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) } : {}) })),
+							attributes: withCommitAttribute(withoutDebugIdsAttribute(sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes),
+								...(handled ? { "autter.handled": true, ...(eventAttrs.has("autter.sampled") ? { "autter.sampled": eventAttrs.get("autter.sampled") === "true" } : {}) } : {}) })), commit),
+							...(commit ? { commit } : {}),
 							// Server SDKs (runtime-core errorAttributes): the debug ids of the bundles in the
 							// stack (RF-05), which locate their source maps.
 							...serverDebugIds(eventAttrs.get(DEBUG_IDS_ATTRIBUTE)),
@@ -391,6 +398,7 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 				for (const event of failedOutcomes) {
 					const outcome = attrMap(event.attributes);
 					const name = (outcome.get("autter.outcome.name") ?? "operation").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 200);
+					const commit = commitOf((key) => outcome.get(key), (key) => attrs.get(key), () => resource.commit);
 					signalRollups.push(rollup);
 					signals.push({
 						traceId,
@@ -407,13 +415,15 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							message: `${name}: ${(outcome.get("autter.outcome.message") ?? "failed").replace(EMAIL_VALUE_RE, "[redacted]").slice(0, 1000)}`,
 							stack: String(decodeOtlpAttributes(event.attributes)["autter.outcome.stack"] ?? "") || null, route, method: methodOf(attrs), statusCode,
 							traceId: span.traceId ?? null, sessionId: null,
-							attributes: sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }),
+							attributes: withCommitAttribute(sanitizeRuntimeContext({ ...decodeOtlpAttributes(span.attributes), ...decodeOtlpAttributes(event.attributes) }), commit),
+							...(commit ? { commit } : {}),
 							occurredAt: nanosToDate(event.timeUnixNano ?? span.startTimeUnixNano),
 							...liftErrorFields(outcome, attrs),
 						},
 					});
 				}
 				if (exceptionEvents.length === 0 && failedOutcomes.length === 0 && isError) {
+					const commit = commitOf((key) => attrs.get(key), () => resource.commit);
 					signalRollups.push(rollup);
 					signals.push({
 						traceId,
@@ -439,7 +449,8 @@ export function normalizeTraces(request: OtlpTraceRequest): NormalizedTraces {
 							statusCode,
 							traceId: span.traceId ?? null,
 							sessionId: null,
-							attributes: decodeOtlpAttributes(span.attributes),
+							attributes: withCommitAttribute(decodeOtlpAttributes(span.attributes), commit),
+							...(commit ? { commit } : {}),
 							occurredAt: startedAt,
 							...liftErrorFields(attrs),
 						},

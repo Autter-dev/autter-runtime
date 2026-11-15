@@ -29,6 +29,36 @@ export function asSeverity(
 		: fallback;
 }
 
+const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
+
+/** A commit SHA: 7 to 40 hexadecimal characters, trimmed and lower-cased; null for anything else. */
+export function validCommit(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const sha = value.trim().toLowerCase();
+	return COMMIT_SHA.test(sha) ? sha : null;
+}
+
+/** The first valid commit among `deployment.commit` then `vcs.ref.head.revision` in each source, in order. */
+export function commitOf(...sources: Array<(key: string) => unknown>): string | null {
+	for (const get of sources) {
+		const sha = validCommit(get("deployment.commit")) ?? validCommit(get("vcs.ref.head.revision"));
+		if (sha) return sha;
+	}
+	return null;
+}
+
+/**
+ * `attributes` with `deployment.commit` set to `commit` when they carry
+ * none, so a reader of the stored attributes JSON finds it there too.
+ */
+export function withCommitAttribute(
+	attributes: Record<string, unknown> | null,
+	commit: string | null,
+): Record<string, unknown> | null {
+	if (!commit || attributes?.["deployment.commit"] !== undefined) return attributes;
+	return { ...(attributes ?? {}), "deployment.commit": commit };
+}
+
 /** A normalised error/warning event, before fingerprinting. */
 export interface RuntimeOccurrenceInput {
 	source: RuntimeSource;
@@ -64,6 +94,13 @@ export interface RuntimeOccurrenceInput {
 	expected?: boolean;
 	/** `autter.request.id` — joins the occurrence to its request summary. */
 	requestId?: string;
+	/**
+	 * The commit the app runs: `deployment.commit`, then
+	 * `vcs.ref.head.revision`, from the event, the span (or log record), then
+	 * the resource; only a 7–40 hex value (`validCommit`), lower-cased.
+	 * Omitted when absent.
+	 */
+	commit?: string;
 	/**
 	 * SDK fingerprint override (browser `fingerprint`, OTLP/log
 	 * `autter.fingerprint`): ≤10 scrubbed values, each ≤200 chars. Hashed into

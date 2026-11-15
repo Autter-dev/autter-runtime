@@ -9,7 +9,7 @@ import { declaredLink, liftErrorFields } from "./error-fields.js";
 import { fingerprintOverrideOf } from "./fingerprint-override.js";
 import { normalizeRoute } from "./fingerprint.js";
 import { DEBUG_IDS_ATTRIBUTE, serverDebugIds, withoutDebugIdsAttribute } from "./source-maps.js";
-import type { RuntimeOccurrenceInput } from "./types.js";
+import { commitOf, withCommitAttribute, type RuntimeOccurrenceInput } from "./types.js";
 
 export interface RuntimeLogRecord {
 	id: string;
@@ -249,7 +249,7 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 								statusCode: statusCode || null,
 								traceId: traceId || null,
 								sessionId: null,
-								attributes,
+								...promotedCommit(attributes, attrs, info),
 								occurredAt,
 								...declared,
 								...fingerprintOverrideOf(attributes["autter.fingerprint"]),
@@ -321,6 +321,20 @@ export function normalizeLogs(request: OtlpLogsRequest, stats?: NormalizeLogsSta
 		}
 	}
 	return rows;
+}
+
+/** A promoted occurrence's attributes, with the running commit (record
+ * attributes first, then the resource; 7–40 hex) as `commit` and, when the
+ * attributes carry none, as `deployment.commit`. The record's own
+ * attributes are left as they are. */
+function promotedCommit(
+	attributes: Record<string, unknown>,
+	attrs: Record<string, unknown>,
+	info: Record<string, unknown>,
+): { attributes: Record<string, unknown>; commit?: string } {
+	const commit = commitOf((key) => attrs[key], (key) => info[key]);
+	if (!commit) return { attributes };
+	return { attributes: withCommitAttribute(attributes, commit) ?? attributes, commit };
 }
 
 function hasException(attributes: Record<string, unknown>): boolean {

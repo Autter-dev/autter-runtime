@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IngesterConfig } from "./config.js";
 import type { OutboxRecord, SinkOutbox } from "./sink-outbox.js";
-import type {
-	IngestContext,
-	RuntimeLlmCall,
-	RuntimeMetricPoint,
-	RuntimeOccurrence,
+import {
+	validCommit,
+	type IngestContext,
+	type RuntimeLlmCall,
+	type RuntimeMetricPoint,
+	type RuntimeOccurrence,
 } from "./types.js";
 
 /**
@@ -678,8 +679,11 @@ export function sinkLlmCall(c: RuntimeLlmCall): Record<string, unknown> {
  * their event counts. Unreleased (RF-06): `fingerprints` may end with a
  * `cause-v1` candidate after the legacy one; consumers that do not know the
  * scheme drop it (the platform validates schemes one by one). RF-05: in-app
- * frames' context lines are up to 5 on each side (3 before). Older consumers
- * ignore unknown keys, so the version stays 1.
+ * frames' context lines are up to 5 on each side (3 before). Unreleased:
+ * `commit`, the commit the app runs (`deployment.commit`, else
+ * `vcs.ref.head.revision`), sent only when it is 7–40 hexadecimal
+ * characters (lower-cased); nothing else of the resource is forwarded.
+ * Older consumers ignore unknown keys, so the version stays 1.
  */
 export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 	const {
@@ -700,8 +704,11 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		// Input-only: locates source maps, never leaves the ingester.
 		debugIds: _debugIds,
 		collapsedCount,
+		commit: rawCommit,
 		...rest
 	} = o;
+	// Checked again here: only a hex SHA ever leaves the ingester.
+	const commit = validCommit(rawCommit);
 	return {
 		...rest,
 		occurredAt: o.occurredAt.toISOString(),
@@ -715,6 +722,7 @@ export function sinkOccurrence(o: RuntimeOccurrence): Record<string, unknown> {
 		...(link ? { link } : {}),
 		...(expected ? { expected: true } : {}),
 		...(requestId ? { requestId } : {}),
+		...(commit ? { commit } : {}),
 		// 1.6.0: steps before the error, oldest first, ≤ 30.
 		...(breadcrumbs?.length ? { breadcrumbs } : {}),
 		...(frames?.length ? { frames } : {}),

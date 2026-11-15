@@ -227,6 +227,34 @@ hashing every IPv4 address) and the ingester warns at startup. A hashed IP
 is still pseudonymous personal data in some readings of privacy law: it is
 off by default, and the salt should be kept and rotated like any secret.
 
+## Test traffic (unreleased)
+
+Test traffic is separated by setting `deployment.environment=test` in the
+test run. The Python adapter and `@autter/runtime-node` do this themselves
+under a test runner from the next release; anything else sets it in
+`OTEL_RESOURCE_ATTRIBUTES`. The ingester never changes the environment
+because of what a request says about itself (its user agent, its host, its
+peer address): those come from the caller, and a caller could use them to
+have its errors stored outside production, out of default views and alerts.
+The environment is the resource's `deployment.environment.name` or
+`deployment.environment`, else `production`.
+
+A SERVER span whose raw user agent is exactly `testclient` (what Starlette's
+and FastAPI's in-process `TestClient` sends) gets `autter.test_client: true`
+before the user agent is dropped. It is a hint for a reader, not trusted:
+anyone can send that user agent, and nothing in the ingester acts on it.
+
+## Running commit (unreleased)
+
+Each occurrence forwarded to the sink carries `commit` when the app reports
+the commit it runs: `deployment.commit`, else `vcs.ref.head.revision`, read
+from the exception event, then the span (or log record), then the resource.
+Only a value of 7 to 40 hexadecimal characters is forwarded, lower-cased;
+anything else (a repository URL, a branch name) is dropped, and nothing else
+of the resource is forwarded. When the occurrence's attributes have no
+`deployment.commit`, the SHA is also stored there. The field is optional on
+sink payload version 1: a platform that does not know it ignores it.
+
 ## Rate limits and key lookups (1.12.0)
 
 In the order a request meets them:

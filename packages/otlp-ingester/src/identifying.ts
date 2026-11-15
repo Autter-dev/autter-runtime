@@ -121,17 +121,25 @@ export class IdentifyingAttributeFilter {
 		private readonly hasher: ClientIpHasher | null = null,
 	) {}
 
-	/** The attributes of a span or log record: the client IP hash added (from the raw list), then the drop. */
+	/**
+	 * The attributes of a span or log record: what is read from the raw list
+	 * added first (the client IP hash; on a SERVER span, the test-client
+	 * marker, a hint only), then the drop.
+	 */
 	private recordAttributes = (obj: unknown, serverSpan: boolean): unknown => {
+		if (!isObject(obj)) return this.attributesOf(obj);
+		const added: Json[] = [];
 		const hasher = this.hasher;
-		if (!hasher || !isObject(obj) || hasKey(obj.attributes, CLIENT_IP_HASH_ATTRIBUTE)) return this.attributesOf(obj);
-		const ip = clientIpOfList(obj.attributes, serverSpan);
+		if (hasher && !hasKey(obj.attributes, CLIENT_IP_HASH_ATTRIBUTE)) {
+			const ip = clientIpOfList(obj.attributes, serverSpan);
+			if (ip) added.push({ key: CLIENT_IP_HASH_ATTRIBUTE, value: { stringValue: hasher(ip) } });
+		}
+		if (serverSpan && testClientUserAgentIn(obj.attributes) && !hasKey(obj.attributes, TEST_CLIENT_ATTRIBUTE)) {
+			added.push({ key: TEST_CLIENT_ATTRIBUTE, value: { boolValue: true } });
+		}
 		const filtered = this.attributesOf(obj);
-		if (!ip || !isObject(filtered) || !Array.isArray(filtered.attributes)) return filtered;
-		return {
-			...filtered,
-			attributes: [...filtered.attributes, { key: CLIENT_IP_HASH_ATTRIBUTE, value: { stringValue: hasher(ip) } }],
-		};
+		if (!added.length || !isObject(filtered) || !Array.isArray(filtered.attributes)) return filtered;
+		return { ...filtered, attributes: [...filtered.attributes, ...added] };
 	};
 
 	/** An OTLP key/value list without the dropped keys; the same array when none is present. */
@@ -262,3 +270,25 @@ export function clientIpOfList(list: unknown, serverSpan: boolean): string | nul
 
 /** OTLP SERVER span kind, as a number or the enum name. */
 export const isServerKind = (kind: unknown) => kind === 2 || kind === "SPAN_KIND_SERVER";
+
+// ---------------------------------------------------------------------------
+// Test-client marker (a hint, never trusted)
+
+/**
+ * On a SERVER span whose raw user agent is exactly `testclient` (what
+ * Starlette's and FastAPI's in-process TestClient sends): added before the
+ * user agent is dropped, so the stored span still says so. A hint only: the
+ * user agent is whatever the caller sent, so anyone can produce it, and
+ * nothing in the ingester acts on it. The environment is never changed
+ * because of it: test runs set `deployment.environment=test` themselves.
+ * Not added when nothing is dropped (AUTTER_KEEP_IDENTIFYING_ATTRIBUTES=true
+ * and no client IP hash): the request passes through with its user agent.
+ */
+export const TEST_CLIENT_ATTRIBUTE = "autter.test_client";
+const TEST_CLIENT_USER_AGENT = "testclient";
+const USER_AGENT_KEYS: readonly string[] = ["user_agent.original", "http.user_agent"];
+
+/** The raw OTLP attribute list names the test client's user agent, exactly. */
+function testClientUserAgentIn(list: unknown): boolean {
+	return USER_AGENT_KEYS.some((key) => stringAttribute(list, key) === TEST_CLIENT_USER_AGENT);
+}

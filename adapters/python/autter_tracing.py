@@ -188,7 +188,10 @@ _HTTP_SERVER_DURATIONS = ("http.server.duration", "http.server.request.duration"
 #: On a server span of a request made by a test client: Starlette's and
 #: FastAPI's ``TestClient`` (user agent ``testclient``, host ``testserver``)
 #: or Django's test ``Client`` (host ``testserver``). Read from the raw
-#: attributes, before the user agent is dropped. Same key as the ingester's.
+#: attributes, before the user agent is dropped. A hint for people reading
+#: the trace, nothing more: a caller can send any user agent or host, so
+#: nothing may act on it (alerting, paging, the environment). The
+#: environment comes from the process alone (:func:`detect_test_runner`).
 TEST_CLIENT_ATTRIBUTE = "autter.test_client"
 _TEST_CLIENT_USER_AGENT = "testclient"
 _TEST_CLIENT_HOST = "testserver"
@@ -200,19 +203,19 @@ _TEST_ENVIRONMENT = "test"
 DETECT_TEST_ENV_ENV = "AUTTER_DETECT_TEST_ENV"
 
 #: Environment variables that carry the running commit, in the order they are
-#: tried (the list @autter/runtime-node uses). The first one holding 7 to 40
+#: tried (the order @autter/runtime-node and the source-map CLI use). The first one holding 7 to 40
 #: hexadecimal characters is the commit; other values are ignored.
 COMMIT_ENV_VARS = (
     "AUTTER_COMMIT",
+    "GITHUB_SHA",
+    "VERCEL_GIT_COMMIT_SHA",
+    "CF_PAGES_COMMIT_SHA",
     "GIT_SHA",
     "GIT_COMMIT",
     "COMMIT_SHA",
     "SOURCE_COMMIT",
-    "VERCEL_GIT_COMMIT_SHA",
-    "GITHUB_SHA",
     "RENDER_GIT_COMMIT",
     "RAILWAY_GIT_COMMIT_SHA",
-    "CF_PAGES_COMMIT_SHA",
     "HEROKU_SLUG_COMMIT",
     "SOURCE_VERSION",
 )

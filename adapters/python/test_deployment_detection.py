@@ -227,8 +227,8 @@ class Commit(unittest.TestCase):
         self.assertEqual(
             COMMIT_ENV_VARS,
             (
-                "AUTTER_COMMIT", "GIT_SHA", "GIT_COMMIT", "COMMIT_SHA", "SOURCE_COMMIT", "VERCEL_GIT_COMMIT_SHA",
-                "GITHUB_SHA", "RENDER_GIT_COMMIT", "RAILWAY_GIT_COMMIT_SHA", "CF_PAGES_COMMIT_SHA",
+                "AUTTER_COMMIT", "GITHUB_SHA", "VERCEL_GIT_COMMIT_SHA", "CF_PAGES_COMMIT_SHA", "GIT_SHA",
+                "GIT_COMMIT", "COMMIT_SHA", "SOURCE_COMMIT", "RENDER_GIT_COMMIT", "RAILWAY_GIT_COMMIT_SHA",
                 "HEROKU_SLUG_COMMIT", "SOURCE_VERSION",
             ),
         )
@@ -405,6 +405,10 @@ class TestClientMark(unittest.TestCase):
         self.assertIs(span.attributes[TEST_CLIENT_ATTRIBUTE], True)
         self.assertIs(span.attributes[autter_tracing.TAIL_RETAINED_ATTRIBUTE], True)
         self.assertNotIn("http.user_agent", span.attributes)
+        # A hint only: a test-client request never decides the environment
+        # (a caller could fake it); outside a test run there is none.
+        self.assertNotIn("deployment.environment", span.resource.attributes)
+        self.assertNotIn("deployment.environment.name", span.resource.attributes)
         provider.shutdown()
 
 

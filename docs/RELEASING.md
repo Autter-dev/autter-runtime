@@ -4,10 +4,16 @@
 
 1. Create the **`autter` organization on npmjs.com** (Add Organization →
    name `autter`) — this owns the `@autter` scope.
-2. Generate an **automation token**: npmjs.com → Access Tokens →
-   Generate New Token → *Automation* (bypasses 2FA for CI).
-3. Add it to this repo as the `NPM_TOKEN` secret:
-   `gh secret set NPM_TOKEN -R Autter-dev/autter-runtime`.
+2. For **each public package** (`runtime-browser`, `runtime-node`,
+   `runtime-edge`, `runtime-next`, `runtime-cli`, `otlp-ingester`), add a
+   trusted publisher: npmjs.com → the package → Settings → Trusted Publisher
+   → GitHub Actions, with organization `Autter-dev`, repository
+   `autter-runtime`, workflow `release.yml`, no environment, and
+   **Allow `npm publish`** ticked. A new trusted publisher must be used by a
+   publish within 2 days or npm drops it.
+3. Once each package has published through it, set the package's
+   publishing access to *Require two-factor authentication and disallow
+   bypass 2fa tokens*. No npm token is stored in this repo.
 
 ## Publishing a release
 
@@ -21,7 +27,8 @@
 
 The `Release` workflow builds everything, runs the browser size gate, and
 publishes each package whose version doesn't already exist on the registry
-— re-running is safe. Packages publish with npm **provenance**, so the
+— re-running is safe. It authenticates with npm trusted publishing (OIDC), so
+there is no token to renew. Packages publish with npm **provenance**, so the
 version page shows it was built from this repo by CI.
 
 Manual fallback: Actions tab → Release → Run workflow.

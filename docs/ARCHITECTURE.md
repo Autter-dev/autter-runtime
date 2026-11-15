@@ -1020,7 +1020,7 @@ above 1, on a loop-collapse sample (`1 + collapsed_count`; see
 (issue counts, rate buckets) and treat the record as one sample for
 everything else. A replay from ClickHouse reads it from `collapsed_count`.
 
-Unreleased: `commit`, the commit the app runs: `deployment.commit`, else
+1.18.0: `commit`, the commit the app runs: `deployment.commit`, else
 `vcs.ref.head.revision`, read from the exception event, then the span or
 log record, then the resource. It is sent only when it is 7 to 40
 hexadecimal characters, lower-cased; nothing else of the resource is

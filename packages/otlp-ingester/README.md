@@ -227,7 +227,7 @@ hashing every IPv4 address) and the ingester warns at startup. A hashed IP
 is still pseudonymous personal data in some readings of privacy law: it is
 off by default, and the salt should be kept and rotated like any secret.
 
-## Test traffic (unreleased)
+## Test traffic (1.18.0)
 
 Test traffic is separated by setting `deployment.environment=test` in the
 test run. The Python adapter and `@autter/runtime-node` do this themselves
@@ -244,7 +244,7 @@ and FastAPI's in-process `TestClient` sends) gets `autter.test_client: true`
 before the user agent is dropped. It is a hint for a reader, not trusted:
 anyone can send that user agent, and nothing in the ingester acts on it.
 
-## Running commit (unreleased)
+## Running commit (1.18.0)
 
 Each occurrence forwarded to the sink carries `commit` when the app reports
 the commit it runs: `deployment.commit`, else `vcs.ref.head.revision`, read

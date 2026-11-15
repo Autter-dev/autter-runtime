@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-Packages: `runtime-node`, `runtime-next`, `runtime-cli`, `otlp-ingester`, and the Python adapter (`adapters/python`, copied, not published). `runtime-core` (private, bundled into the others) changes too. `runtime-browser` and `runtime-edge` do not: their built `dist` is byte-identical to 1.19.0 (only `runtime-browser`'s README wording changed).
+## [1.20.0] - 2026-11-15
+
+Packages: `runtime-node` 1.16.0, `runtime-next` 1.11.0 (now requires `runtime-node` 1.16.0 or later), `runtime-cli` 1.4.0, `otlp-ingester` 1.18.0, and the Python adapter (`adapters/python`, copied, not published). `runtime-core` (private, bundled into the others) changes too. `runtime-browser` and `runtime-edge` do not: their built `dist` is byte-identical to 1.19.0 (only `runtime-browser`'s README wording changed).
 
 ### Running commit and default release
 
@@ -27,6 +29,7 @@ Packages: `runtime-node`, `runtime-next`, `runtime-cli`, `otlp-ingester`, and th
 - **Behaviour change (`runtime-next`): `initAutterBrowser` from `@autter/runtime-next/client` sends a W3C `traceparent` on same-origin requests by default**, so a browser error links to the server trace of the request behind it. Turn it off with `initAutterBrowser({ ..., tracePropagation: false })`. `tracePropagationTargets` adds cross-origin APIs you control (they must allow the header in CORS: `Access-Control-Allow-Headers: traceparent`). A third-party origin never gets the header and sees no new CORS preflight; the tracker's own endpoint never gets one. `fetch` is traced through the network observer, so `captureNetworkFailures: false` turns it off for `fetch`. The client bundle grows by the tracing module (about 0.6 KB brotlied). It does nothing outside a browser, so server rendering of a client component is unaffected.
 - `enableTracePropagation` and `disableTracePropagation` are still exported from `@autter/runtime-next/client`. An app that already calls `enableTracePropagation({ tracePropagationTargets })` keeps working: called before `initAutterBrowser`, its targets are kept, and `disableTracePropagation()` before it keeps propagation off.
 - Plain `@autter/runtime-browser` stays opt-in (`enableTracePropagation()` from `@autter/runtime-browser/tracing`), and its 10 KB size gate is unchanged.
+- Upgrade note: a Next.js app that imports `enableTracePropagation` straight from `@autter/runtime-browser/tracing` and calls it before `initAutterBrowser` has its targets replaced by the default (same-origin only). Import it from `@autter/runtime-next/client` instead, or pass `tracePropagationTargets` to `initAutterBrowser`.
 - `runtime-cli`: `autter-runtime sourcemaps setup` lists the trace propagation step in its next steps for browser setups, with the CORS note: for `@autter/runtime-browser`, the `enableTracePropagation()` call (left out when the file that starts the tracker already calls it); for `@autter/runtime-next`, that it is on and how to turn it off.
 
 ### Queue and worker context helpers

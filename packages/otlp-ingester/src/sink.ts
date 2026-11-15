@@ -679,7 +679,7 @@ export function sinkLlmCall(c: RuntimeLlmCall): Record<string, unknown> {
  * their event counts. Unreleased (RF-06): `fingerprints` may end with a
  * `cause-v1` candidate after the legacy one; consumers that do not know the
  * scheme drop it (the platform validates schemes one by one). RF-05: in-app
- * frames' context lines are up to 5 on each side (3 before). Unreleased:
+ * frames' context lines are up to 5 on each side (3 before). 1.18.0:
  * `commit`, the commit the app runs (`deployment.commit`, else
  * `vcs.ref.head.revision`), sent only when it is 7–40 hexadecimal
  * characters (lower-cased); nothing else of the resource is forwarded.

@@ -164,7 +164,8 @@ class Verify(unittest.TestCase):
             [(path, body)] = state["posted"][:1]
             attrs = {a["key"]: a["value"]["stringValue"] for a in body["resourceSpans"][0]["resource"]["attributes"]}
             self.assertEqual(attrs["autter.verify.id"], report["traceId"])
-            self.assertEqual(attrs["deployment.environment"], "verify")
+            self.assertEqual(attrs["deployment.environment.name"], "verify")
+            self.assertNotIn("deployment.environment", attrs)
         finally:
             server.shutdown()
 

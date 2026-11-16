@@ -47,7 +47,7 @@ def readme_env(service: str, extra: dict | None = None) -> dict:
         "OTEL_EXPORTER_OTLP_ENDPOINT": INGESTER,
         "OTEL_EXPORTER_OTLP_HEADERS": f"x-autter-key={LOCAL_DEV_KEY}",
         "OTEL_SERVICE_NAME": service,
-        "OTEL_RESOURCE_ATTRIBUTES": f"service.version={RUN},deployment.environment=development",
+        "OTEL_RESOURCE_ATTRIBUTES": f"service.version={RUN},deployment.environment.name=development",
         "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
         "OTEL_TRACES_SAMPLER_ARG": "0.1",
         "OTEL_BSP_SCHEDULE_DELAY": "200",

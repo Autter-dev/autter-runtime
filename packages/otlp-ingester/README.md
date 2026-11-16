@@ -229,8 +229,8 @@ off by default, and the salt should be kept and rotated like any secret.
 
 ## Test traffic (1.18.0)
 
-Test traffic is separated by setting `deployment.environment=test` in the
-test run. The Python adapter and `@autter/runtime-node` do this themselves
+Test traffic is separated by setting `deployment.environment.name=test` in
+the test run (the deprecated `deployment.environment` is still read). The Python adapter and `@autter/runtime-node` do this themselves
 under a test runner from the next release; anything else sets it in
 `OTEL_RESOURCE_ATTRIBUTES`. The ingester never changes the environment
 because of what a request says about itself (its user agent, its host, its

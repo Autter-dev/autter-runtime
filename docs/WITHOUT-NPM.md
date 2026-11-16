@@ -32,7 +32,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.autter.dev
 OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer ${AUTTER_RUNTIME_KEY}"
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 OTEL_SERVICE_NAME=payments-api
-OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment=production
+OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment.name=production
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.01
 ```

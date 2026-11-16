@@ -5,7 +5,7 @@ Everything is configured by the standard variables:
     OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.autter.dev
     OTEL_EXPORTER_OTLP_HEADERS=x-autter-key=${AUTTER_RUNTIME_KEY}
     OTEL_SERVICE_NAME=shop
-    OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment=production
+    OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment.name=production
     OTEL_TRACES_SAMPLER=parentbased_traceidratio
     OTEL_TRACES_SAMPLER_ARG=0.1
 """

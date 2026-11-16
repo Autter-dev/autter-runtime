@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-11-17
+
+Packages: `runtime-node` 1.17.0, and the Python adapter (`adapters/python`, copied, not published). The other packages are unchanged; the `otlp-ingester` README is updated without a release.
+
+### The environment is sent as `deployment.environment.name`
+
+OpenTelemetry's semantic conventions renamed the resource attribute `deployment.environment` to `deployment.environment.name`. Every Autter ingester version reads both and prefers the new name, so nothing changes in Autter.
+
+- `runtime-node`: `initAutterServer` sends the environment on spans and metrics as `deployment.environment.name` (log records already did). A value set in `OTEL_RESOURCE_ATTRIBUTES` still wins, under either name: one under the old name is also sent as `deployment.environment.name`, so it keeps winning now that the SDK no longer sends the old name itself. `npx @autter/runtime-node verify` sends its test event with the new name.
+- Python adapter: under a test runner, `init_tracing()` sets `deployment.environment.name=test` (was `deployment.environment=test`) when the resource has no environment; an environment the service sets, under either name, still wins and is left as it is. The test event of `python3 compat.py verify` uses the new name.
+- Docs and examples set `OTEL_RESOURCE_ATTRIBUTES=…,deployment.environment.name=…`. `deployment.environment` still works.
+- **Behaviour change:** a collector or backend of your own that reads `deployment.environment` from Autter's Node spans, or from the Python adapter's test environment, should read `deployment.environment.name` (or both).
+
 ## [1.20.1] - 2026-11-15
 
 Packages: `runtime-browser` 1.8.2, `runtime-node` 1.16.1, `runtime-edge` 1.4.3, `runtime-next` 1.11.1, `runtime-cli` 1.4.1, `otlp-ingester` 1.18.1. No code changes from 1.20.0.

@@ -169,7 +169,7 @@ def recipe_env(stub: OtlpStub, service: str, *, ratio: str = "0", extra: Optiona
         "OTEL_EXPORTER_OTLP_HEADERS": f"x-autter-key={TEST_KEY}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
         "OTEL_SERVICE_NAME": service,
-        "OTEL_RESOURCE_ATTRIBUTES": f"service.version={RELEASE},deployment.environment=test",
+        "OTEL_RESOURCE_ATTRIBUTES": f"service.version={RELEASE},deployment.environment.name=test",
         "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
         "OTEL_TRACES_SAMPLER_ARG": ratio,
         # Tests only: export quickly instead of every 5 s.

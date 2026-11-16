@@ -226,7 +226,7 @@ Configuration is environment variables only:
 OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.autter.dev            # the exporter adds /v1/traces
 OTEL_EXPORTER_OTLP_HEADERS=x-autter-key=${AUTTER_RUNTIME_KEY}   # the server key
 OTEL_SERVICE_NAME=shop
-OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment=production
+OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment.name=production
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.01  # 1% of healthy traces; init_tracing() exports every error
 AUTTER_COUNT_REQUESTS=true    # count every request (the default; older copies need it set)
@@ -250,11 +250,11 @@ always wins:
   or `init_tracing(detect_release=False)` turns the release default off; the
   commit is still sent.
 - **Test runs.** Running your tests with tracing on? Under pytest or
-  `manage.py test`, the adapter reports `deployment.environment=test` unless
+  `manage.py test`, the adapter reports `deployment.environment.name=test` unless
   you set an environment yourself; set `AUTTER_DETECT_TEST_ENV=false` (or
   `init_tracing(detect_test_env=False)`) to turn this off. An environment in
   `OTEL_RESOURCE_ATTRIBUTES` counts as set, so keep
-  `deployment.environment=production` out of the environment your tests run
+  `deployment.environment.name=production` out of the environment your tests run
   in. Autter leaves `test` out of default views and never pages on it.
 - Requests made through Starlette's or FastAPI's `TestClient`, or Django's
   test `Client` when the instrumentation records its host `testserver`, get
@@ -581,7 +581,7 @@ exp, _ := otlptracehttp.New(ctx,
         "authorization": "Bearer " + os.Getenv("AUTTER_RUNTIME_KEY"),
     }),
 )
-// resource: service.name, service.version (release), deployment.environment
+// resource: service.name, service.version (release), deployment.environment.name
 // errors: span.RecordError(err); span.SetStatus(codes.Error, err.Error())
 ```
 
@@ -611,7 +611,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.autter.dev
 OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer ${AUTTER_RUNTIME_KEY}"
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 OTEL_SERVICE_NAME=payments-api
-OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment=production
+OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.environment.name=production
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.01
 ```

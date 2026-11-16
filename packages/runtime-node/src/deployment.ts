@@ -118,3 +118,39 @@ export function testRunnerDetected(env: Env = process.env): boolean {
 export function resolveEnvironment(environment: string | undefined, env: Env = process.env): string {
 	return environment ?? env.NODE_ENV ?? (testRunnerDetected(env) ? "test" : "production");
 }
+
+/** OpenTelemetry's resource attribute for the environment (semantic conventions 1.27+). */
+export const ENVIRONMENT_ATTRIBUTE = "deployment.environment.name";
+/** The deprecated name it replaced; still read where a user sets it. */
+export const LEGACY_ENVIRONMENT_ATTRIBUTE = "deployment.environment";
+
+/**
+ * The environment a user set in `OTEL_RESOURCE_ATTRIBUTES` (comma-separated
+ * `key=value`, values percent-encoded per the OpenTelemetry spec):
+ * `deployment.environment.name`, else the deprecated `deployment.environment`.
+ * Undefined when neither is set.
+ *
+ * The NodeSDK merges those attributes over the SDK's own resource, so a value
+ * set there has always been the environment spans report. Now that the SDK
+ * sends `deployment.environment.name`, a value under the old name would sit
+ * beside it and lose (the ingester prefers the new name); the SDK sends it
+ * under the new name instead, so it keeps winning.
+ */
+export function environmentFromResourceAttributes(env: Env = process.env): string | undefined {
+	const raw = env.OTEL_RESOURCE_ATTRIBUTES;
+	if (!raw) return undefined;
+	const pairs = new Map<string, string>();
+	for (const part of raw.split(",")) {
+		const at = part.indexOf("=");
+		if (at <= 0) continue;
+		const key = part.slice(0, at).trim();
+		let value = part.slice(at + 1).trim();
+		try {
+			value = decodeURIComponent(value);
+		} catch {
+			// Not percent-encoded as the spec asks: kept as written.
+		}
+		if (key && value) pairs.set(key, value);
+	}
+	return pairs.get(ENVIRONMENT_ATTRIBUTE) ?? pairs.get(LEGACY_ENVIRONMENT_ATTRIBUTE);
+}

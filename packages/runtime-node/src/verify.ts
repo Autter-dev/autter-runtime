@@ -101,7 +101,7 @@ interface TestResource {
 function resourceAttributes(opts: TestResource) {
 	return [
 		str("service.name", opts.service),
-		str("deployment.environment", opts.environment),
+		str("deployment.environment.name", opts.environment),
 		...(opts.release ? [str("service.version", opts.release)] : []),
 		...(opts.commit ? [str("deployment.commit", opts.commit)] : []),
 		str("autter.verify.id", opts.traceId),

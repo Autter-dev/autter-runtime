@@ -82,7 +82,7 @@ class DjangoRecipe(unittest.TestCase):
             self.assertIs(span["attributes"]["autter.tail_retained"], True)
             self.assertEqual(span["resource"]["service.name"], SERVICE)
             self.assertEqual(span["resource"]["service.version"], RELEASE)
-            self.assertEqual(span["resource"]["deployment.environment"], "test")
+            self.assertEqual(span["resource"]["deployment.environment.name"], "test")
         self.assertEqual(self.stub.trace_requests()[0]["headers"].get("x-autter-key"), TEST_KEY)
 
         # Unhandled → Django's 500: DjangoInstrumentor records it on the

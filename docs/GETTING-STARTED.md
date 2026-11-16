@@ -489,7 +489,7 @@ package at all — configure the SDK you already use:
 OTEL_EXPORTER_OTLP_ENDPOINT=https://your-ingester.example.com
 OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer ${AUTTER_RUNTIME_KEY}"
 OTEL_SERVICE_NAME=payments-api
-OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.commit=${GIT_SHA},deployment.environment=production
+OTEL_RESOURCE_ATTRIBUTES=service.version=${GIT_SHA},deployment.commit=${GIT_SHA},deployment.environment.name=production
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.01
 ```
@@ -526,7 +526,7 @@ reports, `test`:
 | --- | --- | --- |
 | `@autter/runtime-node` (and `@autter/runtime-next` on the server) | Jest, Vitest or `node --test`, with no `environment` option and no `NODE_ENV` | pass `environment` or set `NODE_ENV` |
 | `autter_tracing.py` | pytest or Django's `manage.py test`, with no environment on the resource | `AUTTER_DETECT_TEST_ENV=false` or `init_tracing(detect_test_env=False)` |
-| Any other OpenTelemetry SDK | set it yourself, e.g. `OTEL_RESOURCE_ATTRIBUTES=deployment.environment=test` in the CI job | |
+| Any other OpenTelemetry SDK | set it yourself, e.g. `OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=test` in the CI job | |
 
 An explicit environment always wins. Autter leaves the `test` environment
 out of its default views and never pages on it. The ingester never changes

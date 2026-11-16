@@ -66,7 +66,7 @@ import { authHeaders, resolveIngestKey, warnKeyKind, warnMissingKey } from "./in
 import { IngestMetricExporter, IngestSpanExporter } from "./ingest-exporters.js";
 import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
-import { detectCommit, resolveEnvironment, resolveRelease } from "./deployment.js";
+import { detectCommit, ENVIRONMENT_ATTRIBUTE, environmentFromResourceAttributes, resolveEnvironment, resolveRelease } from "./deployment.js";
 import {
 	configureExportErrors,
 	exportErrorMark,
@@ -1385,7 +1385,10 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		"service.instance.id": (options.instanceId || process.env.AUTTER_RUNTIME_INSTANCE_ID || randomUUID()).slice(0, 128),
 		...(release ? { [ATTR_SERVICE_VERSION]: release } : {}),
 		...(commit ? { "deployment.commit": commit } : {}),
-		"deployment.environment": environment,
+		// The current semantic-conventions name (log records already used it). A
+		// value set in OTEL_RESOURCE_ATTRIBUTES, under either name, still wins:
+		// the NodeSDK merges those over this resource.
+		[ENVIRONMENT_ATTRIBUTE]: environmentFromResourceAttributes() ?? environment,
 		// OTel semconv for SDK distributions: the ingester records which
 		// Autter SDK version each service runs (version compatibility checks).
 		"telemetry.distro.name": distro.name,

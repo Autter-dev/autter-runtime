@@ -824,7 +824,7 @@ def verify(endpoint: str, key: Optional[str], service: str, environment: str = "
         return done()
     add("auth", "pass", "key accepted")
 
-    resource = {"attributes": [_attr("service.name", service), _attr("deployment.environment", environment),
+    resource = {"attributes": [_attr("service.name", service), _attr("deployment.environment.name", environment),
                                *([_attr("service.version", release)] if release else []),
                                _attr("autter.verify.id", trace_id)]}
     end = time.time_ns()

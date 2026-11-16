@@ -4,7 +4,10 @@
 //
 // - environment: the option, else NODE_ENV, else `test` when a test runner
 //   is detected (JEST_WORKER_ID, VITEST, NODE_TEST_CONTEXT), else
-//   `production`. An explicit value always wins.
+//   `production`. An explicit value always wins. Sent as
+//   `deployment.environment.name`; on spans, a value the user set in
+//   OTEL_RESOURCE_ATTRIBUTES (under that name or the deprecated
+//   `deployment.environment`) wins, as the NodeSDK merges those over it.
 // - commit: the first commit variable (COMMIT_ENV_VARS) holding 7-40
 //   hexadecimal characters, sent as the resource attribute
 //   `deployment.commit` whenever one is found. Never read from git.
@@ -32,6 +35,7 @@ const {
 	defaultRelease,
 	detectCommit,
 	detectCommitFrom,
+	environmentFromResourceAttributes,
 	resolveEnvironment,
 	resolveRelease,
 } = await tsImport("../src/deployment.ts", import.meta.url);
@@ -54,6 +58,18 @@ test("environment: an explicit option wins, then NODE_ENV, then test under a run
 	// Set but empty is not set.
 	assert.equal(resolveEnvironment(undefined, { VITEST: "" }), "production");
 	assert.deepEqual([...TEST_RUNNER_ENV_VARS], ["JEST_WORKER_ID", "VITEST", "NODE_TEST_CONTEXT"]);
+});
+
+test("environment from OTEL_RESOURCE_ATTRIBUTES: the current name, else the deprecated one", () => {
+	const from = (value) => environmentFromResourceAttributes(value === undefined ? {} : { OTEL_RESOURCE_ATTRIBUTES: value });
+	assert.equal(from(undefined), undefined);
+	assert.equal(from("service.version=abc"), undefined);
+	assert.equal(from("deployment.environment=staging"), "staging");
+	assert.equal(from("deployment.environment.name=preview"), "preview");
+	assert.equal(from("deployment.environment=staging,deployment.environment.name=preview"), "preview", "the current name wins");
+	assert.equal(from(" service.version = v1 , deployment.environment = eu%20west "), "eu west", "trimmed and percent-decoded");
+	assert.equal(from("deployment.environment="), undefined, "empty is not set");
+	assert.equal(from("deployment.environment=%E0%A4"), "%E0%A4", "a value that is not valid percent-encoding is kept as written");
 });
 
 test("commit: only 7 to 40 hexadecimal characters, first valid variable in the shared order", () => {
@@ -125,7 +141,7 @@ test("enrichDeployment: deployment.commit only for a commit, from the shared lis
 // ------------------------------------------------- what the SDK sends
 
 /** Every variable the rules read, removed from each child's environment. */
-const RULE_VARS = [...TEST_RUNNER_ENV_VARS, ...COMMIT_ENV_VARS, "NODE_ENV", "AUTTER_RELEASE", "AUTTER_DETECT_RELEASE"];
+const RULE_VARS = [...TEST_RUNNER_ENV_VARS, ...COMMIT_ENV_VARS, "NODE_ENV", "AUTTER_RELEASE", "AUTTER_DETECT_RELEASE", "OTEL_RESOURCE_ATTRIBUTES"];
 
 const received = [];
 let collector;
@@ -158,19 +174,23 @@ after(async () => {
 const value = (v) => v?.stringValue ?? v?.intValue ?? v?.boolValue ?? v?.doubleValue;
 const attrs = (list) => Object.fromEntries((list ?? []).map((a) => [a.key, value(a.value)]));
 
-/** The resources one service sent: of its spans, and of its log records. */
+/**
+ * The resources one service sent: of its spans, and of its log records. Both
+ * name the environment `deployment.environment.name`; it is read from there
+ * into `environment`. `deployment.environment` is left as sent (only a value
+ * the user set in OTEL_RESOURCE_ATTRIBUTES).
+ */
 function resourcesOf(service) {
 	const spans = [];
 	const logs = [];
 	for (const { body } of received) {
 		for (const rs of body.resourceSpans ?? []) {
-			const resource = attrs(rs.resource?.attributes);
-			if (resource["service.name"] === service) spans.push(resource);
+			const { "deployment.environment.name": environment, ...resource } = attrs(rs.resource?.attributes);
+			if (resource["service.name"] === service) spans.push({ ...resource, environment });
 		}
 		for (const rl of body.resourceLogs ?? []) {
-			// Log records name it with the newer semconv key.
 			const { "deployment.environment.name": environment, ...resource } = attrs(rl.resource?.attributes);
-			if (resource["service.name"] === service) logs.push({ ...resource, "deployment.environment": environment });
+			if (resource["service.name"] === service) logs.push({ ...resource, environment });
 		}
 	}
 	return { spans, logs };
@@ -236,20 +256,32 @@ function only(resources, key) {
 
 test("initAutterServer: production outside a test runner, test under one, explicit values win", async () => {
 	const outside = await run("server");
-	assert.equal(only(outside.spans, "deployment.environment"), "production");
-	assert.equal(only(outside.logs, "deployment.environment"), "production");
+	assert.equal(only(outside.spans, "environment"), "production");
+	assert.equal(only(outside.logs, "environment"), "production");
 	assert.equal(only(outside.spans, "service.version"), undefined);
 	assert.equal(only(outside.spans, "deployment.commit"), undefined);
 
 	const nodeTest = await run("server", {}, { NODE_TEST_CONTEXT: "child" });
-	assert.equal(only(nodeTest.spans, "deployment.environment"), "test");
-	assert.equal(only(nodeTest.logs, "deployment.environment"), "test");
+	assert.equal(only(nodeTest.spans, "environment"), "test");
+	assert.equal(only(nodeTest.logs, "environment"), "test");
 
 	const jest = await run("server", {}, { JEST_WORKER_ID: "1", NODE_ENV: "staging" });
-	assert.equal(only(jest.spans, "deployment.environment"), "staging", "NODE_ENV wins over the runner");
+	assert.equal(only(jest.spans, "environment"), "staging", "NODE_ENV wins over the runner");
 
 	const vitest = await run("server", { environment: "production" }, { VITEST: "true" });
-	assert.equal(only(vitest.spans, "deployment.environment"), "production", "the option wins over the runner");
+	assert.equal(only(vitest.spans, "environment"), "production", "the option wins over the runner");
+
+	// Spans carry only the current semantic-conventions name.
+	assert.equal(only(outside.spans, "deployment.environment"), undefined, "no deprecated deployment.environment");
+
+	// A value set in OTEL_RESOURCE_ATTRIBUTES has always won on spans (the
+	// NodeSDK merges it over the SDK's resource); under the deprecated name it
+	// still does, sent as deployment.environment.name.
+	const legacy = await run("server", {}, { OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=staging", NODE_ENV: "development" });
+	assert.equal(only(legacy.spans, "environment"), "staging", "the deprecated name set by the user wins");
+	assert.equal(only(legacy.spans, "deployment.environment"), "staging", "and is passed through as the user set it");
+	const current = await run("server", { environment: "eu" }, { OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=preview" });
+	assert.equal(only(current.spans, "environment"), "preview");
 });
 
 test("initAutterServer: the detected commit is deployment.commit and, by default, the release", async () => {
@@ -284,17 +316,17 @@ test("initAutterServer: the detected commit is deployment.commit and, by default
 
 test("initAutterLogging: the same environment and release defaults", async () => {
 	const outside = await run("logging");
-	assert.equal(only(outside.logs, "deployment.environment"), "production");
+	assert.equal(only(outside.logs, "environment"), "production");
 	assert.equal(only(outside.logs, "service.version"), undefined);
 	assert.equal(only(outside.logs, "deployment.commit"), undefined);
 
 	const vitest = await run("logging", {}, { VITEST: "true", RAILWAY_GIT_COMMIT_SHA: SHA });
-	assert.equal(only(vitest.logs, "deployment.environment"), "test");
+	assert.equal(only(vitest.logs, "environment"), "test");
 	assert.equal(only(vitest.logs, "service.version"), SHA);
 	assert.equal(only(vitest.logs, "deployment.commit"), SHA, "logger-only mode sends the commit too");
 
 	const explicit = await run("logging", { environment: "eu", release: "v3" }, { VITEST: "true", GIT_SHA: SHA, NODE_ENV: "development" });
-	assert.equal(only(explicit.logs, "deployment.environment"), "eu");
+	assert.equal(only(explicit.logs, "environment"), "eu");
 	assert.equal(only(explicit.logs, "service.version"), "v3");
 
 	const off = await run("logging", { release: false }, { GIT_SHA: SHA });

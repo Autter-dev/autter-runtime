@@ -56,7 +56,7 @@ an app that registers its own afterwards should turn counting off.
 Test runs, commit and release. :func:`init_tracing` fills in three resource
 attributes the service did not set itself (an explicit value always wins):
 
-* ``deployment.environment = test`` when the process runs under a test
+* ``deployment.environment.name = test`` when the process runs under a test
   runner (pytest, or Django's ``manage.py test``) and the resource has no
   environment at all (neither ``deployment.environment.name`` nor
   ``deployment.environment``). Off with ``AUTTER_DETECT_TEST_ENV=false`` or
@@ -670,10 +670,10 @@ def _with_deployment(resource: Resource, detect_test_env: Optional[bool], detect
         if detect_test_env if detect_test_env is not None else _env_flag(DETECT_TEST_ENV_ENV, True):
             runner = detect_test_runner()
             if runner is not None:
-                added["deployment.environment"] = _TEST_ENVIRONMENT
+                added["deployment.environment.name"] = _TEST_ENVIRONMENT
                 LOGGER.info(
-                    "[autter-runtime] test run detected (%s): reporting deployment.environment=test. Set "
-                    "deployment.environment, or AUTTER_DETECT_TEST_ENV=false, to report another environment.",
+                    "[autter-runtime] test run detected (%s): reporting deployment.environment.name=test. Set "
+                    "deployment.environment.name, or AUTTER_DETECT_TEST_ENV=false, to report another environment.",
                     runner,
                 )
     if _has_value(attributes, _COMMIT_ATTRIBUTE):
@@ -886,7 +886,7 @@ def init_tracing(
       ``False`` turns it off): under a test runner (:func:`detect_test_runner`:
       pytest, Django's ``manage.py test``), a resource with neither
       ``deployment.environment.name`` nor ``deployment.environment`` gets
-      ``deployment.environment=test``, logged once at info level.
+      ``deployment.environment.name=test``, logged once at info level.
     * ``deployment.commit``: the running commit, :func:`detect_commit` (the
       first of :data:`COMMIT_ENV_VARS` holding 7 to 40 hexadecimal
       characters; environment variables only), when the resource has none.

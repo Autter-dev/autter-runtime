@@ -155,7 +155,8 @@ class TestEnvironment(unittest.TestCase):
     def test_a_test_run_without_an_environment_reports_test_and_says_so_once(self):
         with self.assertLogs("autter.runtime", "INFO") as logs:
             resource = _resource(runner="pytest")
-        self.assertEqual(resource["deployment.environment"], "test")
+        self.assertEqual(resource["deployment.environment.name"], "test")
+        self.assertNotIn("deployment.environment", resource, "only the current semantic-conventions name")
         lines = [line for line in logs.output if "test run detected" in line]
         self.assertEqual(len(lines), 1)
         self.assertIn("INFO", lines[0])
@@ -163,7 +164,7 @@ class TestEnvironment(unittest.TestCase):
 
     def test_a_passed_resource_without_an_environment_also_reports_test(self):
         resource = _resource(runner="manage.py test", resource=Resource.create({"service.name": "shop"}))
-        self.assertEqual(resource["deployment.environment"], "test")
+        self.assertEqual(resource["deployment.environment.name"], "test")
         self.assertEqual(resource["service.name"], "shop")
 
     def test_an_explicit_environment_always_wins(self):
@@ -196,11 +197,13 @@ class TestEnvironment(unittest.TestCase):
             ({"AUTTER_DETECT_TEST_ENV": "true"}, {"detect_test_env": False}),  # the argument wins
         ):
             with self.subTest(env=env, kwargs=kwargs):
-                self.assertNotIn("deployment.environment", _resource(env, runner="pytest", **kwargs))
+                resource = _resource(env, runner="pytest", **kwargs)
+                self.assertNotIn("deployment.environment.name", resource)
+                self.assertNotIn("deployment.environment", resource)
         # And the argument turns it on over the variable.
         self.assertEqual(
             _resource({"AUTTER_DETECT_TEST_ENV": "false"}, runner="pytest", detect_test_env=True)[
-                "deployment.environment"
+                "deployment.environment.name"
             ],
             "test",
         )
@@ -215,7 +218,7 @@ class TestEnvironment(unittest.TestCase):
         provider.shutdown()
         metric_resources = metric_exporter.resources()
         self.assertTrue(metric_resources, "the request was counted")
-        for key, value in (("deployment.environment", "test"), ("deployment.commit", SHA), ("service.version", SHA)):
+        for key, value in (("deployment.environment.name", "test"), ("deployment.commit", SHA), ("service.version", SHA)):
             self.assertEqual(provider.resource.attributes[key], value)
             for metric_resource in metric_resources:  # older SDKs export once more on shutdown
                 self.assertEqual(metric_resource[key], value)
@@ -421,12 +424,14 @@ _PYTEST_PROBE = textwrap.dedent(
 
     def test_reports_test():
         provider = init_tracing(exporter=InMemorySpanExporter(), set_global=False, count_requests=False)
-        assert provider.resource.attributes["deployment.environment"] == "test"
+        assert provider.resource.attributes["deployment.environment.name"] == "test"
+        assert "deployment.environment" not in provider.resource.attributes
 
     def test_explicit_environment_wins():
         os.environ["OTEL_RESOURCE_ATTRIBUTES"] = "deployment.environment=production"
         provider = init_tracing(exporter=InMemorySpanExporter(), set_global=False, count_requests=False)
         assert provider.resource.attributes["deployment.environment"] == "production"
+        assert "deployment.environment.name" not in provider.resource.attributes  # the old name, set by the user, is kept and wins
     """
 )
 

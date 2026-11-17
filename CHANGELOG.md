@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### `instrumentLlmClient` keeps the SDK's promise
+
+- `runtime-node`: `instrumentLlmClient` returned a plain `Promise` for every call, so `.withResponse()` and `.asResponse()` on an instrumented OpenAI or Anthropic client threw a `TypeError` in the app, which broke code that reads rate-limit headers or request ids. The SDK's own `APIPromise` is now returned, and the span ends when its body is parsed, whether through `await`, `.then()` or `.withResponse()`. A call read only through `.asResponse()` is not recorded, because its body is left for the caller.
+
 ## [1.22.0] - 2026-11-21
 
 Packages: `otlp-ingester` 1.19.0, `runtime-node` 1.18.0, `runtime-edge` 1.5.0, `runtime-browser` 1.9.0, `runtime-cli` 1.5.0. `runtime-next` is unchanged (it takes the new SDK versions through its `^` ranges).

@@ -281,6 +281,12 @@ function followEventStream<T extends EventStreamHelper>(
 	return stream;
 }
 
+type ApiPromise = Promise<unknown> & { parse(): Promise<unknown> };
+
+function isApiPromise(value: Promise<unknown>): value is ApiPromise {
+	return typeof (value as Partial<ApiPromise>).parse === "function";
+}
+
 function isAsyncIterable(value: unknown): value is object {
 	return !!value && typeof value === "object" && Symbol.asyncIterator in value;
 }
@@ -357,13 +363,23 @@ export function instrumentLlmClient<T extends object>(
 			// synchronously.
 			return settle(result, span, model, bedrock);
 		}
-		return result.then(
-			(resolved) => settle(resolved, span, model, bedrock),
-			(err) => {
-				endWithError(span, err);
-				throw err;
-			},
-		);
+		const observe = (settled: Promise<unknown>) =>
+			settled.then(
+				(resolved) => settle(resolved, span, model, bedrock),
+				(err) => {
+					endWithError(span, err);
+					throw err;
+				},
+			);
+		if (!isApiPromise(result)) return observe(result);
+		// The SDKs' APIPromise parses the body only when `then`, `catch`,
+		// `finally` or `withResponse()` ask for it, all through `parse()`.
+		// Observing that call keeps the promise itself, its `withResponse()`
+		// and `asResponse()`, and leaves the body of `asResponse()` unread.
+		const parse = result.parse;
+		let observed: Promise<unknown> | undefined;
+		result.parse = () => (observed ??= observe(parse.call(result)));
+		return result;
 	}
 
 	/** The model a call is for, or undefined when it isn't a model call. */

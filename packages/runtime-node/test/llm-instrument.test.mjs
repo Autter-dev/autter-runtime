@@ -6,6 +6,7 @@ import {
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
+import { quietPeriod } from "./support/wait.mjs";
 import {
 	instrumentLlmClient,
 	trackLlmCall,
@@ -559,6 +560,164 @@ test("send() with any other command is not traced", async () => {
 	const bedrock = instrumentLlmClient(new BedrockRuntimeClient());
 	await bedrock.send(new GetObjectCommand({ modelId: "x" }));
 	assert.equal(exporter.getFinishedSpans().length, 0);
+});
+
+// ------------------------------------------------ SDK promise methods ---
+
+/**
+ * Mirrors the APIPromise of the openai and @anthropic-ai/sdk packages: a
+ * Promise subclass that resolves to nothing by itself, parses the response
+ * body when `then`, `catch`, `finally`, `parse` or `withResponse` ask for it,
+ * keeps the unparsed `Response` for `asResponse()`, and holds private state
+ * that only works with the real instance as `this`.
+ */
+class FakeApiPromise extends Promise {
+	#client;
+	constructor(client, responsePromise, parseResponse) {
+		super((resolve) => resolve(null));
+		this.responsePromise = responsePromise;
+		this.parseResponse = parseResponse;
+		this.#client = client;
+	}
+	asResponse() {
+		return this.responsePromise.then((props) => props.response);
+	}
+	async withResponse() {
+		const [data, response] = await Promise.all([this.parse(), this.asResponse()]);
+		return { data, response, request_id: response.headers.get("x-request-id") };
+	}
+	parse() {
+		this.parsedPromise ??= this.responsePromise.then((props) => this.parseResponse(this.#client, props));
+		return this.parsedPromise;
+	}
+	then(onfulfilled, onrejected) {
+		return this.parse().then(onfulfilled, onrejected);
+	}
+	catch(onrejected) {
+		return this.parse().catch(onrejected);
+	}
+	finally(onfinally) {
+		return this.parse().finally(onfinally);
+	}
+}
+
+const COMPLETION = {
+	model: "gpt-4o-2024-08-06",
+	usage: { prompt_tokens: 10000, completion_tokens: 500, total_tokens: 10500 },
+};
+
+async function parseApiResponse(_client, { response, stream }) {
+	if (stream) return gen([{ model: COMPLETION.model, choices: [], usage: COMPLETION.usage }]);
+	const data = await response.json();
+	return Object.defineProperty(data, "_request_id", {
+		value: response.headers.get("x-request-id"),
+		enumerable: false,
+	});
+}
+
+class ApiPromiseOpenAI {
+	baseURL = "https://api.openai.com/v1";
+	chat = {
+		completions: {
+			create: (req) =>
+				new FakeApiPromise(
+					this,
+					req.failWith
+						? Promise.reject(req.failWith)
+						: Promise.resolve({
+								stream: req.stream,
+								response: new Response(JSON.stringify(COMPLETION), {
+									headers: { "x-request-id": "req_1" },
+								}),
+							}),
+					parseApiResponse,
+				),
+		},
+	};
+}
+
+const apiCall = { model: "gpt-4o", messages: [] };
+
+test("the SDK's promise comes back from an instrumented call with its own methods", async () => {
+	const openai = instrumentLlmClient(new ApiPromiseOpenAI());
+	const { attrs, ai } = await capture("api-promise-identity", async () => {
+		const call = openai.chat.completions.create(apiCall);
+		assert.ok(call instanceof FakeApiPromise);
+		assert.equal(typeof call.withResponse, "function");
+		assert.equal(typeof call.asResponse, "function");
+		const data = await call;
+		assert.equal(data._request_id, "req_1");
+	});
+	assert.equal(attrs["gen_ai.usage.input_tokens"], 10000);
+	assert.equal(ai.calls, 1);
+});
+
+test("withResponse() returns the parsed data, the response and the request id, and records the usage", async () => {
+	const openai = instrumentLlmClient(new ApiPromiseOpenAI());
+	const { attrs, ai, span } = await capture("api-promise-with-response", async () => {
+		const { data, response, request_id } = await openai.chat.completions.create(apiCall).withResponse();
+		assert.equal(data.model, COMPLETION.model);
+		assert.equal(request_id, "req_1");
+		assert.equal(response.headers.get("x-request-id"), "req_1");
+	});
+	assert.equal(span.status.code, 1);
+	assert.equal(attrs["gen_ai.usage.input_tokens"], 10000);
+	assert.equal(attrs["gen_ai.usage.output_tokens"], 500);
+	assert.equal(ai.calls, 1);
+});
+
+test("asResponse() hands over the response with its body unread", async () => {
+	const openai = instrumentLlmClient(new ApiPromiseOpenAI());
+	const response = await openai.chat.completions.create(apiCall).asResponse();
+	assert.equal(response.bodyUsed, false);
+	assert.deepEqual(await response.json(), COMPLETION);
+});
+
+test("awaiting and withResponse() on the same call share one parse and end the span once", async () => {
+	const openai = instrumentLlmClient(new ApiPromiseOpenAI());
+	const { ai } = await capture("api-promise-shared", async () => {
+		const call = openai.chat.completions.create(apiCall);
+		const awaited = await call;
+		const { data } = await call.withResponse();
+		assert.equal(data, awaited);
+		await call.then((again) => assert.equal(again, awaited));
+	});
+	assert.equal(ai.calls, 1);
+});
+
+test("a stream from withResponse() still ends the span with its usage", async () => {
+	const openai = instrumentLlmClient(new ApiPromiseOpenAI());
+	const { attrs, ai } = await capture("api-promise-stream", async () => {
+		const { data } = await openai.chat.completions.create({ ...apiCall, stream: true }).withResponse();
+		for await (const _ of data) {
+			/* consume */
+		}
+	});
+	assert.equal(attrs["gen_ai.usage.input_tokens"], 10000);
+	assert.equal(attrs["autter.llm.streamed"], true);
+	assert.equal(ai.calls, 1);
+});
+
+test("a failed call rejects withResponse() and then() alike, ends the span once as an error and leaves no unhandled rejection", async () => {
+	const openai = instrumentLlmClient(new ApiPromiseOpenAI());
+	const unhandled = [];
+	const record = (reason) => unhandled.push(reason);
+	process.on("unhandledRejection", record);
+	try {
+		const { span } = await capture("api-promise-failure", async () => {
+			await assert.rejects(
+				openai.chat.completions.create({ ...apiCall, failWith: new Error("rate limited") }).withResponse(),
+				/rate limited/,
+			);
+		});
+		assert.equal(span.status.code, 2);
+		const call = openai.chat.completions.create({ ...apiCall, failWith: new Error("overloaded") });
+		await assert.rejects(call, /overloaded/);
+		await quietPeriod();
+		assert.deepEqual(unhandled, []);
+	} finally {
+		process.off("unhandledRejection", record);
+	}
 });
 
 // ------------------------------------------------------- manual helpers ---

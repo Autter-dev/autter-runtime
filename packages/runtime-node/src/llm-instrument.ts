@@ -153,11 +153,18 @@ function streamFinisher(span: Span, model: string, seen: RawUsage) {
 }
 
 /**
- * Wrap a streaming result so the span ends when the stream finishes (or
- * errors), accumulating usage from the chunks that carry it: OpenAI's final
- * chunk (with `stream_options: { include_usage: true }`), OpenAI Responses'
+ * Make a streaming result end the span when the stream finishes (or errors),
+ * accumulating usage from the chunks that carry it: OpenAI's final chunk
+ * (with `stream_options: { include_usage: true }`), OpenAI Responses'
  * `response.completed`, Anthropic's message_start/message_delta events,
  * Google's per-chunk usageMetadata, Bedrock's ConverseStream `metadata`.
+ *
+ * The stream itself is instrumented, not proxied. The openai and
+ * @anthropic-ai/sdk streams read their own `iterator` field from
+ * `[Symbol.asyncIterator]`, `tee()` and `toReadableStream()`, and use private
+ * fields that only work with the stream as `this`, so wrapping that one
+ * source covers every way of reading it and every branch of a tee. Other
+ * async iterables are wrapped at `[Symbol.asyncIterator]`.
  */
 function wrapStream<T extends object>(
 	stream: T,
@@ -167,46 +174,54 @@ function wrapStream<T extends object>(
 ): T {
 	const seen: RawUsage = {};
 	const finish = streamFinisher(span, model, seen);
-	return new Proxy(stream, {
-		get(target, prop, receiver) {
-			if (prop === Symbol.asyncIterator) {
-				return () => {
-					const inner = (
-						target as unknown as AsyncIterable<unknown>
-					)[Symbol.asyncIterator]();
-					return {
-						async next(): Promise<IteratorResult<unknown>> {
-							try {
-								const step = await inner.next();
-								if (!step.done) {
-									mergeRawUsage(seen, extractRawUsage(step.value, provider));
-								} else {
-									finish();
-								}
-								return step;
-							} catch (err) {
-								finish({ error: err });
-								throw err;
-							}
-						},
-						async return(value?: unknown): Promise<IteratorResult<unknown>> {
-							finish();
-							return inner.return
-								? inner.return(value)
-								: { done: true, value: undefined };
-						},
-						async throw(err?: unknown): Promise<IteratorResult<unknown>> {
-							finish({ error: err });
-							if (inner.throw) return inner.throw(err);
-							throw err;
-						},
-					};
-				};
+	const entry =
+		typeof (stream as { iterator?: unknown }).iterator === "function"
+			? "iterator"
+			: Symbol.asyncIterator;
+	const open = (stream as Record<PropertyKey, () => AsyncIterator<unknown>>)[entry];
+	try {
+		Object.defineProperty(stream, entry, {
+			value: () => trackIterator(open.call(stream), finish, seen, provider),
+			configurable: true,
+			writable: true,
+		});
+	} catch {
+		finish();
+	}
+	return stream;
+}
+
+function trackIterator(
+	inner: AsyncIterator<unknown>,
+	finish: ReturnType<typeof streamFinisher>,
+	seen: RawUsage,
+	provider: string,
+): AsyncIterator<unknown> {
+	return {
+		async next(): Promise<IteratorResult<unknown>> {
+			try {
+				const step = await inner.next();
+				if (!step.done) {
+					mergeRawUsage(seen, extractRawUsage(step.value, provider));
+				} else {
+					finish();
+				}
+				return step;
+			} catch (err) {
+				finish({ error: err });
+				throw err;
 			}
-			const value = Reflect.get(target, prop, receiver);
-			return typeof value === "function" ? value.bind(target) : value;
 		},
-	});
+		async return(value?: unknown): Promise<IteratorResult<unknown>> {
+			finish();
+			return inner.return ? inner.return(value) : { done: true, value: undefined };
+		},
+		async throw(err?: unknown): Promise<IteratorResult<unknown>> {
+			finish({ error: err });
+			if (inner.throw) return inner.throw(err);
+			throw err;
+		},
+	};
 }
 
 interface EventStreamHelper {

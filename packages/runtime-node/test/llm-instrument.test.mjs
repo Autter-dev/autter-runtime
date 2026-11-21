@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { types } from "node:util";
 import { trace } from "@opentelemetry/api";
 import {
 	BasicTracerProvider,
@@ -13,6 +14,7 @@ import {
 	withRuntimeOperation,
 } from "../dist/index.js";
 import { captureRuntime, expectOperation } from "../dist/testing.js";
+import { until } from "./support/wait.mjs";
 
 // No initAutterServer: autterLlmTracer() falls back to the global provider,
 // so an in-memory exporter sees every LLM span with its raw attributes.
@@ -178,6 +180,261 @@ test("OpenAI Responses stream: usage from response.completed", async () => {
 	assert.equal(attrs["gen_ai.usage.cache_creation.input_tokens"], 7000);
 	assert.equal(attrs["gen_ai.usage.reasoning.output_tokens"], 300);
 	assert.equal(attrs["gen_ai.response.model"], "gpt-5.6-terra");
+});
+
+// ------------------------------------------- SDK stream entry points ---
+
+/**
+ * Mirrors the Stream class of the openai and @anthropic-ai/sdk packages: the
+ * source is a public `iterator` field, `[Symbol.asyncIterator]` and
+ * `toReadableStream()` read it through `this`, `tee()` splits it, and a
+ * native private field is touched on cancel, so the stream only works when
+ * `this` is the stream itself and not a proxy of it.
+ */
+class FakeStream {
+	#teeBranch = false;
+	constructor(iterator, controller = new AbortController()) {
+		this.iterator = iterator;
+		this.controller = controller;
+	}
+	[Symbol.asyncIterator]() {
+		return this.iterator();
+	}
+	openForTee() {
+		return this.iterator();
+	}
+	tee() {
+		const source = this.openForTee();
+		const queues = [[], []];
+		const open = [true, true];
+		const branch = (index) => {
+			const stream = new FakeStream(() => ({
+				next() {
+					if (!open[index]) return Promise.resolve({ value: undefined, done: true });
+					if (queues[index].length === 0) {
+						const result = source.next();
+						queues[0].push(result);
+						queues[1].push(result);
+					}
+					return queues[index].shift();
+				},
+				async return() {
+					open[index] = false;
+					if (!open[0] && !open[1]) await source.return?.();
+					return { value: undefined, done: true };
+				},
+			}));
+			stream.#teeBranch = true;
+			return stream;
+		};
+		return [branch(0), branch(1)];
+	}
+	toReadableStream() {
+		let iter;
+		let cancellation;
+		const release = () => (cancellation ??= this.#release(iter));
+		return new ReadableStream({
+			start: async () => {
+				iter = this[Symbol.asyncIterator]();
+			},
+			pull: async (controller) => {
+				try {
+					const { value, done } = await iter.next();
+					if (done) return controller.close();
+					controller.enqueue(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+				} catch (err) {
+					controller.error(err);
+					void release().catch(() => undefined);
+				}
+			},
+			cancel: release,
+		});
+	}
+	async #release(iter) {
+		if (!this.#teeBranch) this.controller.abort();
+		await iter.return?.();
+	}
+}
+
+class AnthropicShapedStream extends FakeStream {
+	openForTee() {
+		return this[Symbol.asyncIterator]();
+	}
+}
+
+const STREAM_CHUNKS = [
+	{ model: "gpt-4o-2024-08-06", choices: [{ delta: { content: "hi" } }], usage: null },
+	{
+		model: "gpt-4o-2024-08-06",
+		choices: [],
+		usage: { prompt_tokens: 10000, completion_tokens: 500, total_tokens: 10500 },
+	},
+];
+
+function streamingClient(Stream, { failWith, seal } = {}) {
+	const probe = { released: false };
+	async function* source() {
+		try {
+			yield STREAM_CHUNKS[0];
+			if (failWith) throw failWith;
+			yield STREAM_CHUNKS[1];
+		} finally {
+			probe.released = true;
+		}
+	}
+	class OpenAI {
+		baseURL = "https://api.openai.com/v1";
+		chat = {
+			completions: {
+				create: async () => {
+					const stream = new Stream(source);
+					return seal ? Object.freeze(stream) : stream;
+				},
+			},
+		};
+	}
+	return { client: instrumentLlmClient(new OpenAI()), probe };
+}
+
+const callBody = { model: "gpt-4o", messages: [], stream: true, stream_options: { include_usage: true } };
+
+async function readLines(readable) {
+	const reader = readable.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) return text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+		text += decoder.decode(value);
+	}
+}
+
+async function drain(stream) {
+	const items = [];
+	for await (const item of stream) items.push(item);
+	return items;
+}
+
+test("OpenAI stream read through toReadableStream(): one span with usage, the bytes unchanged", async () => {
+	const { client } = streamingClient(FakeStream);
+	const { attrs, ai, span } = await capture("stream-readable", async () => {
+		const stream = await client.chat.completions.create(callBody);
+		assert.deepEqual(await readLines(stream.toReadableStream()), STREAM_CHUNKS);
+	});
+	assert.equal(span.status.code, 1);
+	assert.equal(attrs["gen_ai.usage.input_tokens"], 10000);
+	assert.equal(attrs["gen_ai.usage.output_tokens"], 500);
+	assert.equal(attrs["autter.llm.streamed"], true);
+	assert.equal(ai.calls, 1);
+	assert.equal(ai.input_tokens, 10000);
+});
+
+for (const [shape, Stream] of [
+	["tee() through the iterator field", FakeStream],
+	["tee() through Symbol.asyncIterator", AnthropicShapedStream],
+]) {
+	test(`stream ${shape}: both branches read to the end give one span with usage`, async () => {
+		const { client } = streamingClient(Stream);
+		const { attrs, ai, span } = await capture(`stream-tee-${shape}`, async () => {
+			const stream = await client.chat.completions.create(callBody);
+			const [left, right] = stream.tee();
+			const [fromLeft, fromRight] = await Promise.all([drain(left), drain(right)]);
+			assert.deepEqual(fromLeft, STREAM_CHUNKS);
+			assert.deepEqual(fromRight, STREAM_CHUNKS);
+		});
+		assert.equal(span.status.code, 1);
+		assert.equal(attrs["gen_ai.usage.input_tokens"], 10000);
+		assert.equal(ai.calls, 1);
+	});
+
+	test(`stream ${shape}: the span stays open until the last branch is done`, async () => {
+		const { client, probe } = streamingClient(Stream);
+		const { attrs, ai } = await capture(`stream-tee-close-${shape}`, async () => {
+			const stream = await client.chat.completions.create(callBody);
+			const [left, right] = stream.tee();
+			const leftIterator = left[Symbol.asyncIterator]();
+			await leftIterator.next();
+			await leftIterator.return();
+			assert.equal(exporter.getFinishedSpans().length, 0);
+			assert.deepEqual(await drain(right), STREAM_CHUNKS);
+		});
+		assert.equal(attrs["gen_ai.usage.input_tokens"], 10000);
+		assert.equal(ai.calls, 1);
+		assert.equal(probe.released, true);
+	});
+}
+
+test("tee() with both branches closed ends the span once and releases the source", async () => {
+	const { client, probe } = streamingClient(FakeStream);
+	const { span, ai } = await capture("stream-tee-both-closed", async () => {
+		const stream = await client.chat.completions.create(callBody);
+		const [left, right] = stream.tee();
+		for (const branch of [left, right]) {
+			const iterator = branch[Symbol.asyncIterator]();
+			await iterator.next();
+			await iterator.return();
+		}
+	});
+	assert.equal(span.status.code, 1);
+	assert.equal(ai.calls, 1);
+	assert.equal(probe.released, true);
+});
+
+test("toReadableStream() cancelled mid-stream ends the span once with the usage seen so far", async () => {
+	const { client, probe } = streamingClient(FakeStream);
+	const { attrs, ai, span } = await capture("stream-readable-cancel", async () => {
+		const stream = await client.chat.completions.create(callBody);
+		const reader = stream.toReadableStream().getReader();
+		await reader.read();
+		await reader.cancel();
+	});
+	assert.equal(span.status.code, 1);
+	assert.equal(attrs["gen_ai.usage.input_tokens"], undefined);
+	assert.equal(attrs["autter.llm.streamed"], true);
+	assert.equal(ai.calls, 1);
+	assert.equal(probe.released, true);
+});
+
+test("toReadableStream() failing mid-stream ends the span once as an error", async () => {
+	const { client, probe } = streamingClient(FakeStream, { failWith: new Error("upstream reset") });
+	const { span, ai } = await capture("stream-readable-error", async () => {
+		const stream = await client.chat.completions.create(callBody);
+		await assert.rejects(readLines(stream.toReadableStream()), /upstream reset/);
+		await until(() => probe.released);
+	});
+	assert.equal(span.status.code, 2);
+	assert.equal(ai.calls, 1);
+});
+
+test("iterating still ends the span, on a break too, and the result is the SDK's own stream", async () => {
+	const { client } = streamingClient(FakeStream);
+	const { attrs, ai, span } = await capture("stream-iterate", async () => {
+		const stream = await client.chat.completions.create(callBody);
+		assert.ok(stream instanceof FakeStream);
+		assert.equal(types.isProxy(stream), false);
+		assert.deepEqual(await drain(stream), STREAM_CHUNKS);
+	});
+	assert.equal(span.status.code, 1);
+	assert.equal(attrs["gen_ai.usage.input_tokens"], 10000);
+	assert.equal(ai.calls, 1);
+
+	const broken = await capture("stream-break", async () => {
+		const stream = await client.chat.completions.create(callBody);
+		for await (const _ of stream) break;
+	});
+	assert.equal(broken.span.status.code, 1);
+	assert.equal(broken.attrs["gen_ai.usage.input_tokens"], undefined);
+	assert.equal(broken.ai.calls, 1);
+});
+
+test("a stream that cannot be instrumented in place still works, and its span ends", async () => {
+	const { client } = streamingClient(FakeStream, { seal: true });
+	const { span, ai } = await capture("stream-sealed", async () => {
+		const stream = await client.chat.completions.create(callBody);
+		assert.deepEqual(await readLines(stream.toReadableStream()), STREAM_CHUNKS);
+	});
+	assert.equal(span.status.code, 1);
+	assert.equal(ai.calls, 1);
 });
 
 // ------------------------------------------------------------- Anthropic ---

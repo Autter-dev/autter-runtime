@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Streams read with `toReadableStream()` or `tee()` are recorded
+
+- `runtime-node`: `instrumentLlmClient` ended the span of a streamed OpenAI or Anthropic call only when the stream was iterated. `new Response(stream.toReadableStream())` (the usual Next.js route handler) and `stream.tee()` read the stream without iterating it, so the span never ended and the call, its tokens and its cost were never exported. The stream is now instrumented at its own `iterator` source, so every way of reading it, and every branch of a tee, ends the span once, on completion, error or cancel. The result is the SDK's own stream object instead of a proxy of it.
+
 ## [1.22.0] - 2026-11-21
 
 Packages: `otlp-ingester` 1.19.0, `runtime-node` 1.18.0, `runtime-edge` 1.5.0, `runtime-browser` 1.9.0, `runtime-cli` 1.5.0. `runtime-next` is unchanged (it takes the new SDK versions through its `^` ranges).

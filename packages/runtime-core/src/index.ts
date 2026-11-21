@@ -174,3 +174,17 @@ export {
 	type ErrorFilterOptions,
 	type IgnoreErrorPattern,
 } from "./error-filter.js";
+export {
+	KEY_WHERE,
+	PAT_IN_URL,
+	SERVER_KEY_IS_SECRET,
+	classifyKey,
+	keyKindOfPrefix,
+	keyProblemMessage,
+	maskKey,
+	wrongKeyMessage,
+	type KeyClassification,
+	type KeyKind,
+	type KeyProblem,
+	type KnownKeyKind,
+} from "./key-kind.js";

@@ -15,7 +15,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { hasDebugIdSnippet, readDebugIdComment } from "./debug-id.js";
 import { BUNDLE_RE, readSourceMappingUrl } from "./files.js";
 import { resolveRelease } from "./release.js";
-import { CLIENT_KEY_PREFIX, resolveEndpoint, servedFilename, UPLOAD_KEY_PREFIX } from "./upload.js";
+import { resolveEndpoint, resolveUploadKey, servedFilename, UPLOAD_KEY_PREFIX } from "./upload.js";
 
 export interface VerifyOptions {
 	/** Ingester base URL (default as for upload). */
@@ -264,15 +264,15 @@ export async function verifyDir(dir: string, options: VerifyOptions = {}): Promi
 
 async function checkUploads(result: VerifyResult, bundles: VerifyBundle[], options: VerifyOptions, env: NodeJS.ProcessEnv): Promise<void> {
 	const upload = result.upload;
-	const key = (options.key ?? env.AUTTER_RUNTIME_KEY ?? "").trim();
+	const { key, error: keyError } = resolveUploadKey(options.key ?? env.AUTTER_RUNTIME_KEY ?? "");
 	if (!key) {
 		upload.reason = "AUTTER_RUNTIME_KEY is not set: only the local checks ran";
 		return;
 	}
 	upload.endpoint = resolveEndpoint(options.endpoint, env);
-	if (key.startsWith(CLIENT_KEY_PREFIX)) {
+	if (keyError) {
 		upload.status = "error";
-		upload.reason = "AUTTER_RUNTIME_KEY is a publishable client key (autter_rtc_…), which can't check source maps: use an upload key (autter_rtu_…) or the server key (autter_rt_…)";
+		upload.reason = keyError;
 		result.failures.push({ path: ".", reason: upload.reason });
 		return;
 	}

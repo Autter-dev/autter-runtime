@@ -11,6 +11,7 @@ import {
 	type SdkIdentity,
 } from "./compat.js";
 import { versionAtLeast } from "../../otlp-ingester/src/compat.js";
+import { classifyKey, keyProblemMessage, wrongKeyMessage } from "@autter/runtime-core";
 import { diagnoseConnectivity, type ConnectivityReport } from "./connectivity.js";
 import { refusalReason } from "./ingest-auth.js";
 
@@ -40,7 +41,7 @@ export interface DoctorReport {
 	ingester: IngesterCompatInfo | null;
 	ingesterError?: string;
 	/** Always set: "not_checked" when no key was given. */
-	key: "accepted" | "rejected" | "client_key" | "storage_unavailable" | "unverified" | "unknown" | "not_checked";
+	key: "accepted" | "rejected" | "client_key" | "wrong_key" | "storage_unavailable" | "unverified" | "unknown" | "not_checked";
 	/** The ingester's reason when it refused the key. */
 	keyDetail?: string;
 	/** `/healthz`: can the ingester store what it is sent right now? */
@@ -124,10 +125,17 @@ export async function checkKey(
 	key: string,
 	timeoutMs: number,
 ): Promise<{ key: Exclude<DoctorReport["key"], "not_checked">; detail?: string }> {
+	// A key that cannot work is named before anything is sent.
+	const cls = classifyKey(key);
+	if (cls.problem === "masked" || cls.problem === "whitespace") {
+		return { key: "wrong_key", detail: keyProblemMessage(cls.problem) };
+	}
+	if (cls.kind === "pat") return { key: "wrong_key", detail: wrongKeyMessage("server", "pat") };
+	if (cls.kind === "client" || cls.kind === "upload") return { key: "client_key", detail: wrongKeyMessage("server", cls.kind) };
 	// An empty OTLP batch: authenticates and stores nothing.
 	const res = await compatRequest("POST", `${endpoint}/v1/traces`, {
 		body: JSON.stringify({ resourceSpans: [] }),
-		headers: { authorization: `Bearer ${key}` },
+		headers: { authorization: `Bearer ${cls.key}` },
 		unref: false,
 		timeoutMs,
 	});
@@ -271,6 +279,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
 			  storage?.ok === false ||
 			  key === "rejected" ||
 			  key === "client_key" ||
+			  key === "wrong_key" ||
 			  key === "storage_unavailable" ||
 			  key === "unverified"
 			? 1
@@ -316,6 +325,7 @@ export function formatDoctorReport(report: DoctorReport): string {
 			accepted: "accepted",
 			rejected: `REJECTED (401${reason}): check AUTTER_RUNTIME_KEY`,
 			client_key: `refused (403${reason}): server SDKs need a server key (autter_rt_…)`,
+			wrong_key: `WRONG KEY: ${report.keyDetail ?? "this is not a server key (autter_rt_…)"}`,
 			storage_unavailable: "accepted, but the ingester's ClickHouse is unavailable (503)",
 			unverified: "could not be checked: the ingester's key validator is unavailable (503); exporters retry",
 			unknown: `could not be verified${reason}`,

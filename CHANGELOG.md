@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-11-21
+
+Packages: `otlp-ingester` 1.19.0, `runtime-node` 1.18.0, `runtime-edge` 1.5.0, `runtime-browser` 1.9.0, `runtime-cli` 1.5.0. `runtime-next` is unchanged (it takes the new SDK versions through its `^` ranges).
+
+### A wrong or badly pasted key says which key to use
+
+Autter has four key types that look alike: `autter_pat_` (personal access token, signs in the CLI), `autter_rt_` (runtime server key), `autter_rtc_` (runtime client key) and `autter_rtu_` (source map upload key). Using the wrong one is the most common setup mistake, so the ingester, the SDKs and `@autter/runtime-cli` now spot it and name the right key, what it is for and where to create it (Settings > Keys and tokens). The wording is the same everywhere and is checked against shared test vectors (`test-vectors/key-kinds.json`).
+
+- `otlp-ingester`: a personal access token sent to any ingest route is refused with `401` and `wrong_key_type`, without a key lookup. A key wrapped in quotes, written as `Bearer Bearer …` or `NAME=…`, or shortened (`autter_rt_ab…`) is refused with `malformed_key` and a one-line fix, also without a lookup. The wrong-key refusals that already existed (an upload key on a telemetry route, a client key on OTLP or source maps, a key in `?key=` on `/v1/browser`) keep their status codes and `error` strings and gain `detail`, `code`, `expected` and `got` fields. The key itself is never echoed. A plain unknown key still returns exactly `{"error":"invalid ingest key"}`, and static keys of any shape keep working. These rejections are recorded as `unknown_key`; there is no new drop reason.
+- `runtime-node`: `initAutterServer` cleans quotes, `Bearer ` and `NAME=` from the key and warns once. A personal access token is not sent; it warns and falls back to `AUTTER_RUNTIME_KEY`. A client or upload key warns with the shared wording. `npx @autter/runtime-node verify` and `doctor` report a wrong key before sending anything, and point to Settings > Keys and tokens instead of the old Repository settings path.
+- `runtime-edge`: the key is trimmed and cleaned, with a one-time warning for a wrong or badly pasted key.
+- `runtime-browser`: **behaviour change.** `initAutterBrowser` refuses a secret key (`autter_rt_`, `autter_rtu_` or `autter_pat_`) as `clientKey`: it logs `console.error` and sends nothing. Before, the secret was put in the `?key=` URL, where CDNs and proxies log it, and the ingester rejected it anyway. If you did this, rotate that key and use a client key (`autter_rtc_`). The bundle grows by about 190 bytes.
+- `runtime-cli`: `upload`, `verify` and `build` clean a pasted key and explain a wrong one with the shared wording. `@autter/runtime-core` is now a build-time dependency, bundled in (no new runtime dependency).
+- SDKs only warn, they never throw, so a running app is not affected beyond the browser case above.
+
 ## [1.21.0] - 2026-11-17
 
 Packages: `runtime-node` 1.17.0, and the Python adapter (`adapters/python`, copied, not published). The other packages are unchanged; the `otlp-ingester` README is updated without a release.

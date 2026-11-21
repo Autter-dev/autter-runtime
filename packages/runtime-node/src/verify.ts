@@ -5,6 +5,7 @@ import { compatRequest, fetchIngesterCompat, SDK_IDENTITY, type HttpResult } fro
 import { diagnoseConnectivity } from "./connectivity.js";
 import { checkStorage, resolveEndpoint, versionSkew, installedSdks } from "./doctor.js";
 import { defaultRelease, detectCommit } from "./deployment.js";
+import { classifyKey, keyProblemMessage, wrongKeyMessage } from "@autter/runtime-core";
 import { refusalReason, resolveIngestKey } from "./ingest-auth.js";
 import { versionAtLeast } from "../../otlp-ingester/src/compat.js";
 
@@ -199,7 +200,7 @@ function parse<T>(res: HttpResult | null): T | null {
 }
 
 const AUTH_FIX: Record<number, string> = {
-	401: "Check AUTTER_RUNTIME_KEY: it must be a server key (autter_rt_…) of this repository, not revoked. Create one in Autter → Repository → Settings → Runtime.",
+	401: "Check AUTTER_RUNTIME_KEY: it must be a server key (autter_rt_…) of this repository, not revoked. Create one in the Autter dashboard at Settings > Keys and tokens.",
 	403: "Server SDKs need a server key (autter_rt_…). Client keys (autter_rtc_…) are for browsers only, upload keys (autter_rtu_…) for source maps only.",
 	429: "The ingester is rate limiting this key or address; wait for Retry-After and run verify again.",
 	503: "The ingester could not check the key or store data right now. Run again in a few seconds; if it persists, see storage above.",
@@ -219,6 +220,12 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 	const commit = detectCommit(env) ?? null;
 	const traceId = randomBytes(16).toString("hex");
 	const key = resolveIngestKey(options.key, env);
+	// The first candidate resolveIngestKey would use, classified as given: a
+	// personal access token resolves to no key, but is named here.
+	const given = [options.key, env.AUTTER_RUNTIME_KEY].find(
+		(v): v is string => typeof v === "string" && !["", "undefined", "null"].includes(classifyKey(v).key.toLowerCase()),
+	);
+	const cls = classifyKey(given ?? "");
 	const steps: VerifyStep[] = [];
 	const add = (step: VerifyStep) => steps.push(step);
 	const finish = (exitCode?: 0 | 1 | 2): VerifyReport => {
@@ -242,6 +249,15 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 	const headers: Record<string, string> = key ? { authorization: `Bearer ${key}` } : {};
 
 	// key
+	if (cls.kind === "pat" || cls.problem === "masked" || cls.problem === "whitespace") {
+		add({
+			step: "key",
+			status: "fail",
+			detail: cls.kind === "pat" ? "the key is a personal access token" : "the key is not a usable key",
+			fix: cls.problem === "masked" || cls.problem === "whitespace" ? keyProblemMessage(cls.problem) : wrongKeyMessage("server", "pat"),
+		});
+		return finish();
+	}
 	if (!key) {
 		add({
 			step: "key",
@@ -251,12 +267,20 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 		});
 		return finish();
 	}
-	const kind = key.startsWith("autter_rtc_") ? "client key" : key.startsWith("autter_rtu_") ? "upload key" : "key";
-	if (kind !== "key") {
-		add({ step: "key", status: "fail", detail: `the key is a ${kind}`, fix: AUTH_FIX[403] });
+	if (cls.kind === "client" || cls.kind === "upload") {
+		add({
+			step: "key",
+			status: "fail",
+			detail: `the key is a ${cls.kind === "client" ? "client key" : "upload key"}`,
+			fix: wrongKeyMessage("server", cls.kind),
+		});
 		return finish();
 	}
-	add({ step: "key", status: "pass", detail: `${key.slice(0, Math.min(10, key.length))}… (${key.length} characters)` });
+	add({
+		step: "key",
+		status: cls.problem ? "warn" : "pass",
+		detail: `${key.slice(0, Math.min(10, key.length))}… (${key.length} characters)${cls.problem ? `; ${keyProblemMessage(cls.problem)}` : ""}`,
+	});
 
 	// network
 	const network = await diagnoseConnectivity(endpoint, { timeoutMs, env });

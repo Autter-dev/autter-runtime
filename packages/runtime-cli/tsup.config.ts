@@ -11,9 +11,12 @@ export default defineConfig([
 			next: "src/next.ts",
 		},
 		format: ["esm", "cjs"],
-		dts: true,
+		dts: { resolve: ["@autter/runtime-core"] },
 		target: "node20",
 		platform: "node",
+		// Private workspace package: inlined, so the published package has no
+		// dependency on it.
+		noExternal: ["@autter/runtime-core"],
 		// No `clean`: both configs build in parallel; the build script empties dist/.
 	},
 	{
@@ -22,5 +25,6 @@ export default defineConfig([
 		format: ["esm"],
 		target: "node20",
 		platform: "node",
+		noExternal: ["@autter/runtime-core"],
 	},
 ]);

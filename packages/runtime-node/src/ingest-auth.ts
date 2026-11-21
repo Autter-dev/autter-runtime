@@ -1,3 +1,4 @@
+import { classifyKey, keyProblemMessage, wrongKeyMessage, type KeyProblem } from "@autter/runtime-core";
 import { sharedSlot } from "./shared.js";
 
 /**
@@ -10,7 +11,9 @@ import { sharedSlot } from "./shared.js";
  * default). Now:
  *
  * - `resolveIngestKey` treats unset, empty, "undefined" and "null" as no
- *   key, and falls back to AUTTER_RUNTIME_KEY.
+ *   key, and falls back to AUTTER_RUNTIME_KEY. It strips quotes, a "Bearer "
+ *   prefix and a NAME= prefix (warning once), and never returns a personal
+ *   access token (autter_pat_…): that is warned about and dropped.
  * - With no key, nothing is sent and ONE warning says so at startup.
  * - The first refusal from the ingester (401, 403, or a 404 on a route)
  *   is logged ONCE per status and route, with the ingester's own reason
@@ -28,10 +31,21 @@ export function resolveIngestKey(
 ): string | null {
 	for (const candidate of [explicit, env.AUTTER_RUNTIME_KEY]) {
 		if (typeof candidate !== "string") continue;
-		const key = candidate.trim();
-		if (!NOT_A_KEY.has(key.toLowerCase())) return key;
+		const cls = classifyKey(candidate);
+		if (NOT_A_KEY.has(cls.key.toLowerCase())) continue;
+		if (cls.problem) warnKeyProblem(cls.problem);
+		if (cls.kind === "pat") {
+			// Never send a personal access token to the ingester.
+			once("kind:pat", `The ingest key: ${wrongKeyMessage("server", "pat")} Nothing is sent with it.`);
+			continue;
+		}
+		return cls.key;
 	}
 	return null;
+}
+
+function warnKeyProblem(problem: KeyProblem): boolean {
+	return once(`problem:${problem}`, `The ingest key looks wrong. ${keyProblemMessage(problem)}`);
 }
 
 /** Authorization header for a key; empty (no header at all) without one. */
@@ -64,6 +78,8 @@ const VERIFY_HINT = "Then run: npx @autter/runtime-node verify";
 
 /** Where the key came from and what it is for, for the startup warning. */
 export function warnMissingKey(where: "server" | "relay", service?: string): boolean {
+	// A personal access token was given and dropped: that warning says why.
+	if (state.warned.has("kind:pat")) return false;
 	const what =
 		where === "relay"
 			? "the browser relay has no ingest key (apiKey is unset and AUTTER_RUNTIME_KEY is not set), so browser events are refused (500) instead of being sent"
@@ -77,18 +93,11 @@ export function warnMissingKey(where: "server" | "relay", service?: string): boo
 /** A key of the wrong kind for a server SDK: say so at startup, not at the first 403. */
 export function warnKeyKind(key: string | null): boolean {
 	if (!key) return false;
-	if (key.startsWith("autter_rtc_")) {
-		return once(
-			"kind:client",
-			"AUTTER_RUNTIME_KEY is a client (browser) key (autter_rtc_…). Server SDKs and the relay need a server key (autter_rt_…); the ingester refuses this one with 403.",
-		);
+	const { kind } = classifyKey(key);
+	if (kind === "client" || kind === "upload") {
+		return once(`kind:${kind}`, `The ingest key: ${wrongKeyMessage("server", kind)} The ingester refuses this one with 403.`);
 	}
-	if (key.startsWith("autter_rtu_")) {
-		return once(
-			"kind:upload",
-			"AUTTER_RUNTIME_KEY is an upload-only key (autter_rtu_…) for source maps. Server SDKs need a server key (autter_rt_…); the ingester refuses this one with 403.",
-		);
-	}
+	if (kind === "pat") return once("kind:pat", `The ingest key: ${wrongKeyMessage("server", "pat")}`);
 	return false;
 }
 

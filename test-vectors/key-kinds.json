@@ -1,0 +1,267 @@
+{
+	"_comment": "Key-kind classification and wrong-key copy. Run by runtime-core and otlp-ingester (and mirrored by autter-cli). The copy is the runtime-repo 'where' sentence.",
+	"classify": [
+		{
+			"name": "server key",
+			"raw": "autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt"
+		},
+		{
+			"name": "client key",
+			"raw": "autter_rtc_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "client",
+			"key": "autter_rtc_AbCdEfGhIjKlMnOpQrSt"
+		},
+		{
+			"name": "upload key",
+			"raw": "autter_rtu_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "upload",
+			"key": "autter_rtu_AbCdEfGhIjKlMnOpQrSt"
+		},
+		{
+			"name": "personal access token",
+			"raw": "autter_pat_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "pat",
+			"key": "autter_pat_AbCdEfGhIjKlMnOpQrSt"
+		},
+		{
+			"name": "unknown prefix",
+			"raw": "custom_static_key_1",
+			"kind": "unknown",
+			"key": "custom_static_key_1"
+		},
+		{
+			"name": "empty",
+			"raw": "",
+			"kind": "unknown",
+			"key": ""
+		},
+		{
+			"name": "outer whitespace",
+			"raw": "  autter_rt_AbCdEfGhIjKlMnOpQrSt\n",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt"
+		},
+		{
+			"name": "double quotes",
+			"raw": "\"autter_rt_AbCdEfGhIjKlMnOpQrSt\"",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "quoted"
+		},
+		{
+			"name": "single quotes",
+			"raw": "'autter_rtc_AbCdEfGhIjKlMnOpQrSt'",
+			"kind": "client",
+			"key": "autter_rtc_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "quoted"
+		},
+		{
+			"name": "backticks",
+			"raw": "`autter_pat_AbCdEfGhIjKlMnOpQrSt`",
+			"kind": "pat",
+			"key": "autter_pat_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "quoted"
+		},
+		{
+			"name": "unmatched quote left alone",
+			"raw": "\"autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "unknown",
+			"key": "\"autter_rt_AbCdEfGhIjKlMnOpQrSt"
+		},
+		{
+			"name": "Bearer prefix",
+			"raw": "Bearer autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "bearer"
+		},
+		{
+			"name": "bearer lowercase",
+			"raw": "bearer autter_rtu_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "upload",
+			"key": "autter_rtu_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "bearer"
+		},
+		{
+			"name": "Bearer Bearer",
+			"raw": "Bearer Bearer autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "unknown",
+			"key": "Bearer autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "bearer"
+		},
+		{
+			"name": "assignment",
+			"raw": "AUTTER_RUNTIME_KEY=autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "assignment"
+		},
+		{
+			"name": "assignment with quotes",
+			"raw": "AUTTER_RUNTIME_KEY=\"autter_rt_AbCdEfGhIjKlMnOpQrSt\"",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "quoted"
+		},
+		{
+			"name": "lowercase name= is not an assignment",
+			"raw": "name=autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "unknown",
+			"key": "name=autter_rt_AbCdEfGhIjKlMnOpQrSt"
+		},
+		{
+			"name": "masked ellipsis",
+			"raw": "autter_pat_AbCd…",
+			"kind": "pat",
+			"key": "autter_pat_AbCd…",
+			"problem": "masked"
+		},
+		{
+			"name": "masked dots",
+			"raw": "autter_rt_AbCd...wXyZ",
+			"kind": "server",
+			"key": "autter_rt_AbCd...wXyZ",
+			"problem": "masked"
+		},
+		{
+			"name": "masked stars",
+			"raw": "autter_rtc_AbCd****",
+			"kind": "client",
+			"key": "autter_rtc_AbCd****",
+			"problem": "masked"
+		},
+		{
+			"name": "masked bullets",
+			"raw": "autter_rtu_AbCd••••",
+			"kind": "upload",
+			"key": "autter_rtu_AbCd••••",
+			"problem": "masked"
+		},
+		{
+			"name": "internal whitespace",
+			"raw": "autter_rt_AbCdEfGhIjKlMnOpQrSt autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "whitespace"
+		},
+		{
+			"name": "internal line break",
+			"raw": "autter_rt_AbCdEfGhIjKlMnOpQrSt\nautter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"kind": "server",
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt\nautter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"problem": "whitespace"
+		}
+	],
+	"wrongKeyMessage": [
+		{
+			"expected": "server",
+			"got": "pat",
+			"message": "This is a personal access token (autter_pat_…), for signing in the Autter CLI and MCP. Backend telemetry needs a runtime server key (autter_rt_…) in AUTTER_RUNTIME_KEY. Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "server",
+			"got": "server",
+			"message": "This is a runtime server key (autter_rt_…), for backend telemetry. Backend telemetry needs a runtime server key (autter_rt_…) in AUTTER_RUNTIME_KEY. Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "server",
+			"got": "client",
+			"message": "This is a runtime client key (autter_rtc_…), for browser errors. Backend telemetry needs a runtime server key (autter_rt_…) in AUTTER_RUNTIME_KEY. Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "server",
+			"got": "upload",
+			"message": "This is a source map upload key (autter_rtu_…), for CI source map uploads. Backend telemetry needs a runtime server key (autter_rt_…) in AUTTER_RUNTIME_KEY. Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "server",
+			"got": "unknown",
+			"message": "Backend telemetry needs a runtime server key (autter_rt_…) in AUTTER_RUNTIME_KEY. Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "client",
+			"got": "pat",
+			"message": "This is a personal access token (autter_pat_…), for signing in the Autter CLI and MCP. Browser errors need a runtime client key (autter_rtc_…) in initAutterBrowser({ clientKey }). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "client",
+			"got": "server",
+			"message": "This is a runtime server key (autter_rt_…), for backend telemetry. Browser errors need a runtime client key (autter_rtc_…) in initAutterBrowser({ clientKey }). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "client",
+			"got": "client",
+			"message": "This is a runtime client key (autter_rtc_…), for browser errors. Browser errors need a runtime client key (autter_rtc_…) in initAutterBrowser({ clientKey }). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "client",
+			"got": "upload",
+			"message": "This is a source map upload key (autter_rtu_…), for CI source map uploads. Browser errors need a runtime client key (autter_rtc_…) in initAutterBrowser({ clientKey }). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "client",
+			"got": "unknown",
+			"message": "Browser errors need a runtime client key (autter_rtc_…) in initAutterBrowser({ clientKey }). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "upload",
+			"got": "pat",
+			"message": "This is a personal access token (autter_pat_…), for signing in the Autter CLI and MCP. Source map uploads need a source map upload key (autter_rtu_…) as the AUTTER_RUNTIME_KEY CI secret (a runtime server key also works). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "upload",
+			"got": "server",
+			"message": "This is a runtime server key (autter_rt_…), for backend telemetry. Source map uploads need a source map upload key (autter_rtu_…) as the AUTTER_RUNTIME_KEY CI secret (a runtime server key also works). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "upload",
+			"got": "client",
+			"message": "This is a runtime client key (autter_rtc_…), for browser errors. Source map uploads need a source map upload key (autter_rtu_…) as the AUTTER_RUNTIME_KEY CI secret (a runtime server key also works). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "upload",
+			"got": "upload",
+			"message": "This is a source map upload key (autter_rtu_…), for CI source map uploads. Source map uploads need a source map upload key (autter_rtu_…) as the AUTTER_RUNTIME_KEY CI secret (a runtime server key also works). Create one in the Autter dashboard at Settings > Keys and tokens."
+		},
+		{
+			"expected": "upload",
+			"got": "unknown",
+			"message": "Source map uploads need a source map upload key (autter_rtu_…) as the AUTTER_RUNTIME_KEY CI secret (a runtime server key also works). Create one in the Autter dashboard at Settings > Keys and tokens."
+		}
+	],
+	"problemMessage": {
+		"quoted": "The key is wrapped in quotes. Remove them: env files and CI secrets keep quotes as part of the value.",
+		"bearer": "The key starts with \"Bearer \". Set only the key; the SDK adds the Bearer prefix.",
+		"assignment": "The value includes a variable name (NAME=). Set only the key.",
+		"masked": "This is the shortened key shown in the dashboard list, not the key. A key is shown in full only once, when it is created: create a new one at Settings > Keys and tokens.",
+		"whitespace": "The key contains spaces or line breaks. Copy it again as one line."
+	},
+	"mask": [
+		{
+			"key": "autter_pat_AbCdEfGhIjKlMnOpQrSt",
+			"masked": "autter_pat_…QrSt"
+		},
+		{
+			"key": "autter_rt_AbCdEfGhIjKlMnOpQrSt",
+			"masked": "autter_rt_…QrSt"
+		},
+		{
+			"key": "autter_rtc_AbCdEfGhIjKlMnOpQrSt",
+			"masked": "autter_rtc_…QrSt"
+		},
+		{
+			"key": "autter_rtu_AbCdEfGhIjKlMnOpQrSt",
+			"masked": "autter_rtu_…QrSt"
+		},
+		{
+			"key": "autter_rt_ab",
+			"masked": "autter_rt_…"
+		},
+		{
+			"key": "custom_static_key_1",
+			"masked": "(unrecognised key)"
+		}
+	]
+}

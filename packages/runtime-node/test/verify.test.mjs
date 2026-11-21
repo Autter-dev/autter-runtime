@@ -160,6 +160,15 @@ test("verify: no key → the key step fails first, nothing is sent", async () =>
 	assert.equal(stepOf(report, "network").status, "skip");
 });
 
+test("verify: a personal access token fails at the key step, naming the right key", async () => {
+	const { code, stdout } = await runCli(["--endpoint", "http://127.0.0.1:9", "--key", `autter_pat_${"a".repeat(40)}`, "--json"]);
+	const report = JSON.parse(stdout);
+	assert.equal(code, 1);
+	assert.equal(report.firstFailure.step, "key");
+	assert.match(report.firstFailure.fix, /^This is a personal access token \(autter_pat_…\)/);
+	assert.equal(stepOf(report, "network").status, "skip");
+});
+
 test("verify: a wrong key fails at auth with the ingester's reason", async () => {
 	const ing = await ingester();
 	try {

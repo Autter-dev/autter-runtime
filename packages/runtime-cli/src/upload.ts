@@ -1,3 +1,4 @@
+import { classifyKey, keyProblemMessage, wrongKeyMessage } from "@autter/runtime-core";
 import { createHash } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -26,7 +27,19 @@ export const SERVER_KEY_PREFIX = "autter_rt_";
 export const CLIENT_KEY_PREFIX = "autter_rtc_";
 export const KEY_ADVICE =
 	"set AUTTER_RUNTIME_KEY to an upload-only key (autter_rtu_…, recommended for CI: it can only upload source maps) " +
-	"or the full server key (autter_rt_…, also works)";
+	"or the full server key (autter_rt_…, also works); create one in the Autter dashboard at Settings > Keys and tokens";
+
+/**
+ * The key to upload with, cleaned of quotes, "Bearer " and "NAME=", or the
+ * reason it cannot work (a personal access token, a client key, a shortened
+ * key): said before anything is sent. A key of any other shape is passed on.
+ */
+export function resolveUploadKey(raw: string): { key: string; error?: string } {
+	const cls = classifyKey(raw);
+	if (cls.problem === "masked" || cls.problem === "whitespace") return { key: cls.key, error: keyProblemMessage(cls.problem) };
+	if (cls.kind === "pat" || cls.kind === "client") return { key: cls.key, error: wrongKeyMessage("upload", cls.kind) };
+	return { key: cls.key };
+}
 
 const gzip = promisify(gzipCallback);
 const CHECK_BATCH = 500;
@@ -323,11 +336,9 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 		return summary;
 	}
 
-	const key = (options.key ?? env.AUTTER_RUNTIME_KEY ?? "").trim();
+	const { key, error: keyError } = resolveUploadKey(options.key ?? env.AUTTER_RUNTIME_KEY ?? "");
 	if (!key) throw new FatalUploadError(`no ingest key: ${KEY_ADVICE}`);
-	if (key.startsWith(CLIENT_KEY_PREFIX)) {
-		throw new FatalUploadError(`AUTTER_RUNTIME_KEY is a publishable client key (autter_rtc_…), which cannot upload source maps: ${KEY_ADVICE}`);
-	}
+	if (keyError) throw new FatalUploadError(keyError);
 	const rejected = (status: number, detail: string) =>
 		new FatalUploadError(
 			`the ingester rejected the key (${status}): ${detail}` +

@@ -719,6 +719,17 @@ function failure(message: string, errorType: string, path: string, started: numb
 
 export function initAutterBrowser(options: AutterBrowserOptions): void {
 	if (initialized || typeof window === "undefined") return;
+	// A secret key (server, upload) or personal access token in clientKey would
+	// travel in ?key= (CDN and proxy logs): refuse it, send nothing.
+	const secret = /autter_(pat|rtu?)_/.exec(options.clientKey || "");
+	if (secret) {
+		console.error(
+			"[autter-runtime] clientKey is " +
+				{ pat: "a personal access token (autter_pat_…)", rt: "a runtime server key (autter_rt_…)", rtu: "a source map upload key (autter_rtu_…)" }[secret[1] as "pat"] +
+				", not a client key. Browser errors need a runtime client key (autter_rtc_…) in initAutterBrowser({ clientKey }). Create one in the Autter dashboard at Settings > Keys and tokens. Nothing is sent.",
+		);
+		return;
+	}
 	opts = options as typeof opts;
 	sessionId = getSessionId();
 	initialized = true;

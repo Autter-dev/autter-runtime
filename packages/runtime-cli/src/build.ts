@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 import { findBundles, removeSourceMaps, stripSourceMappingUrl, type BundleWithMap } from "./files.js";
 import { injectDir, type InjectResult } from "./inject.js";
-import { uploadDir, type UploadSummary } from "./upload.js";
+import { resolveUploadKey, uploadDir, type UploadSummary } from "./upload.js";
 
 /** Options shared by the Vite/Rollup, webpack and Next.js integrations. */
 export interface AutterSourceMapsOptions {
@@ -71,7 +71,9 @@ export interface BuildOutputResult {
 
 /** The ingest key a build would upload with, or null. */
 export function buildKey(options: AutterSourceMapsOptions): string | null {
-	const key = (options.key ?? process.env.AUTTER_RUNTIME_KEY ?? "").trim();
+	// Quotes, "Bearer " and "NAME=" removed; upload.ts says what is wrong with a
+	// key that is the wrong kind, before anything is sent.
+	const key = resolveUploadKey(options.key ?? process.env.AUTTER_RUNTIME_KEY ?? "").key;
 	return key || null;
 }
 

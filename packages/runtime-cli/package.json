@@ -1,6 +1,6 @@
 {
 	"name": "@autter/runtime-cli",
-	"version": "1.4.1",
+	"version": "1.5.0",
 	"description": "Readable stack traces for Autter Runtime: inject debug ids into JS bundles and upload their source maps (CLI, Vite/Rollup, webpack and Next.js plugins)",
 	"license": "MIT",
 	"type": "module",
@@ -47,8 +47,8 @@
 		"directory": "packages/runtime-cli"
 	},
 	"scripts": {
-		"build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
-		"test": "npm run build -w @autter/otlp-ingester && npm run build && node --test test/*.test.mjs"
+		"build": "node ../../scripts/ensure-built.mjs runtime-core && node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+		"test": "npm run build -w @autter/runtime-core && npm run build -w @autter/otlp-ingester && npm run build && node --test test/*.test.mjs"
 	},
 	"dependencies": {
 		"@sveltejs/acorn-typescript": "^1.0.13",
@@ -75,6 +75,7 @@
 		}
 	},
 	"devDependencies": {
+		"@autter/runtime-core": "0.0.0",
 		"@types/node": "^22.10.0",
 		"esbuild": "^0.28.1",
 		"rollup": "^4.62.2",

@@ -7,6 +7,15 @@ import express, {
 import { EdgeLatencyAggregator, edgeLatencySamples, emptyEdgeLatencyDrops } from "./edge-latency.js";
 import { extractKeyWithSource, KeyResolver, redactKeyFromUrl } from "./auth.js";
 import {
+	classifyKey,
+	keyProblemMessage,
+	PAT_IN_URL,
+	SERVER_KEY_IS_SECRET,
+	wrongKeyMessage,
+	type KeyKind,
+	type KnownKeyKind,
+} from "./key-kind.js";
+import {
 	clientAddress,
 	connectRedis,
 	type LimitStore,
@@ -160,15 +169,17 @@ export const UPLOAD_KEY_ROUTES = ["/v1/sourcemaps", "/v1/sourcemaps/check"] as c
 /** The 403 an upload key gets on every other authenticated route. */
 export const UPLOAD_KEY_NOT_ALLOWED = {
 	error: "upload_key_not_allowed",
-	detail:
-		"autter_rtu_ keys can only upload source maps (POST /v1/sourcemaps and /v1/sourcemaps/check); " +
-		"telemetry needs a server key (autter_rt_…), or a client key (autter_rtc_…) for /v1/browser",
+	detail: wrongKeyMessage("server", "upload"),
+	code: "wrong_key_type",
+	expected: "server",
+	got: "upload",
 } as const;
 
 /**
- * The 401 a server or upload key gets in `?key=`. A URL is written to
- * proxy, CDN and access logs, so only publishable client keys may travel
- * there (navigator.sendBeacon cannot set headers).
+ * The 401 a server or upload key gets in `?key=` on a route that is not
+ * /v1/browser. A URL is written to proxy, CDN and access logs, so only
+ * publishable client keys may travel there (navigator.sendBeacon cannot set
+ * headers). Use `keyInUrlBody` for the full body.
  */
 export const KEY_IN_URL = {
 	error: "key_in_url",
@@ -177,6 +188,30 @@ export const KEY_IN_URL = {
 		"Send server and upload keys in the Authorization: Bearer header (or x-autter-key). " +
 		"This key has been in a URL, which proxies and CDNs log: rotate it.",
 } as const;
+
+/** The key type each surface takes (see `Surface`). */
+const EXPECTED_BY_SURFACE: Record<"otlp" | "browser" | "sourcemaps", KnownKeyKind> = {
+	otlp: "server",
+	browser: "client",
+	sourcemaps: "upload",
+};
+
+/** The 401 body for a secret key in `?key=`: `got` is the key's type. */
+export function keyInUrlBody(surface: "otlp" | "browser" | "sourcemaps", got: KeyKind) {
+	const expected = EXPECTED_BY_SURFACE[surface];
+	if (surface !== "browser") return { ...KEY_IN_URL, code: "key_in_url", expected, got };
+	return {
+		error: KEY_IN_URL.error,
+		detail:
+			wrongKeyMessage("client", got) +
+			(got === "server" ? ` ${SERVER_KEY_IS_SECRET}` : "") +
+			" Server and upload keys go in the Authorization: Bearer header (or x-autter-key), never in ?key=. " +
+			"This key has been in a URL, which proxies and CDNs log: rotate it.",
+		code: "key_in_url",
+		expected,
+		got,
+	};
+}
 
 /** Prefix of secret server keys (`autter_rt_…`; `autter_rtc_` and `autter_rtu_` do not match). */
 const SERVER_KEY_PREFIX = "autter_rt_";
@@ -821,8 +856,39 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		const { key, source } = extracted;
 		// A secret key in the URL: refused on its prefix, before any lookup.
 		if (source === "query" && (key.startsWith(SERVER_KEY_PREFIX) || key.startsWith(UPLOAD_KEY_PREFIX))) {
-			refuse(req, res, { keyHash: autterKeyHash(key) }, "key_in_url", 401, KEY_IN_URL);
+			refuse(req, res, { keyHash: autterKeyHash(key) }, "key_in_url", 401, keyInUrlBody(surface, classifyKey(key).kind));
 			return null;
+		}
+		// A key that cannot be an Autter key, or is a personal access token:
+		// refused without a validator lookup. Only when nothing is known about
+		// the key (static keys of any shape, cached answers, keep working).
+		if (!keys.peek(key)) {
+			const cls = classifyKey(key);
+			const expected = EXPECTED_BY_SURFACE[surface];
+			if (cls.problem) {
+				refuse(req, res, { keyHash: autterKeyHash(cls.key) }, "unknown_key", 401, {
+					error: "invalid ingest key",
+					detail:
+						keyProblemMessage(cls.problem) +
+						(cls.kind !== "unknown" && cls.kind !== expected && cls.problem !== "masked"
+							? ` ${wrongKeyMessage(expected, cls.kind)}`
+							: ""),
+					code: "malformed_key",
+					expected,
+					got: cls.kind,
+				});
+				return null;
+			}
+			if (cls.kind === "pat") {
+				refuse(req, res, { keyHash: "" }, "unknown_key", 401, {
+					error: "wrong_key_type",
+					detail: wrongKeyMessage(expected, "pat") + (source === "query" ? ` ${PAT_IN_URL}` : ""),
+					code: "wrong_key_type",
+					expected,
+					got: "pat",
+				});
+				return null;
+			}
 		}
 		const retry = { ms: WINDOW_MS };
 		const resolution = await keys.resolveDetailed(key, unknownKeyGate(req, retry));
@@ -861,7 +927,7 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 		// Any key without an Autter prefix (self-host static keys) is judged
 		// on its resolved scope: only client keys may come in the URL.
 		if (source === "query" && ctx.scope !== "client") {
-			refuse(req, res, ctx, "key_in_url", 401, KEY_IN_URL);
+			refuse(req, res, ctx, "key_in_url", 401, keyInUrlBody(surface, classifyKey(key).kind === "unknown" ? ctx.scope : classifyKey(key).kind));
 			return null;
 		}
 		if (ctx.scope === "upload") {
@@ -880,6 +946,10 @@ export function createIngesterApp(config: IngesterConfig, deps: IngesterDeps = {
 						surface === "sourcemaps"
 							? "client keys cannot upload source maps — use an upload key (autter_rtu_…) or a server key"
 							: "client keys cannot send OTLP — use a server key",
+					detail: wrongKeyMessage(EXPECTED_BY_SURFACE[surface], "client"),
+					code: "wrong_key_type",
+					expected: EXPECTED_BY_SURFACE[surface],
+					got: "client",
 				});
 				return null;
 			}

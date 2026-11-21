@@ -555,7 +555,7 @@ test("Next: a rejected upload still deletes every map the wrapper turned on (cli
 	assert.doesNotMatch(read(distDir, "static/chunks/app-1.js"), /sourceMappingURL/);
 	assert.equal(read(distDir, "static/css/app.css"), "a{}\n");
 	assert.equal(existsSync(join(distDir, "server/page.js.map")), false, "server maps the wrapper turned on go too (RF-05)");
-	assert.match(logs.find((line) => line.includes("removed")), /removed 2 source map\(s\) this plugin generated, so they are not deployed: the upload failed \(AUTTER_RUNTIME_KEY is a publishable client key/);
+	assert.match(logs.find((line) => line.includes("removed")), /removed 2 source map\(s\) this plugin generated, so they are not deployed: the upload failed \(This is a runtime client key \(autter_rtc_…\), for browser errors\./);
 
 	// productionBrowserSourceMaps set by the user: their public maps stay, even when the upload fails.
 	const failing = await startIngester({ rejectUploads: 413 });

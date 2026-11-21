@@ -108,7 +108,7 @@ test("upload keys get 403 upload_key_not_allowed on every other authenticated ro
 		assert.deepEqual(await res.json(), UPLOAD_KEY_NOT_ALLOWED, route);
 	}
 	assert.equal(UPLOAD_KEY_NOT_ALLOWED.error, "upload_key_not_allowed");
-	assert.match(UPLOAD_KEY_NOT_ALLOWED.detail, /^autter_rtu_ keys can only upload source maps/);
+	assert.match(UPLOAD_KEY_NOT_ALLOWED.detail, /^This is a source map upload key \(autter_rtu_…\), for CI source map uploads\./);
 	// Public routes stay public; they are the only ones without a key check.
 	for (const route of PUBLIC_ROUTES) {
 		assert.ok(app.routes.includes(route), `router lists ${route}`);

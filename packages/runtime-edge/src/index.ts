@@ -59,6 +59,9 @@ import {
 	type RuntimeLogContext,
 	type RuntimeLogLevel,
 	type RuntimeOutcome,
+	classifyKey,
+	keyProblemMessage,
+	wrongKeyMessage,
 } from "@autter/runtime-core";
 
 export {
@@ -363,7 +366,45 @@ function resolveOptions<Env>(
 	options: AutterEdgeOptions | ((env: Env) => AutterEdgeOptions),
 	env: Env,
 ): AutterEdgeOptions {
-	return typeof options === "function" ? options(env) : options;
+	return cleanKey(typeof options === "function" ? options(env) : options);
+}
+
+const keyWarned = new Set<string>();
+
+function warnKeyOnce(id: string, message: string): void {
+	if (keyWarned.has(id)) return;
+	keyWarned.add(id);
+	try {
+		console.warn(`[autter-runtime-edge] ${message}`);
+	} catch {
+		/* a broken console must not break the host */
+	}
+}
+
+/**
+ * The options with the key cleaned: quotes, "Bearer " and "NAME=" removed
+ * (one warning), a personal access token dropped (one warning, nothing is
+ * sent with it). Warns about client and upload keys, which the ingester
+ * refuses on telemetry routes. Never throws; the options are returned
+ * as-is when the key is fine.
+ */
+function cleanKey(options: AutterEdgeOptions): AutterEdgeOptions {
+	const raw = options?.apiKey;
+	if (typeof raw !== "string" || !raw) return options;
+	try {
+		const cls = classifyKey(raw);
+		if (cls.problem) warnKeyOnce(`problem:${cls.problem}`, `The apiKey looks wrong. ${keyProblemMessage(cls.problem)}`);
+		if (cls.kind === "pat") {
+			warnKeyOnce("kind:pat", `The apiKey: ${wrongKeyMessage("server", "pat")} Nothing is sent with it.`);
+			const { apiKey: _dropped, ...rest } = options;
+			return rest;
+		}
+		if (cls.kind === "client" || cls.kind === "upload")
+			warnKeyOnce(`kind:${cls.kind}`, `The apiKey: ${wrongKeyMessage("server", cls.kind)}`);
+		return cls.key === raw ? options : { ...options, apiKey: cls.key };
+	} catch {
+		return options;
+	}
 }
 
 function exposeValue(current: string | null, header: string): string | null {
@@ -455,7 +496,7 @@ export function withAutter<Env = unknown, Ctx = EdgeExecutionContext>(
 		if (opts.apiKey) state.last = opts;
 		if (loggedErrorSources(opts.captureLoggedErrors).console) patchConsole();
 		state.inFlight.add(runtime.handle);
-		if (!opts.apiKey && !warnedNoKey) {
+		if (!opts.apiKey && !warnedNoKey && !keyWarned.has("kind:pat")) {
 			warnedNoKey = true;
 			console.warn("[autter-runtime-edge] no apiKey: records are not exported");
 		}
@@ -577,11 +618,12 @@ function safeString(value: unknown): string {
  *   ctx.waitUntil(captureEdgeException({ apiKey, service: "edge-api" }, error, { "job.name": "sync" }));
  */
 export async function captureEdgeException(
-	options: AutterEdgeOptions,
+	rawOptions: AutterEdgeOptions,
 	error: unknown,
 	attributes?: RuntimeLogContext,
 ): Promise<void> {
 	try {
+		const options = cleanKey(rawOptions);
 		if (!firstCapture(error)) return;
 		const redact = makeRedactor(options.redactAttributes ?? true);
 		const isErr = isError(error);

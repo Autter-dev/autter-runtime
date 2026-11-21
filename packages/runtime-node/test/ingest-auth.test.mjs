@@ -109,8 +109,36 @@ test("a client key on the server is named at startup", async () => {
 	const ingester = await stubIngester(() => [403, { error: "client keys cannot send OTLP — use a server key" }]);
 	try {
 		const { output } = await runServerScript(ingester.url, 'apiKey: "autter_rtc_public"');
-		assert.match(output, /is a client \(browser\) key \(autter_rtc_…\)/);
+		assert.match(output, /This is a runtime client key \(autter_rtc_…\), for browser errors\./);
 		assert.match(output, /refused \/v1\/traces \(403: client keys cannot send OTLP/);
+	} finally {
+		await ingester.close();
+	}
+});
+
+test("a personal access token is named at startup and never sent", async () => {
+	const ingester = await stubIngester(() => [200, { partialSuccess: {} }]);
+	try {
+		const { code, output } = await runServerScript(ingester.url, 'apiKey: "autter_pat_secretsecretsecret"');
+		assert.equal(code, 0, output);
+		assert.match(output, /This is a personal access token \(autter_pat_…\), for signing in the Autter CLI and MCP\./);
+		assert.match(output, /Settings > Keys and tokens\./);
+		assert.doesNotMatch(output, /secretsecretsecret/);
+		assert.equal(output.split("\n").filter((l) => l.includes("No ingest key")).length, 0, output);
+		assert.deepEqual(ingester.requests, [], "a PAT must never reach the ingester");
+	} finally {
+		await ingester.close();
+	}
+});
+
+test("a quoted key is cleaned, sent, and warned about once", async () => {
+	const ingester = await stubIngester(() => [200, { partialSuccess: {} }]);
+	try {
+		const { code, output } = await runServerScript(ingester.url, "", { AUTTER_RUNTIME_KEY: '"autter_rt_from_env"' });
+		assert.equal(code, 0, output);
+		assert.equal(output.split("\n").filter((l) => l.includes("wrapped in quotes")).length, 1, output);
+		assert.ok(ingester.requests.length >= 1, output);
+		for (const r of ingester.requests) assert.equal(r.authorization, "Bearer autter_rt_from_env");
 	} finally {
 		await ingester.close();
 	}

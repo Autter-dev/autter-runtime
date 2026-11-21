@@ -162,8 +162,16 @@ test("transient failures are retried; bad keys stop the upload", async (t) => {
 	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rt_wrong" }), (err) => err instanceof FatalUploadError && /401/.test(err.message));
 	await assert.rejects(
 		uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rtc_client" }),
-		/publishable client key \(autter_rtc_…\), which cannot upload source maps: set AUTTER_RUNTIME_KEY to an upload-only key \(autter_rtu_…, recommended for CI.*or the full server key \(autter_rt_…, also works\)/,
+		/This is a runtime client key \(autter_rtc_…\), for browser errors\. Source map uploads need a source map upload key \(autter_rtu_…\) as the AUTTER_RUNTIME_KEY CI secret \(a runtime server key also works\)\. Create one in the Autter dashboard at Settings > Keys and tokens\./,
 	);
+	// A personal access token or a shortened key: refused before any request.
+	const before = flaky.uploads().length;
+	await assert.rejects(
+		uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_pat_abcdefghijklmnop" }),
+		/This is a personal access token \(autter_pat_…\), for signing in the Autter CLI and MCP\. Source map uploads need/,
+	);
+	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rt_AbCd..." }), /shortened key shown in the dashboard list/);
+	assert.equal(flaky.uploads().length, before);
 	// An upload key the ingester doesn't know: the error says which ingester upload keys need.
 	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, key: "autter_rtu_unknown" }), /401.*upload keys, autter_rtu_…, need ingester 1\.7\.0 or later/);
 	await assert.rejects(uploadDir(dir, { ...quiet, release: "abc123", endpoint: flaky.url, env: {} }), /AUTTER_RUNTIME_KEY/);

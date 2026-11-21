@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { KeyResolver, redactKeyFromUrl } from "./auth.js";
 import { loadConfig, type IngesterConfig, type StaticIngestKey } from "./config.js";
-import { createIngesterApp, KEY_IN_URL } from "./server.js";
+import { createIngesterApp, KEY_IN_URL, keyInUrlBody } from "./server.js";
 
 /**
  * Where a key may travel and which origins a client key accepts:
@@ -107,7 +107,7 @@ test("a server key in ?key= gets 401 key_in_url and nothing is stored", async (t
 	for (const origin of [ORIGIN, null]) {
 		const res = await app.beacon(SERVER, origin);
 		assert.equal(res.status, 401);
-		assert.deepEqual(await res.json(), KEY_IN_URL);
+		assert.deepEqual(await res.json(), keyInUrlBody("browser", "server"));
 	}
 	// Every authenticated route, not only /v1/browser.
 	for (const path of ["/v1/traces", "/v1/logs", "/v1/metrics", "/v1/sourcemaps"]) {
@@ -133,7 +133,7 @@ test("an upload key in ?key= is refused the same way", async (t) => {
 		body: JSON.stringify({ release: "abc", files: [] }),
 	});
 	assert.equal(res.status, 401);
-	assert.deepEqual(await res.json(), KEY_IN_URL);
+	assert.deepEqual(await res.json(), keyInUrlBody("sourcemaps", "upload"));
 });
 
 test("a server-scope key without an Autter prefix is refused in ?key= on its resolved scope", async (t) => {
@@ -141,7 +141,7 @@ test("a server-scope key without an Autter prefix is refused in ?key= on its res
 	t.after(app.close);
 	const res = await app.beacon(PLAIN_SERVER);
 	assert.equal(res.status, 401);
-	assert.deepEqual(await res.json(), KEY_IN_URL);
+	assert.deepEqual(await res.json(), keyInUrlBody("browser", "server"));
 	// The same key in a header is fine.
 	assert.equal((await app.post("/v1/browser", PLAIN_SERVER, BROWSER_BODY)).status, 202);
 	// A prefix-less client key may use the URL.

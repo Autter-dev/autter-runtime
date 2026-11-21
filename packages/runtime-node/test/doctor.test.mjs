@@ -151,6 +151,13 @@ test("doctor reports a rejected key and exits 1; unreachable ingester exits 2", 
 		assert.equal(bad.code, 1, bad.stdout);
 		assert.equal(JSON.parse(bad.stdout).key, "rejected");
 		assert.ok(!bad.stdout.includes("wrong-key-value"), "the key is never printed");
+		const pat = `autter_pat_${"z".repeat(30)}`;
+		const wrong = await runCli(["--endpoint", endpoint, "--key", pat, "--features", "llm_calls", "--json"]);
+		assert.equal(wrong.code, 1, wrong.stdout);
+		const wrongReport = JSON.parse(wrong.stdout);
+		assert.equal(wrongReport.key, "wrong_key");
+		assert.match(wrongReport.keyDetail, /^This is a personal access token/);
+		assert.ok(!wrong.stdout.includes(pat), "the key is never printed");
 		const good = await runCli(["--endpoint", endpoint, "--key", "good", "--features", "llm_calls"]);
 		assert.equal(good.code, 0, good.stdout);
 		assert.match(good.stdout, /key\s+accepted/);

@@ -1,4 +1,5 @@
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveConfigFromEnv, type ArchiveConfig } from "./archive.js";
 import { dropAttributesEnv, keepIdentifyingEnv } from "./identifying.js";
@@ -359,22 +360,70 @@ export function withLocalDevKey(keys: StaticIngestKey[], localDev: boolean): Sta
 }
 
 /**
- * Loopback or private-network addresses: this machine, or a Docker bridge
- * gateway in front of it. The local dev key is refused from anything else.
+ * Where the local dev key may come from besides loopback. Inside a container
+ * (the repo's `docker compose up`), requests from the host arrive through the
+ * published port from the bridge network's gateway, and sibling containers
+ * from their own address on that network: both are in a subnet of one of the
+ * container's own interfaces. Docker Desktop (macOS, Windows) can also show
+ * the host as an address in its VM network, 192.168.65.0/24. Outside a
+ * container (`npm run dev` on the host) only loopback counts, so another
+ * machine on the LAN cannot use the well-known key.
  */
-export function isLocalAddress(address: string | undefined): boolean {
+export interface LocalNetworks {
+	inContainer: boolean;
+	/** IPv4 subnets of this process's own non-loopback interfaces. */
+	subnets: Array<{ address: string; netmask: string }>;
+}
+
+/** Docker Desktop's VM network, from which it may forward the host's requests. */
+const DOCKER_DESKTOP_SUBNET = { address: "192.168.65.0", netmask: "255.255.255.0" };
+
+/** @internal Reads whether this runs in a container, and its interfaces' subnets. */
+export function detectLocalNetworks(): LocalNetworks {
+	const inContainer = existsSync("/.dockerenv") || existsSync("/run/.containerenv");
+	const subnets: LocalNetworks["subnets"] = [];
+	try {
+		for (const list of Object.values(networkInterfaces()))
+			for (const entry of list ?? [])
+				if (entry.family === "IPv4" && !entry.internal) subnets.push({ address: entry.address, netmask: entry.netmask });
+	} catch {
+		/* No interface list: loopback only. */
+	}
+	return { inContainer, subnets };
+}
+
+let localNetworks: LocalNetworks | undefined;
+
+function ipv4Number(ip: string): number | null {
+	const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+	if (!parts) return null;
+	const octets = parts.slice(1).map(Number);
+	if (octets.some((octet) => octet > 255)) return null;
+	return ((octets[0]! << 24) | (octets[1]! << 16) | (octets[2]! << 8) | octets[3]!) >>> 0;
+}
+
+function inSubnet(ip: number, subnet: { address: string; netmask: string }): boolean {
+	const base = ipv4Number(subnet.address);
+	const mask = ipv4Number(subnet.netmask);
+	return base !== null && mask !== null && ((ip & mask) >>> 0) === ((base & mask) >>> 0);
+}
+
+/**
+ * Whether a request comes from this machine: loopback, or, inside a
+ * container, the container's own networks (see LocalNetworks). The local dev
+ * key is refused from anything else, including the rest of a private LAN.
+ */
+export function isLocalAddress(address: string | undefined, networks?: LocalNetworks): boolean {
 	let ip = (address ?? "").trim().toLowerCase();
 	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
 	if (mapped) ip = mapped[1]!;
-	const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(ip);
-	if (v4) {
-		const a = Number(v4[1]);
-		const b = Number(v4[2]);
-		return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-	}
 	if (ip === "::1") return true;
-	// fc00::/7 unique local, fe80::/10 link-local.
-	return /^f[cd][0-9a-f]{0,2}:/.test(ip) || /^fe[89ab][0-9a-f]?:/.test(ip);
+	const v4 = ipv4Number(ip);
+	if (v4 === null) return false;
+	if (v4 >>> 24 === 127) return true;
+	const local = networks ?? (localNetworks ??= detectLocalNetworks());
+	if (!local.inContainer) return false;
+	return [...local.subnets, DOCKER_DESKTOP_SUBNET].some((subnet) => inSubnet(v4, subnet));
 }
 
 export function loadConfig(): IngesterConfig {

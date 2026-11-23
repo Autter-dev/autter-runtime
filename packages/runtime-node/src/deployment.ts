@@ -137,9 +137,37 @@ export const LEGACY_ENVIRONMENT_ATTRIBUTE = "deployment.environment";
  * under the new name instead, so it keeps winning.
  */
 export function environmentFromResourceAttributes(env: Env = process.env): string | undefined {
+	const pairs = resourceAttributesFromEnv(env);
+	return pairs.get(ENVIRONMENT_ATTRIBUTE) ?? pairs.get(LEGACY_ENVIRONMENT_ATTRIBUTE);
+}
+
+/** The release (`service.version`) a user set in `OTEL_RESOURCE_ATTRIBUTES`, else undefined. */
+export function releaseFromResourceAttributes(env: Env = process.env): string | undefined {
+	return resourceAttributesFromEnv(env).get("service.version");
+}
+
+/**
+ * The environment and release a service reports on every signal. Spans get
+ * them from the NodeSDK's resource, where values set in
+ * `OTEL_RESOURCE_ATTRIBUTES` win over the SDK's own; log records, request
+ * summaries and the always-on error pipe use these same values, so an error
+ * and the request it failed are never reported in two environments.
+ */
+export function resolveDeploymentIdentity(
+	options: { environment?: string; release?: string | false | null },
+	env: Env = process.env,
+): { environment: string; release: string | undefined } {
+	return {
+		environment: environmentFromResourceAttributes(env) ?? resolveEnvironment(options.environment, env),
+		release: releaseFromResourceAttributes(env) ?? resolveRelease(options.release, env),
+	};
+}
+
+/** `OTEL_RESOURCE_ATTRIBUTES` as key → value (percent-decoded, empty values skipped). */
+function resourceAttributesFromEnv(env: Env): Map<string, string> {
 	const raw = env.OTEL_RESOURCE_ATTRIBUTES;
-	if (!raw) return undefined;
 	const pairs = new Map<string, string>();
+	if (!raw) return pairs;
 	for (const part of raw.split(",")) {
 		const at = part.indexOf("=");
 		if (at <= 0) continue;
@@ -152,5 +180,5 @@ export function environmentFromResourceAttributes(env: Env = process.env): strin
 		}
 		if (key && value) pairs.set(key, value);
 	}
-	return pairs.get(ENVIRONMENT_ATTRIBUTE) ?? pairs.get(LEGACY_ENVIRONMENT_ATTRIBUTE);
+	return pairs;
 }

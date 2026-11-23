@@ -37,8 +37,9 @@ match versions by hand. Runtime checks for you in three places:
    SDKs can use. Each feature is marked `ok`, `FAIL` (with the fix), or `??`
    (an ingester older than version reporting can't tell). Exit codes: `0`
    compatible, `1` mismatch or rejected key, `2` ingester unreachable. The
-   endpoint defaults to `$AUTTER_ENDPOINT`, then `$OTEL_EXPORTER_OTLP_ENDPOINT`,
-   then `https://otlp.autter.dev`. Use it in CI or after a deploy.
+   endpoint defaults to `$AUTTER_ENDPOINT`, then `$AUTTER_RUNTIME_ENDPOINT`,
+   then `https://otlp.autter.dev`, the same endpoint the SDK sends to
+   (`$OTEL_EXPORTER_OTLP_ENDPOINT` is not used; the report notes it when set). Use it in CI or after a deploy.
 
    For Python services, copy `adapters/python/compat.py` next to your app:
 

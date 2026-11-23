@@ -175,7 +175,12 @@ AUTTER_ENDPOINT=http://localhost:4318 AUTTER_RUNTIME_KEY=autter_rt_local_dev_onl
 ```
 
 `AUTTER_ENDPOINT` is the ingester's base URL, without `/v1/...`. If you
-leave `endpoint` out, the SDK sends to Autter cloud (`https://otlp.autter.dev`).
+leave `endpoint` out, the SDK reads `AUTTER_ENDPOINT`, then
+`AUTTER_RUNTIME_ENDPOINT` (the same variables `verify` and `doctor` read), and
+with neither set sends to Autter cloud (`https://otlp.autter.dev`).
+`OTEL_EXPORTER_OTLP_ENDPOINT` is never used to decide where the Autter key
+goes, since it often points at another vendor's collector; `verify` and
+`doctor` print a note when it is set to something else.
 
 You don't need to pass `release`. On Vercel, Render, Railway, Cloudflare
 Pages, Heroku, GitHub Actions, or anywhere you set `GIT_SHA` or

@@ -54,7 +54,7 @@ export interface UploadOptions {
 	 * "https://cdn.example.com/app/". Each map is stored under prefix + path. */
 	urlPrefix?: string;
 	/** Ingester base URL. Default: $AUTTER_ENDPOINT, $AUTTER_RUNTIME_ENDPOINT,
-	 * $OTEL_EXPORTER_OTLP_ENDPOINT, else https://otlp.autter.dev. */
+	 * else https://otlp.autter.dev ($OTEL_EXPORTER_OTLP_ENDPOINT is never used). */
 	endpoint?: string;
 	/** Upload key (`autter_rtu_…`, recommended for CI) or server key
 	 * (`autter_rt_…`). Default: $AUTTER_RUNTIME_KEY. */
@@ -92,6 +92,8 @@ export interface UploadSummary {
 	release: string;
 	releaseSource: string;
 	endpoint: string;
+	/** Where `endpoint` came from: "--endpoint", "$AUTTER_ENDPOINT", "$AUTTER_RUNTIME_ENDPOINT" or "default". */
+	endpointSource: string;
 	dryRun: boolean;
 	uploaded: UploadItem[];
 	/** Already on the ingester with the same content: not sent again. */
@@ -105,8 +107,28 @@ export interface UploadSummary {
 /** Ingester base URL from a flag or the environment, without a trailing
  * slash or a `/v1/...` route someone pasted in. */
 export function resolveEndpoint(flag?: string, env: NodeJS.ProcessEnv = process.env): string {
-	const raw = flag || env.AUTTER_ENDPOINT || env.AUTTER_RUNTIME_ENDPOINT || env.OTEL_EXPORTER_OTLP_ENDPOINT || DEFAULT_ENDPOINT;
-	return raw.trim().replace(/\/+$/, "").replace(/\/v1\/[a-z-]+$/, "");
+	return resolveEndpointSource(flag, env).endpoint;
+}
+
+/**
+ * The ingester base URL and where it came from: `--endpoint`, then
+ * `$AUTTER_ENDPOINT`, then `$AUTTER_RUNTIME_ENDPOINT`, then the default.
+ * `$OTEL_EXPORTER_OTLP_ENDPOINT` is never used: uploads carry the Autter key
+ * and the app's source, and a CI job often points that variable at another
+ * vendor for its own build tracing.
+ */
+export function resolveEndpointSource(
+	flag?: string,
+	env: NodeJS.ProcessEnv = process.env,
+): { endpoint: string; source: string } {
+	const [raw, source] = flag
+		? [flag, "--endpoint"]
+		: env.AUTTER_ENDPOINT
+			? [env.AUTTER_ENDPOINT, "$AUTTER_ENDPOINT"]
+			: env.AUTTER_RUNTIME_ENDPOINT
+				? [env.AUTTER_RUNTIME_ENDPOINT, "$AUTTER_RUNTIME_ENDPOINT"]
+				: [DEFAULT_ENDPOINT, "default"];
+	return { endpoint: raw.trim().replace(/\/+$/, "").replace(/\/v1\/[a-z-]+$/, ""), source };
 }
 
 /** prefix + path, with exactly one "/" between. "~/" (Sentry's spelling) means "/". */
@@ -309,9 +331,13 @@ export async function uploadDir(dir: string, options: UploadOptions = {}): Promi
 	const log = options.log ?? (() => {});
 	const doFetch = options.fetch ?? fetch;
 	const { release, source: releaseSource } = resolveRelease(options.release, env, options.cwd);
-	const endpoint = resolveEndpoint(options.endpoint, env);
+	const { endpoint, source: endpointSource } = resolveEndpointSource(options.endpoint, env);
+	log(`uploading to ${endpoint} (from ${endpointSource})`);
+	if (endpointSource === "default" && env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+		log("$OTEL_EXPORTER_OTLP_ENDPOINT is not used for source maps: set $AUTTER_ENDPOINT or --endpoint for a self-hosted ingester");
+	}
 	const summary: UploadSummary = {
-		release, releaseSource, endpoint, dryRun: Boolean(options.dryRun),
+		release, releaseSource, endpoint, endpointSource, dryRun: Boolean(options.dryRun),
 		uploaded: [], skipped: [], failed: [], legacyIngester: false, deletedMaps: [],
 	};
 

@@ -67,3 +67,37 @@ test("Next withRuntimeRequest works without next installed (after() fails soft)"
 	}
 	assert.equal(waited.length, 1);
 });
+
+test("createAutterRelayRoute hands the forward to Next's request-context waitUntil, and an explicit waitUntil wins", async () => {
+	const originalFetch = globalThis.fetch;
+	let answer;
+	globalThis.fetch = () => new Promise((resolve) => (answer = resolve));
+	const key = Symbol.for("@next/request-context");
+	const fromContext = [];
+	globalThis[key] = { get: () => ({ waitUntil: (promise) => fromContext.push(promise) }) };
+	const body = () => JSON.stringify({ version: 1, service: "web", environment: "test", events: [{ type: "message", timestamp: new Date().toISOString(), message: "hi" }] });
+	try {
+		const { POST } = server.createAutterRelayRoute({ apiKey: "autter_rt_test", endpoint: "https://ingest.example.test", perIpRateLimit: false, compatCheck: false });
+		const response = await POST(new Request("https://app.test/api/autter-runtime", { method: "POST", body: body() }));
+		assert.equal(response.status, 202);
+		assert.equal(fromContext.length, 1, "the forward promise was handed over");
+		let settled = false;
+		void fromContext[0].then(() => (settled = true));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(settled, false, "it settles only when the forward is done");
+		answer(new Response(null, { status: 202 }));
+		await fromContext[0];
+		assert.equal(settled, true);
+
+		const explicit = [];
+		const route = server.createAutterRelayRoute({ apiKey: "autter_rt_test", endpoint: "https://ingest.example.test", perIpRateLimit: false, compatCheck: false, waitUntil: (p) => explicit.push(p) });
+		await route.POST(new Request("https://app.test/api/autter-runtime", { method: "POST", body: body() }));
+		answer(new Response(null, { status: 202 }));
+		assert.equal(explicit.length, 1);
+		assert.equal(fromContext.length, 1);
+		await explicit[0];
+	} finally {
+		globalThis.fetch = originalFetch;
+		delete globalThis[key];
+	}
+});

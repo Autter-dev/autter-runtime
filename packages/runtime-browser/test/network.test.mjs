@@ -54,3 +54,34 @@ test("XHR 5xx and network errors are captured; 4xx is ignored", async () => {
 		["request_failure", "/offline", "NetworkError"],
 	]);
 });
+
+test("usage events have their own budget: 250 trackEvent calls do not stop an exception", async () => {
+	const { captureException, trackEvent } = await import("../dist/index.js");
+	const posts = [];
+	const warnings = [];
+	const originalWarn = console.warn;
+	console.warn = (...args) => warnings.push(args.join(" "));
+	globalThis.fetch = async (_url, init) => {
+		posts.push(...JSON.parse(init.body).events);
+		return new Response(null, { status: 202 });
+	};
+	const sent = [];
+	Object.defineProperty(globalThis, "navigator", { configurable: true, value: {
+		sendBeacon(_url, body) { sent.push(body); return true; },
+	} });
+	try {
+		for (let i = 0; i < 250; i++) trackEvent(`nav-${i}`);
+		await new Promise((resolve) => setImmediate(resolve));
+		captureException(new Error("after many navigations"));
+		flush();
+		assert.equal(posts.filter((event) => event.type === "track_event").length, 200);
+		assert.equal(sent.length, 1);
+		const payload = JSON.parse(await sent[0].text());
+		assert.deepEqual(payload.events.map((event) => [event.type, event.message]), [["exception", "after many navigations"]]);
+		// The cap is reported once, not per dropped event.
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0], /^\[autter-runtime\] 200 usage events sent from this page/);
+	} finally {
+		console.warn = originalWarn;
+	}
+});

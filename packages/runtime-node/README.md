@@ -126,10 +126,18 @@ export const POST = createBrowserRelayFetchHandler({
 });
 ```
 
-Options: `endpoint` (default `https://otlp.autter.dev`), `maxBodyBytes`
+Options: `endpoint` (default `AUTTER_ENDPOINT`, then `AUTTER_RUNTIME_ENDPOINT`,
+then `https://otlp.autter.dev`), `maxBodyBytes`
 (default 64 KB), `perIpRateLimit` (default 120 requests a minute per client;
 `false` when a WAF already limits the route), `trustProxy`, `redact`,
-`compatCheck`, `onError`.
+`compatCheck`, `onError`, `waitUntil`.
+
+**Serverless: pass `waitUntil`.** The relay answers 202 at once and forwards
+to the ingester afterwards (with retries). A platform that freezes or ends the
+function once the response is sent loses that forward, so hand it the
+platform's `waitUntil`: `waitUntil` from `@vercel/functions` on Vercel,
+`(p) => ctx.waitUntil(p)` on Cloudflare Workers. The promise it gets never
+rejects. `createAutterRelayRoute` in `@autter/runtime-next` does this for you.
 
 **Rate-limit key and `trustProxy`.** The relay route is public, so it limits
 each visitor. Any caller can write anything into `X-Forwarded-For`, so by

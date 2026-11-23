@@ -46,6 +46,21 @@ export interface AutterNextBrowserOptions extends AutterBrowserOptions {
 	tracePropagationTargets?: TracePropagationOptions["tracePropagationTargets"];
 }
 
+/**
+ * `process.env.NODE_ENV` as the bundler inlined it ("development" under
+ * `next dev`, "production" in a build). Written out in full so Next.js and
+ * other bundlers replace it with a string; where nothing replaced it and there
+ * is no `process`, there is no value.
+ */
+function buildEnvironment(): string | undefined {
+	try {
+		const value = process.env.NODE_ENV;
+		return typeof value === "string" && value.length > 0 && value.length <= 100 ? value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** The tracker was started in this page: the first call in a browser wins, as in the tracker itself. */
 let started = false;
 /** The app called enableTracePropagation or disableTracePropagation itself: its choice is kept. */
@@ -59,7 +74,10 @@ let chosen = false;
  */
 export function initAutterBrowser(options: AutterNextBrowserOptions): void {
 	const { tracePropagation, tracePropagationTargets, ...tracker } = options;
-	startTracker(tracker);
+	// No environment given: the build's NODE_ENV, so `next dev` reports
+	// development instead of production. An explicit environment wins.
+	const environment = tracker.environment || buildEnvironment();
+	startTracker(environment ? { ...tracker, environment } : tracker);
 	if (started || typeof window === "undefined") return;
 	started = true;
 	// enableTracePropagation({ tracePropagationTargets }) or

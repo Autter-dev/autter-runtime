@@ -122,7 +122,8 @@ test("otlpSink retries 503 and 429 after Retry-After within the flush; a 401 is 
 	assert.ok(at[2] - at[1] >= 900, `then backed off (${at[2] - at[1]} ms)`);
 	assert.equal(sink.buffered(), 0);
 
-	// A refused key: one attempt, the batch kept for a later flush.
+	// A refused key: one attempt, and the batch is dropped, not kept for a
+	// later flush (it would be refused again, forever).
 	at.length = 0;
 	answers.push([401, {}]);
 	const refused = otlpSink();
@@ -130,7 +131,86 @@ test("otlpSink retries 503 and 429 after Retry-After within the flush; a 401 is 
 	refused.write(summary(2));
 	await assert.rejects(refused.flush(), /\(401\)/);
 	assert.equal(at.length, 1);
-	assert.equal(refused.buffered(), 1);
+	assert.equal(refused.buffered(), 0);
 	await refused.shutdown?.().catch(() => {});
 	await sink.shutdown?.();
+});
+
+/** A local ingester answering every POST with `status(count)`; records each batch's size. */
+async function ingesterAnswering(t, status) {
+	const posts = [];
+	const server = createServer((req, res) => {
+		const chunks = [];
+		req.on("data", (chunk) => chunks.push(chunk));
+		req.on("end", () => {
+			const count = JSON.parse(Buffer.concat(chunks)).resourceLogs[0].scopeLogs[0].logRecords.length;
+			posts.push(count);
+			res.writeHead(status(count), { "content-type": "application/json" }).end(JSON.stringify({ error: "refused" }));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	t.after(() => {
+		server.closeAllConnections();
+		server.close();
+	});
+	return { endpoint: `http://127.0.0.1:${server.address().port}`, posts };
+}
+
+/** console.warn lines while the test runs. */
+function captureWarnings(t) {
+	const warnings = [];
+	const original = console.warn;
+	console.warn = (...args) => warnings.push(args.join(" "));
+	t.after(() => {
+		console.warn = original;
+	});
+	return warnings;
+}
+
+test("otlpSink with a revoked key (401): 1500 records, one batch sent, no resend loop, at most one drop warning", async (t) => {
+	const ingester = await ingesterAnswering(t, () => 401);
+	const warnings = captureWarnings(t);
+	const sink = otlpSink();
+	sink.start({ ...context, endpoint: ingester.endpoint });
+	for (let i = 0; i < 1500; i++) sink.write(summary(i));
+	await assert.rejects(sink.flush(), /\(401\)/);
+	// Paused: what was queued is dropped, and what is written now is dropped quietly.
+	for (let i = 0; i < 500; i++) sink.write(summary(i));
+	assert.equal(sink.buffered(), 0);
+	await sink.flush();
+	await sink.flush();
+	assert.equal(ingester.posts.length, 1, "the refused batch was not sent again");
+	const dropWarnings = warnings.filter((line) => /log record\(s\) dropped/.test(line));
+	assert.ok(dropWarnings.length <= 1, warnings.join("\n"));
+	// The 500 records past the 1000-record buffer: one line, not 500.
+	assert.match(dropWarnings[0] ?? "", /the log buffer was full/);
+	await sink.shutdown();
+});
+
+test("otlpSink drops a batch refused with 400 instead of blocking the records behind it", async (t) => {
+	const ingester = await ingesterAnswering(t, () => 400);
+	captureWarnings(t);
+	const sink = otlpSink();
+	sink.start({ ...context, endpoint: ingester.endpoint });
+	for (let i = 0; i < 120; i++) sink.write(summary(i));
+	await sink.flush();
+	// Batches of 50, 50 and 20, each tried once and dropped: nothing is left.
+	assert.deepEqual(ingester.posts, [50, 50, 20]);
+	assert.equal(sink.buffered(), 0);
+	await sink.flush();
+	assert.equal(ingester.posts.length, 3);
+	await sink.shutdown();
+});
+
+test("otlpSink splits a batch refused with 413 and sends the halves", async (t) => {
+	const ingester = await ingesterAnswering(t, (count) => (count > 12 ? 413 : 202));
+	captureWarnings(t);
+	const sink = otlpSink();
+	sink.start({ ...context, endpoint: ingester.endpoint });
+	for (let i = 0; i < 50; i++) sink.write(summary(i));
+	await sink.flush();
+	assert.equal(sink.buffered(), 0);
+	const accepted = ingester.posts.filter((count) => count <= 12).reduce((a, b) => a + b, 0);
+	assert.equal(accepted, 50, `every record arrived: ${ingester.posts.join(", ")}`);
+	await sink.shutdown();
 });

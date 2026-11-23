@@ -10,6 +10,8 @@ import { flush, initAutterBrowser, trackEvent } from "../dist/index.js";
 const beacons = [];
 const posts = [];
 let answers = [];
+const warnings = [];
+console.warn = (...args) => warnings.push(args.join(" "));
 globalThis.window = { fetch: async () => new Response("{}"), addEventListener() {} };
 globalThis.document = { addEventListener() {}, visibilityState: "visible" };
 globalThis.location = { href: "https://app.example.test/", pathname: "/" };
@@ -94,4 +96,25 @@ test("flush() still uses sendBeacon", async () => {
 	trackEvent("final");
 	flush();
 	assert.equal(beacons.length, 1);
+});
+
+test("400, 401, 403 and 413 drop the batch with one console.warn per status", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	for (const status of [401, 401, 403, 400, 413, 413]) {
+		posts.length = 0;
+		answers = [{ status }];
+		fillQueue(`refused-${status}`);
+		await settle();
+		t.mock.timers.tick(60000);
+		await settle();
+		assert.equal(posts.length, 1, `no resend after ${status}`);
+	}
+	assert.equal(warnings.length, 4);
+	assert.match(warnings[0], /^\[autter-runtime\] https:\/\/collector\.example\.test\/v1\/browser answered 401: 10 events dropped\./);
+	// Direct mode: the shared key wording, never the key itself.
+	assert.match(warnings[0], /runtime client key \(autter_rtc_…\).*Settings > Keys and tokens\./);
+	assert.ok(!warnings.join("\n").includes("autter_rtc_test"));
+	assert.match(warnings[1], /answered 403/);
+	assert.match(warnings[2], /answered 400: .*Check service, environment and release/);
+	assert.match(warnings[3], /answered 413: .*too large/);
 });

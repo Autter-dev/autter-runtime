@@ -343,7 +343,7 @@ npx autter-runtime sourcemaps verify dist
 | --- | --- |
 | `--release <r>` | Release to upload under (default: see above) |
 | `--url-prefix <p>` | Where the directory is served from: `/` (default), `/static/`, `https://cdn.example.com/app/`. `~/` means `/`. |
-| `--endpoint <url>` | Ingester base URL (default `$AUTTER_ENDPOINT`, `$AUTTER_RUNTIME_ENDPOINT`, `$OTEL_EXPORTER_OTLP_ENDPOINT`, then `https://otlp.autter.dev`) |
+| `--endpoint <url>` | Ingester base URL (default `$AUTTER_ENDPOINT`, `$AUTTER_RUNTIME_ENDPOINT`, then `https://otlp.autter.dev`; never `$OTEL_EXPORTER_OTLP_ENDPOINT`, which may point at another vendor. The CLI prints the endpoint and where it came from) |
 | `--concurrency <n>` | Parallel uploads (default 8) |
 | `--delete-after-upload` | Delete each `.map` (and its `sourceMappingURL` comment) once uploaded |
 | `--no-sources-content` | Upload maps without your files' original source (issues then show no lines around a frame) |

@@ -431,3 +431,38 @@ test("delivery retries 503 and 429 after Retry-After, and never a 401", async ()
 		console.warn = warn;
 	}
 });
+
+test("with no environment option, an ENVIRONMENT or NODE_ENV binding is used; an explicit environment wins", async () => {
+	const previous = process.env.NODE_ENV;
+	delete process.env.NODE_ENV;
+	try {
+		const cases = [
+			[{ ENVIRONMENT: "staging", NODE_ENV: "development" }, undefined, "staging"],
+			[{ NODE_ENV: "development" }, undefined, "development"],
+			[{}, undefined, "production"],
+			[{ ENVIRONMENT: "staging" }, "production", "production"],
+		];
+		for (const [env, environment, expected] of cases) {
+			const h = harness();
+			const worker = withAutter(
+				{ apiKey: "server-key", service: "edge-api", environment, fetch: h.fakeFetch, endpoint: "https://ingest.test/" },
+				async () => new Response("ok"),
+			);
+			await worker.fetch(new Request("https://edge.test/"), env, h.ctx);
+			await Promise.all(h.pending);
+			const resource = Object.fromEntries(h.posts[0].body.resourceLogs[0].resource.attributes.map((a) => [a.key, a.value.stringValue]));
+			assert.equal(resource["deployment.environment.name"], expected, JSON.stringify(env));
+		}
+		// No binding: process.env.NODE_ENV where the runtime has one (Next.js middleware).
+		process.env.NODE_ENV = "development";
+		const h = harness();
+		const worker = withAutter({ apiKey: "server-key", service: "edge-api", fetch: h.fakeFetch, endpoint: "https://ingest.test/" }, async () => new Response("ok"));
+		await worker.fetch(new Request("https://edge.test/"), undefined, h.ctx);
+		await Promise.all(h.pending);
+		const resource = Object.fromEntries(h.posts[0].body.resourceLogs[0].resource.attributes.map((a) => [a.key, a.value.stringValue]));
+		assert.equal(resource["deployment.environment.name"], "development");
+	} finally {
+		if (previous === undefined) delete process.env.NODE_ENV;
+		else process.env.NODE_ENV = previous;
+	}
+});

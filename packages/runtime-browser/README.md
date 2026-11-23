@@ -43,10 +43,25 @@ import { initAutterBrowser, captureException, trackEvent } from "@autter/runtime
 initAutterBrowser({
   endpoint: "/api/autter-runtime",   // your same-origin relay — never a key in the browser
   service: "web-app",
-  environment: "production",
+  environment: "production",        // default: "development" on localhost, else "production"
   release: "e4a218f",                // e.g. a git SHA
 });
+```
 
+`endpoint` and `service` are required (and `release` at most 200 characters,
+`environment` at most 100): with a missing or invalid value the tracker logs
+one `console.error` saying what to set and does not start. Without
+`environment`, a page served from `localhost`, `127.0.0.1`, `[::1]` or a
+`*.local` / `*.localhost` host reports `development`, so errors from your
+machine stay out of production views and alerts. A batch the endpoint refuses
+with 400, 401, 403 or 413 is dropped with one `console.warn` per status.
+Errors and usage events (`trackEvent`, timings, session starts) have separate
+budgets of 200 per page load, so usage cannot use up the error budget; a
+`console.warn` says when one is reached. No call into the tracker throws, and
+a value `JSON.stringify` cannot handle (a BigInt, a cycle) is converted
+instead of failing the batch.
+
+```ts
 // Unhandled errors, promise rejections, and enforced CSP blocks are captured automatically.
 
 // Handled errors:

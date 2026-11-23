@@ -51,3 +51,22 @@ test("the client entry re-exports the opt-in filters (sampleRate, ignoreErrors, 
 	}
 	assert.match(readFileSync(new URL("../dist/client.js", import.meta.url), "utf8"), /@autter\/runtime-browser\/filters/);
 });
+
+test("with no environment option, the client reports the build's NODE_ENV (development under next dev)", async () => {
+	const { installFakeBrowser } = await import("./fake-browser.mjs");
+	const sent = [];
+	installFakeBrowser();
+	Object.defineProperty(globalThis, "navigator", { configurable: true, value: { sendBeacon(_url, body) { sent.push(body); return true; } } });
+	const previous = process.env.NODE_ENV;
+	process.env.NODE_ENV = "development";
+	try {
+		client.initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web", captureTimings: false });
+		client.flush();
+		assert.equal(sent.length, 1);
+		assert.equal(JSON.parse(await sent[0].text()).environment, "development");
+	} finally {
+		if (previous === undefined) delete process.env.NODE_ENV;
+		else process.env.NODE_ENV = previous;
+		delete globalThis.window;
+	}
+});

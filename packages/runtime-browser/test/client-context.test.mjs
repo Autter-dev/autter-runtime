@@ -89,7 +89,9 @@ test("errors carry browser, OS, route trail, and page scripts without a raw user
 	assert.ok(!body.includes("Macintosh"));
 	assert.ok(!body.includes("supersecretnonce"));
 	assert.ok(!body.includes("AppleWebKit"));
-	const { events, sdk } = JSON.parse(body);
+	const { events, sdk, environment } = JSON.parse(body);
+	// No environment given on a public host: production.
+	assert.equal(environment, "production");
 	// The SDK version rides along for the ingester's compatibility records.
 	assert.equal(sdk, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
 	const scriptError = events.find((event) => event.message === "Script error.");
@@ -109,4 +111,32 @@ test("errors carry browser, OS, route trail, and page scripts without a raw user
 	assert.match(csp.context.cspPolicyHash, /^[0-9a-f]+$/);
 	const later = events.find((event) => event.message === "later failure");
 	assert.equal(later.context.cspPolicyHash, csp.context.cspPolicyHash);
+});
+
+test("with no environment option, a page on a local host reports development; an explicit one wins", async () => {
+	const cases = [
+		["localhost", undefined, "development"],
+		["127.0.0.1", undefined, "development"],
+		["[::1]", undefined, "development"],
+		["shop.local", undefined, "development"],
+		["app.localhost", undefined, "development"],
+		["localhost.example.com", undefined, "production"],
+		["localhost", "staging", "staging"],
+	];
+	for (const [hostname, environment, expected] of cases) {
+		const sent = [];
+		globalThis.location = { href: `http://${hostname}/`, pathname: "/", hostname, origin: `http://${hostname}` };
+		globalThis.window = { fetch: async () => ({ status: 200 }), addEventListener() {} };
+		globalThis.document = { addEventListener() {}, visibilityState: "visible" };
+		Object.defineProperty(globalThis, "navigator", { configurable: true, value: { sendBeacon(_url, body) { sent.push(body); return true; } } });
+		// A fresh copy of the module per case (initAutterBrowser runs once per
+		// page). dist/index.js re-exports a shared chunk that holds the state,
+		// so import that chunk itself under a new URL.
+		const chunk = /from "\.\/(chunk-[\w-]+\.js)"/.exec(readFileSync(new URL("../dist/index.js", import.meta.url), "utf8"))[1];
+		const sdk = await import(`../dist/${chunk}?host=${hostname}&env=${environment}`);
+		sdk.initAutterBrowser({ endpoint: "/api/autter-runtime", service: "web", environment, captureTimings: false, captureNetworkFailures: false, captureActions: false });
+		sdk.flush();
+		assert.equal(sent.length, 1, hostname);
+		assert.equal(JSON.parse(await sent[0].text()).environment, expected, hostname);
+	}
 });

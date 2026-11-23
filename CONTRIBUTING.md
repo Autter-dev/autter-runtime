@@ -23,7 +23,7 @@ size are welcome, and first-time contributors are actively encouraged.
 
 ```
 packages/
-├── runtime-browser/   # <5 KB zero-dep browser tracker (size-limit enforced in CI)
+├── runtime-browser/   # zero-dep browser tracker, at most 10 KB brotlied (size-limit enforced in CI)
 ├── runtime-node/      # Node server tracker (curated OTel) + browser relay handlers
 ├── runtime-next/      # Next.js wrapper: instrumentation + relay route + error boundary
 └── otlp-ingester/     # the ingest service: OTLP + /v1/browser → ClickHouse
@@ -59,8 +59,10 @@ CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_PASSWORD=dev AUTTER_LOCAL_DEV=1 
 ```
 
 `AUTTER_LOCAL_DEV=1` makes the ingester accept `autter_rt_local_dev_only`
-from loopback and private addresses only (`docker compose up` sets it for
-the containerised ingester). Or run everything in containers with
+from this machine only: loopback, and in a container also its own networks
+(the host through the published port, sibling containers). `docker compose
+up` sets it for the containerised ingester and publishes ClickHouse (:8123)
+and the ingester (:4318) on 127.0.0.1 only, not on your LAN. Or run everything in containers with
 `docker compose up`. Before opening a PR that touches the quickstart or the
 examples, run the check CI runs (`examples-e2e`):
 
@@ -137,7 +139,8 @@ column.
 These are the invariants that keep the system trustworthy — CI checks some,
 review checks the rest:
 
-- **Browser bundle stays under 5 KB** (brotlied). CI runs
+- **Browser bundle stays under 10 KB** (brotlied, `dist/index.js`; the
+  limits per entry are in `packages/runtime-browser/package.json`). CI runs
   `npm run size -w @autter/runtime-browser` and fails over-budget PRs. The
   browser tracker stays **zero-dependency** — no exceptions.
 - **Telemetry fails open.** SDK code must never throw into the host app,

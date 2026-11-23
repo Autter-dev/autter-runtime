@@ -14,6 +14,7 @@ import { versionAtLeast } from "../../otlp-ingester/src/compat.js";
 import { classifyKey, keyProblemMessage, wrongKeyMessage } from "@autter/runtime-core";
 import { diagnoseConnectivity, type ConnectivityReport } from "./connectivity.js";
 import { refusalReason } from "./ingest-auth.js";
+import { DEFAULT_INGEST_ENDPOINT, otelEndpointNote, resolveIngestEndpoint, type IngestEndpointSource } from "./endpoint.js";
 
 /**
  * `npx @autter/runtime-node doctor` — one-shot setup report: installed
@@ -37,6 +38,10 @@ export interface DoctorOptions {
 
 export interface DoctorReport {
 	endpoint: string;
+	/** Where `endpoint` came from: "option" (--endpoint), "AUTTER_ENDPOINT", "AUTTER_RUNTIME_ENDPOINT" or "default". */
+	endpointSource: IngestEndpointSource;
+	/** Set when OTEL_EXPORTER_OTLP_ENDPOINT points somewhere else: the SDK does not send there. */
+	endpointNote?: string;
 	sdks: SdkIdentity[];
 	ingester: IngesterCompatInfo | null;
 	ingesterError?: string;
@@ -74,16 +79,20 @@ export interface SkewLine {
 }
 
 const SDK_PACKAGES = ["@autter/runtime-node", "@autter/runtime-next", "@autter/runtime-browser"];
-const DEFAULT_ENDPOINT = "https://otlp.autter.dev";
+const DEFAULT_ENDPOINT = DEFAULT_INGEST_ENDPOINT;
 
+/**
+ * The endpoint the SDK itself sends to (endpoint.ts): `--endpoint`, then
+ * AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT, then the default. Not
+ * OTEL_EXPORTER_OTLP_ENDPOINT, which the SDK never sends the Autter key to.
+ */
 export function resolveEndpoint(flag?: string, env: NodeJS.ProcessEnv = process.env): string {
-	return (
-		flag ||
-		env.AUTTER_ENDPOINT ||
-		env.AUTTER_RUNTIME_ENDPOINT ||
-		env.OTEL_EXPORTER_OTLP_ENDPOINT ||
-		DEFAULT_ENDPOINT
-	).replace(/\/$/, "");
+	return resolveIngestEndpoint(flag, env).endpoint;
+}
+
+/** "from --endpoint", "from AUTTER_ENDPOINT", "from AUTTER_RUNTIME_ENDPOINT" or "default". */
+export function endpointFrom(source: IngestEndpointSource | undefined): string {
+	return source === "option" ? "from --endpoint" : source && source !== "default" ? `from ${source}` : "default";
 }
 
 /** Autter SDKs installed in the project at `cwd` (walking up node_modules). */
@@ -230,7 +239,8 @@ export function versionSkew(sdks: SdkIdentity[], info: IngesterCompatInfo | null
 }
 
 export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
-	const endpoint = resolveEndpoint(options.endpoint);
+	const { endpoint, source: endpointSource } = resolveIngestEndpoint(options.endpoint);
+	const endpointNote = otelEndpointNote(endpoint);
 	const timeoutMs = options.timeoutMs ?? 5000;
 	const sdks = installedSdks(options.cwd ?? process.cwd());
 	const features = options.features?.length ? options.features : featuresInUse(sdks);
@@ -286,6 +296,8 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
 			: 0;
 	return {
 		endpoint,
+		endpointSource,
+		...(endpointNote ? { endpointNote } : {}),
 		sdks,
 		ingester: info,
 		...(error && !info ? { ingesterError: error } : {}),
@@ -303,7 +315,8 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
 export function formatDoctorReport(report: DoctorReport): string {
 	const lines: string[] = [];
 	lines.push(`Autter Runtime doctor`);
-	lines.push(`  endpoint   ${report.endpoint}`);
+	lines.push(`  endpoint   ${report.endpoint} (${endpointFrom(report.endpointSource)})`);
+	if (report.endpointNote) lines.push(`             note: ${report.endpointNote}`);
 	for (const sdk of report.sdks) lines.push(`  sdk        ${sdk.name}@${sdk.version}`);
 	if (!report.ingester) {
 		lines.push(`  ingester   unreachable or unidentified (${report.ingesterError ?? "unknown error"})`);
@@ -387,7 +400,7 @@ and storage match, which features are active, and the ingest key. For an
 end-to-end check that sends a test event, use: npx @autter/runtime-node verify
 
 Options:
-  --endpoint <url>    Ingester base URL (default: $AUTTER_ENDPOINT, $OTEL_EXPORTER_OTLP_ENDPOINT, or ${DEFAULT_ENDPOINT})
+  --endpoint <url>    Ingester base URL (default: $AUTTER_ENDPOINT, $AUTTER_RUNTIME_ENDPOINT, or ${DEFAULT_ENDPOINT}; never $OTEL_EXPORTER_OTLP_ENDPOINT)
   --key <key>         Also verify an ingest key (default: $AUTTER_RUNTIME_KEY)
   --features <a,b>    Only check these features (${COMPAT_MANIFEST.features.map((f) => f.id).join(", ")})
   --json              Machine-readable output

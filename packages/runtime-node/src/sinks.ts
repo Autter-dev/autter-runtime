@@ -92,6 +92,12 @@ function withCommit(request: Record<string, unknown>, commit: string | undefined
 	return request;
 }
 
+/** First pause after the ingester refused the key (401/403); it doubles on each refusal, up to an hour. */
+const AUTH_PAUSE_MS = 5 * 60_000;
+const MAX_AUTH_PAUSE_MS = 60 * 60_000;
+/** A full-buffer drop is reported at most once per this interval. */
+const DROP_WARN_INTERVAL_MS = 60_000;
+
 /**
  * OTLP/HTTP JSON export to `${endpoint}/v1/logs`. Bounded exactly like
  * 1.4.0: 1000 records / 4 MiB buffered, 256 KiB per record, batches of 50
@@ -99,6 +105,14 @@ function withCommit(request: Record<string, unknown>, commit: string | undefined
  * on failure, undelivered records reported at shutdown. A 429 or 5xx is
  * retried after its Retry-After (else 500 ms, 1 s); any other 4xx is not
  * retried within the flush.
+ *
+ * A batch the ingester refuses for good is not sent again: on 400 it is
+ * dropped; on 413 it is split in half and the halves sent, and a single
+ * record still refused is dropped; on 401 or 403 (a revoked or wrong key)
+ * it is dropped, sending pauses for AUTH_PAUSE_MS (doubling up to an hour),
+ * and records written meanwhile are dropped without a warning each. Records
+ * dropped because the buffer is full are reported at most once a minute,
+ * with how many.
  */
 export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 	let context: RuntimeSinkContext | null = null;
@@ -112,6 +126,29 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 	let failureStreak = 0;
 	/** The last failed attempt's wait (Retry-After, else back-off): the next flush is no sooner. */
 	let nextFlushAfter = 0;
+	/** Records per batch: 50, halved each time the ingester answers 413. */
+	let batchLimit = 50;
+	/** While the key is refused (401/403): no sending until then, and new records are dropped. */
+	let pausedUntil = 0;
+	let authPause = AUTH_PAUSE_MS;
+	/** Full-buffer drops not yet reported, and when the last report was printed. */
+	let unreportedDrops = 0;
+	let lastDropWarning = -Infinity;
+	const paused = () => Date.now() < pausedUntil;
+
+	const dropped = (count: number, why: string) => {
+		sinkStats.dropped += count;
+		unreportedDrops += count;
+		const now = Date.now();
+		if (now - lastDropWarning < DROP_WARN_INTERVAL_MS) return;
+		lastDropWarning = now;
+		try {
+			console.warn(`[autter-runtime] ${unreportedDrops} log record(s) dropped: ${why} (reported at most once a minute)`);
+		} catch {
+			/* A broken console never breaks the app. */
+		}
+		unreportedDrops = 0;
+	};
 
 	const scheduleFlush = () => {
 		if (!timer && context && !stopping && queue.length) {
@@ -130,6 +167,13 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 	const flush = async (): Promise<void> => {
 		if (flushing) return flushing;
 		if (!context || !queue.length) return;
+		if (paused()) {
+			// The key was refused: these would be refused too.
+			sinkStats.dropped += queue.length;
+			queue = [];
+			queueBytes = 0;
+			return;
+		}
 		if (timer) {
 			clearTimeout(timer);
 			timer = undefined;
@@ -143,7 +187,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 			for (let remaining = count; remaining > 0; ) {
 				const batch: QueuedLog[] = [];
 				inFlightBytes = 0;
-				while (batch.length < Math.min(50, remaining) && queue.length) {
+				while (batch.length < Math.min(batchLimit, remaining) && queue.length) {
 					const next = queue[0]!;
 					if (batch.length && inFlightBytes + next.bytes > 512 * 1024) break;
 					batch.push(queue.shift()!);
@@ -218,6 +262,35 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 					await new Promise((resolve) => setTimeout(resolve, wait));
 				}
 				inFlight = 0;
+				const status = (failure as { status?: unknown } | undefined)?.status;
+				if (status === 413 && batch.length > 1) {
+					// Too large for the ingester: put it back and send it in halves.
+					batchLimit = Math.max(1, Math.floor(batch.length / 2));
+					queue = [...batch, ...queue];
+					queueBytes += inFlightBytes;
+					inFlightBytes = 0;
+					remaining += batch.length;
+					continue;
+				}
+				if (status === 400 || status === 413) {
+					// Refused for good (already reported once by noteIngestRefusal):
+					// sending it again would block every record behind it.
+					sinkStats.dropped += batch.length;
+					inFlightBytes = 0;
+					nextFlushAfter = 0;
+					continue;
+				}
+				if (status === 401 || status === 403) {
+					// A revoked or wrong key: nothing will be accepted until it is
+					// fixed. Drop this batch and what is queued, and pause.
+					sinkStats.dropped += batch.length + queue.length;
+					queue = [];
+					queueBytes = 0;
+					inFlightBytes = 0;
+					pausedUntil = Date.now() + authPause;
+					authPause = Math.min(authPause * 2, MAX_AUTH_PAUSE_MS);
+					throw failure;
+				}
 				if (failure) {
 					failureStreak++;
 					queue = [...batch, ...queue];
@@ -228,6 +301,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 				inFlightBytes = 0;
 				failureStreak = 0;
 				nextFlushAfter = 0;
+				authPause = AUTH_PAUSE_MS;
 			}
 		})().finally(() => {
 			flushing = null;
@@ -245,7 +319,8 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 		},
 		write(event) {
 			if (!context) return;
-			if (stopping) {
+			if (stopping || paused()) {
+				// Paused: the key was refused, which was reported when it happened.
 				sinkStats.dropped++;
 				return;
 			}
@@ -256,10 +331,7 @@ export function otlpSink(options: OtlpSinkOptions = {}): RuntimeSink {
 				queue.length + inFlight >= 1000 ||
 				queueBytes + inFlightBytes + bytes > 4 * 1024 * 1024
 			) {
-				sinkStats.dropped++;
-				console.warn(
-					"[autter-runtime] log buffer or record limit reached; record dropped",
-				);
+				dropped(1, bytes > 256 * 1024 ? "a record was larger than 256 KiB" : "the log buffer was full (1000 records or 4 MiB)");
 				return;
 			}
 			queue.push({ record, bytes });

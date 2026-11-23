@@ -66,7 +66,8 @@ import { authHeaders, resolveIngestKey, warnKeyKind, warnMissingKey } from "./in
 import { IngestMetricExporter, IngestSpanExporter } from "./ingest-exporters.js";
 import { makeUrlQueryPolicy } from "./url-query.js";
 import { startMemoryMetrics } from "./memory.js";
-import { detectCommit, ENVIRONMENT_ATTRIBUTE, environmentFromResourceAttributes, resolveEnvironment, resolveRelease } from "./deployment.js";
+import { detectCommit, ENVIRONMENT_ATTRIBUTE, resolveDeploymentIdentity } from "./deployment.js";
+import { resolveIngestEndpoint } from "./endpoint.js";
 import {
 	configureExportErrors,
 	exportErrorMark,
@@ -231,7 +232,7 @@ export interface AutterServerOptions {
 	 * one nothing is sent and one warning says so at startup.
 	 */
 	apiKey?: string;
-	/** Ingester base URL. Default: https://otlp.autter.dev */
+	/** Ingester base URL. Default: AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT, then https://otlp.autter.dev (never OTEL_EXPORTER_OTLP_ENDPOINT). */
 	endpoint?: string;
 	service: string;
 	/** Stable for this process lifetime; use an ECS task/container ID or pod UID plus restart count to correlate platform events. */
@@ -1315,13 +1316,34 @@ function structuredErrorAttributes(error: unknown): Attributes {
 	return attrs;
 }
 
+/**
+ * At most this many spans per trace export. OpenTelemetry's default (512)
+ * made an error storm's batch larger than the ingester's 1 MiB body limit
+ * (600 captured exceptions were one 1.27 MB POST, refused whole with 413).
+ * A batch that is still refused as too large is split by IngestSpanExporter.
+ */
+const BATCH_LIMITS = { maxExportBatchSize: 128 };
+
+/**
+ * Longest span attribute value kept (64 KiB), unless
+ * OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT or OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT
+ * sets one. OpenTelemetry keeps any length by default, so one span with a
+ * huge value (an LLM prompt, a serialised payload) could exceed the
+ * ingester's body limit on its own. Attribute, event and link counts keep
+ * OpenTelemetry's limit of 128 each.
+ */
+function spanLimits(): { attributeValueLengthLimit?: number } {
+	return process.env.OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT || process.env.OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT
+		? {}
+		: { attributeValueLengthLimit: 65_536 };
+}
+
 export function initAutterServer(options: AutterServerOptions): AutterServer {
 	if (S.active) return S.active;
 
-	const endpoint = (options.endpoint ?? "https://otlp.autter.dev").replace(
-		/\/$/,
-		"",
-	);
+	// The option, then AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT: the same
+	// endpoint `verify` and `doctor` check (endpoint.ts).
+	const { endpoint } = resolveIngestEndpoint(options.endpoint);
 	// Never "Bearer undefined": unset/empty/"undefined" is no key at all.
 	const apiKey = resolveIngestKey(options.apiKey);
 	const headers = authHeaders(apiKey);
@@ -1364,10 +1386,12 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 			),
 			"traces",
 		);
-	const environment = resolveEnvironment(options.environment);
+	// Values set in OTEL_RESOURCE_ATTRIBUTES first, as on the NodeSDK's spans:
+	// the same environment and release go on every resource, log records and
+	// request summaries included.
+	const { environment, release } = resolveDeploymentIdentity(options);
 	// Environment variables only: the SDK never runs git (deployment.ts).
 	const commit = detectCommit();
-	const release = resolveRelease(options.release);
 
 	// Debug mode: option OR AUTTER_DEBUG env (lifecycle seeds itself from the
 	// env at import time — never clobber an env-enabled session here).
@@ -1388,7 +1412,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		// The current semantic-conventions name (log records already used it). A
 		// value set in OTEL_RESOURCE_ATTRIBUTES, under either name, still wins:
 		// the NodeSDK merges those over this resource.
-		[ENVIRONMENT_ATTRIBUTE]: environmentFromResourceAttributes() ?? environment,
+		[ENVIRONMENT_ATTRIBUTE]: environment,
 		// OTel semconv for SDK distributions: the ingester records which
 		// Autter SDK version each service runs (version compatibility checks).
 		"telemetry.distro.name": distro.name,
@@ -1442,13 +1466,13 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	sampler = new RouteLabelSampler(sampler);
 	const errorTraceBuffer = retainTraces
 		? new ErrorTraceRetentionProcessor(
-				new BatchSpanProcessor(traceExporter(), { scheduledDelayMillis: 2000 }),
+				new BatchSpanProcessor(traceExporter(), { ...BATCH_LIMITS, scheduledDelayMillis: 2000 }),
 				retainOnError,
 				slowPolicy,
 			)
 		: null;
 
-	const mainSpanProcessor = new BatchSpanProcessor(traceExporter());
+	const mainSpanProcessor = new BatchSpanProcessor(traceExporter(), BATCH_LIMITS);
 	const metricReader = new PeriodicExportingMetricReader({
 		exporter: new GuardedMetricExporter(
 			new RedactingMetricExporter(
@@ -1472,6 +1496,7 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 	const sdk = new NodeSDK({
 		resource,
 		sampler,
+		spanLimits: spanLimits(),
 		spanProcessors: [
 			mainSpanProcessor,
 			...(errorTraceBuffer ? [errorTraceBuffer] : []),
@@ -1510,8 +1535,9 @@ export function initAutterServer(options: AutterServerOptions): AutterServer {
 		resource,
 		sampler: new AlwaysOnSampler(),
 		spanProcessors: [
-			new BatchSpanProcessor(traceExporter(), { scheduledDelayMillis: 2000 }),
+			new BatchSpanProcessor(traceExporter(), { ...BATCH_LIMITS, scheduledDelayMillis: 2000 }),
 		],
+		spanLimits: spanLimits(),
 	});
 	const errorTracer = alwaysOnProvider.getTracer("autter-errors");
 	// Process spans share the always-on provider (same OTLP pipe, no extra

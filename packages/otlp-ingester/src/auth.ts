@@ -90,7 +90,7 @@ export type LookupGate = () => boolean | Promise<boolean>;
 const KNOWN_KEYS_MAX = 10_000;
 /** Keys the validator refused or could not answer for. Bounded on its own. */
 const UNKNOWN_KEYS_MAX = 50_000;
-/** Longer than any key Autter issues (58 chars) or a static key needs: never sent to the validator. */
+/** Far longer than any key Autter issues (59 characters for autter_rtc_ and autter_rtu_ keys) or a static key needs: a longer one is never sent to the validator. */
 const MAX_KEY_LENGTH = 512;
 /** Printable ASCII without spaces: anything else is not a key. */
 const KEY_SHAPE = /^[\x21-\x7e]+$/;

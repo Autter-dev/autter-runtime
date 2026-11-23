@@ -104,6 +104,13 @@ export interface BrowserEvent {
 const MAX_QUEUE = 10;
 const FLUSH_INTERVAL_MS = 5000;
 const ERROR_FLUSH_DELAY_MS = 500;
+/**
+ * Events per page load, counted per budget: errors and failures in one, usage
+ * signals (session_start, track_event, timing) in the other, so a SPA that
+ * tracks every navigation still reports its errors. Only events the server
+ * answered (accepted, or refused with a 4xx that a resend would not change)
+ * use up a budget; events lost to a network failure or a 5xx do not.
+ */
 const MAX_EVENTS_PER_SESSION = 200;
 /** Failed scheduled sends retried in a row before their events are dropped. */
 const MAX_RETRIES = 3;
@@ -117,7 +124,15 @@ let sessionId = "";
 let userId: string | undefined;
 let globalContext: Record<string, unknown> | undefined;
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
-let sentCount = 0;
+/** Per budget (0 errors, 1 usage): events the server answered, and events queued or in flight. */
+const spent = [0, 0];
+const pending = [0, 0];
+/** Each console warning is printed once per page (a cap, a refused status). */
+const warned: Record<string, 1> = {};
+/** True while an event is being prepared: a hook that reports from in there is ignored. */
+let enqueuing = false;
+/** Environment when none is given: "development" on a local host, else "production". */
+let defaultEnvironment = "production";
 let retries = 0;
 let initialized = false;
 let timingCount = 0;
@@ -159,6 +174,53 @@ function uid(): string {
 	} catch {
 		return Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
 	}
+}
+
+/** 1 for a usage signal, 0 for an error or failure: the index of its budget. */
+const budget = (event: BrowserEvent) => +USAGE_TYPES.includes(event.type);
+
+function warnOnce(key: string, message: string): void {
+	if (warned[key]) return;
+	warned[key] = 1;
+	try {
+		console.warn("[autter-runtime] " + message);
+	} catch {
+		/* No console. */
+	}
+}
+
+/**
+ * Runs SDK work so that nothing it does can throw into the host app: every
+ * public function, patched browser API and timer goes through here. Telemetry
+ * fails open, and an SDK failure never reaches the page's error listeners,
+ * where the SDK would report itself.
+ */
+function guard(fn: () => unknown): void {
+	try {
+		fn();
+	} catch {
+		/* Telemetry fails open. */
+	}
+}
+
+/**
+ * JSON.stringify replacer for events a plain stringify refused: a BigInt
+ * becomes its decimal string and a reference back to an enclosing object
+ * becomes "[Circular]". Functions and symbols are dropped by stringify itself.
+ */
+function safeJson(): (this: unknown, key: string, value: unknown) => unknown {
+	const parents: unknown[] = [];
+	return function (this: unknown, _key: string, value: unknown) {
+		if (typeof value === "bigint") return String(value);
+		if (value && typeof value === "object") {
+			// `this` is the object holding `value`: everything after it on the
+			// stack is a finished sibling branch, not an ancestor.
+			parents.length = parents.indexOf(this) + 1;
+			if (parents.includes(value)) return "[Circular]";
+			parents.push(value);
+		}
+		return value;
+	};
 }
 
 function getSessionId(): string {
@@ -238,6 +300,8 @@ export function scrubText(value: string): string {
 
 function scrubValue(value: unknown, depth: number): unknown {
 	if (typeof value === "string") return scrubText(value);
+	// JSON.stringify throws on a BigInt (an id from setContext): send its digits.
+	if (typeof value === "bigint") return String(value);
 	if (!value || typeof value !== "object") return value;
 	if (depth > 5) return MASK;
 	if (Array.isArray(value)) return value.slice(0, 50).map((item) => scrubValue(item, depth + 1));
@@ -460,11 +524,11 @@ function attachClient(event: BrowserEvent): void {
 }
 
 function watchRoutes(): void {
-	const record = () => {
+	const record = () => guard(() => {
 		const path = route();
 		if (path) pushTrail(`nav:${path}`);
 		crumbs?.add("navigation", path);
-	};
+	});
 	record();
 	try {
 		const hist = window.history;
@@ -484,7 +548,23 @@ function watchRoutes(): void {
 }
 
 function enqueue(event: BrowserEvent, urgent?: boolean): void {
-	if (!initialized || sentCount + queue.length >= MAX_EVENTS_PER_SESSION) return;
+	// A beforeSend or console hook that reports while an event is prepared
+	// would recurse: ignore it.
+	if (!initialized || enqueuing) return;
+	enqueuing = true;
+	try {
+		prepare(event, urgent);
+	} finally {
+		enqueuing = false;
+	}
+}
+
+function prepare(event: BrowserEvent, urgent?: boolean): void {
+	const kind = budget(event);
+	if (spent[kind]! + pending[kind]! >= MAX_EVENTS_PER_SESSION) {
+		warnOnce("cap" + kind, `${MAX_EVENTS_PER_SESSION} ${kind ? "usage events" : "errors"} sent from this page: more are dropped until it reloads.`);
+		return;
+	}
 	if (lastAction && !USAGE_TYPES.includes(event.type)) {
 		const age = Date.now() - lastAction.at;
 		if (age >= 0 && age <= ACTION_WINDOW_MS) {
@@ -523,6 +603,7 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 			return;
 		}
 	}
+	pending[budget(event)]!++;
 	queue.push(event);
 	if (queue.length >= MAX_QUEUE) {
 		send(false);
@@ -535,7 +616,53 @@ function enqueue(event: BrowserEvent, urgent?: boolean): void {
 
 function schedule(delay: number): void {
 	if (flushTimer !== undefined) return;
-	flushTimer = setTimeout(send, delay, false);
+	flushTimer = setTimeout(sendLater, delay);
+}
+
+/** Timer callback: a scheduled send, which must never throw from the timer. */
+const sendLater = () => guard(() => send(false));
+
+/** The batch left the queue for good: free its pending slots, and use up budget if the server answered. */
+function settle(events: BrowserEvent[], answered: boolean): void {
+	for (const event of events) {
+		const kind = budget(event);
+		pending[kind]!--;
+		if (answered) spent[kind]!++;
+	}
+}
+
+/**
+ * The batch's JSON body, or "" when no event in it can be serialised. A value
+ * JSON.stringify refuses (a BigInt left by `redact: false`, a cycle or BigInt
+ * added by beforeSend) must not lose the whole batch or throw into the app:
+ * the events are then serialised one by one with a replacer, and only those
+ * that still fail (a throwing getter or toJSON) are dropped.
+ */
+function serialise(events: BrowserEvent[]): string {
+	const body = (list: unknown[]) => JSON.stringify({
+		version: 1,
+		sessionId,
+		service: opts.service,
+		environment: opts.environment || defaultEnvironment,
+		...(opts.release ? { release: opts.release } : {}),
+		// SDK version: the ingester records it so version mismatches are
+		// visible (and checked server-side by the relay). Ignored by older ingesters.
+		sdk: SDK_VERSION,
+		events: list,
+	});
+	try {
+		return body(events);
+	} catch {
+		const kept: unknown[] = [];
+		for (const event of events) {
+			try {
+				kept.push(JSON.parse(JSON.stringify(event, safeJson())));
+			} catch {
+				/* Still not serialisable: drop this event only. */
+			}
+		}
+		return kept.length ? body(kept) : "";
+	}
 }
 
 function baseEvent(
@@ -556,7 +683,7 @@ function baseEvent(
 /** Send everything queued, now. Uses sendBeacon when available so a closing
  * page still delivers; falls back to keepalive fetch. */
 export function flush(): void {
-	send(true);
+	guard(() => send(true));
 }
 
 /**
@@ -573,18 +700,8 @@ function send(final: boolean): void {
 	}
 	if (!initialized || queue.length === 0) return;
 	const events = queue.splice(0, queue.length);
-	sentCount += events.length;
-	const body = JSON.stringify({
-		version: 1,
-		sessionId,
-		service: opts.service,
-		environment: opts.environment || "production",
-		...(opts.release ? { release: opts.release } : {}),
-		// SDK version: the ingester records it so version mismatches are
-		// visible (and checked server-side by the relay). Ignored by older ingesters.
-		sdk: SDK_VERSION,
-		events,
-	});
+	const body = serialise(events);
+	if (!body) return settle(events, false);
 	// Direct mode: key as query param (sendBeacon can't set headers) and
 	// text/plain content type (CORS-safelisted — no preflight round-trip).
 	const direct = !!opts.clientKey;
@@ -598,23 +715,24 @@ function send(final: boolean): void {
 	if (final || typeof fetch !== "function") {
 		try {
 			// No navigator (or no sendBeacon): fetch below.
-			if (navigator.sendBeacon?.(url, new Blob([body], { type: contentType }))) return;
+			// Queued by the browser: counted as delivered, the answer is never seen.
+			if (navigator.sendBeacon?.(url, new Blob([body], { type: contentType }))) return settle(events, true);
 		} catch {
 			// fall through to fetch
 		}
 	}
 	const retry = (retryAfter?: string | null) => {
-		if (retries >= MAX_RETRIES) {
+		// A final send (page closing) is not retried.
+		if (final || retries >= MAX_RETRIES) {
 			retries = 0;
-			return;
+			return settle(events, false);
 		}
 		const seconds = Number(retryAfter);
 		const delay = seconds > 0 ? Math.min(seconds, 60) * 1000 : FLUSH_INTERVAL_MS * 2 ** retries;
 		retries++;
-		sentCount -= events.length;
 		queue = events.concat(queue);
 		if (flushTimer !== undefined) clearTimeout(flushTimer);
-		flushTimer = setTimeout(send, delay, false);
+		flushTimer = setTimeout(sendLater, delay);
 	};
 	try {
 		void fetch(url, {
@@ -624,15 +742,30 @@ function send(final: boolean): void {
 			keepalive: final,
 			credentials: "omit",
 		}).then(
-			(response) => {
-				if (final) return;
-				if (response.status === 429 || response.status >= 500) retry(response.headers?.get("retry-after"));
-				else retries = 0;
-			},
-			() => final || retry(),
+			(response) => guard(() => {
+				const status = response.status;
+				if (status === 429 || status >= 500) return retry(response.headers?.get("retry-after"));
+				if (!final) retries = 0;
+				settle(events, true);
+				// Refused for good: say why, once per status, instead of dropping silently.
+				if (/^(400|401|403|413)$/.test(String(status)))
+					warnOnce(
+						"s" + status,
+						`${opts.endpoint} answered ${status}: ${events.length} events dropped. ` +
+							(status === 413
+								? "The batch was too large."
+								: status === 400
+									? "Check service, environment and release in initAutterBrowser()."
+									: direct
+										? "Browser errors need a runtime client key (autter_rtc_…) that allows this origin in initAutterBrowser({ clientKey }). Create one in the Autter dashboard at Settings > Keys and tokens."
+										: "Check the relay's server key (AUTTER_RUNTIME_KEY)."),
+					);
+			}),
+			() => guard(() => retry()),
 		);
 	} catch {
-		// fetch threw synchronously (no fetch at all): nothing to deliver with
+		// fetch threw synchronously (no fetch at all): nothing to deliver with.
+		settle(events, false);
 	}
 }
 
@@ -640,16 +773,18 @@ export function captureException(
 	error: unknown,
 	context?: Record<string, unknown> & { fingerprint?: Fingerprint },
 ): void {
-	const isError = error instanceof Error;
-	const event = baseEvent(
-		"exception",
-		isError ? error.message : String(error),
-	);
-	event.severity = "error";
-	// Explicit context wins over the duck-typed declared fields.
-	fromError(event, error);
-	addContext(event, takeFingerprint(event, context));
-	enqueue(event, true);
+	guard(() => {
+		const isError = error instanceof Error;
+		const event = baseEvent(
+			"exception",
+			isError ? error.message : String(error),
+		);
+		event.severity = "error";
+		// Explicit context wins over the duck-typed declared fields.
+		fromError(event, error);
+		addContext(event, takeFingerprint(event, context));
+		enqueue(event, true);
+	});
 }
 
 /**
@@ -662,21 +797,25 @@ export function captureMessage(
 	severity: AutterSeverity = "warning",
 	context?: Record<string, unknown>,
 ): void {
-	const event = baseEvent("message", message);
-	event.severity = severity;
-	event.errorType = "Message";
-	if (context) addContext(event, context);
-	enqueue(event, severity === "error" || severity === "fatal");
+	guard(() => {
+		const event = baseEvent("message", message);
+		event.severity = severity;
+		event.errorType = "Message";
+		if (context) addContext(event, context);
+		enqueue(event, severity === "error" || severity === "fatal");
+	});
 }
 
 /** Report an application outcome that failed without throwing. Use a stable name. */
 export function captureOutcome(name: string, message: string, context?: Record<string, unknown>): void {
-	const event = baseEvent("outcome", message);
-	event.name = String(name).slice(0, 712);
-	event.errorType = "OutcomeFailure";
-	event.severity = "error";
-	if (context) addContext(event, context);
-	enqueue(event, true);
+	guard(() => {
+		const event = baseEvent("outcome", message);
+		event.name = String(name).slice(0, 712);
+		event.errorType = "OutcomeFailure";
+		event.severity = "error";
+		if (context) addContext(event, context);
+		enqueue(event, true);
+	});
 }
 
 /** Coarse usage signal — counts only, no PII in `props`. */
@@ -684,19 +823,25 @@ export function trackEvent(
 	name: string,
 	props?: Record<string, string | number | boolean>,
 ): void {
-	const event = baseEvent("track_event", "");
-	event.name = String(name).slice(0, 712);
-	if (props) addContext(event, props);
-	enqueue(event);
+	guard(() => {
+		const event = baseEvent("track_event", "");
+		event.name = String(name).slice(0, 712);
+		if (props) addContext(event, props);
+		enqueue(event);
+	});
 }
 
 /** Customer-provided OPAQUE identifier — never an email address. */
 export function setUser(id: string | null): void {
-	userId = id ? String(id).slice(0, 200) : undefined;
+	guard(() => {
+		userId = id ? String(id).slice(0, 200) : undefined;
+	});
 }
 
 export function setContext(context: Record<string, unknown> | null): void {
-	globalContext = context ?? undefined;
+	guard(() => {
+		globalContext = context ?? undefined;
+	});
 }
 
 /** Milliseconds since `from`, capped at two minutes. */
@@ -730,7 +875,32 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 		);
 		return;
 	}
+	// The ingester and the relay refuse a payload without these, so a bad
+	// value would lose every event: say what to set, and do not start (no
+	// patches, every call a no-op).
+	const text = (value: unknown, max: number, min = 1) =>
+		typeof value === "string" && value.length >= min && value.length <= max;
+	const bad = !text(options.endpoint, 2000)
+		? "endpoint (your relay route, e.g. \"/api/autter-runtime\", or the ingester's /v1/browser URL with a clientKey)"
+		: !text(options.service, 200)
+			? "service (your app's name, 1 to 200 characters)"
+			: options.release != null && !text(options.release, 200, 0)
+				? "release (at most 200 characters)"
+				: options.environment != null && !text(options.environment, 100, 0)
+					? "environment (at most 100 characters)"
+					: "";
+	if (bad) {
+		console.error(`[autter-runtime] initAutterBrowser() needs ${bad}. Nothing is sent.`);
+		return;
+	}
 	opts = options as typeof opts;
+	// No environment given: a page served from this machine is development,
+	// so its errors stay out of production views and alerts.
+	try {
+		if (/^(localhost|127\.0\.0\.1|\[::1\])$|\.(local|localhost)$/.test(location.hostname)) defaultEnvironment = "development";
+	} catch {
+		/* No location. */
+	}
 	sessionId = getSessionId();
 	initialized = true;
 	watchRoutes();
@@ -757,12 +927,15 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 	if (options.captureLoggedErrors !== false) {
 		const original = console.error;
 		console.error = function (this: unknown, ...args: unknown[]) {
-			for (const arg of args)
-				if (arg instanceof Error)
-					// The rest of the line (without the error) as context; the
-					// ingester marks it `autter.handled`, `autter.handling: "caught"`,
-					// `autter.log.source: "console"`.
-					setTimeout(() => sent.has(arg) || captureException(arg, { "autter.log.message": args.filter((other) => other !== arg).join(" ") }));
+			guard(() => {
+				for (const arg of args)
+					if (arg instanceof Error)
+						// The rest of the line (without the error) as context; the
+						// ingester marks it `autter.handled`, `autter.handling: "caught"`,
+						// `autter.log.source: "console"`. Joining runs the other
+						// arguments' toString, which may throw: guarded too.
+						setTimeout(guard, 0, () => sent.has(arg) || captureException(arg, { "autter.log.message": args.filter((other) => other !== arg).join(" ") }));
+			});
 			return original.apply(this, args);
 		};
 	}
@@ -770,27 +943,36 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 	if (network && typeof fetch === "function") {
 		const originalFetch = window.fetch.bind(window);
 		window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-			const started = performance.now();
-			const target = input instanceof Request ? input.url : String(input);
-			const isTelemetry = target.includes(options.endpoint);
-			const path = pathOf(target);
-			const method = init?.method || (input as Request).method;
-			const [traced, traceId] = (!isTelemetry && tracer?.fetch(target, input, init)) || [init];
+			// The app's request goes out, and settles, exactly as without the SDK:
+			// observing it is guarded, so it can neither throw nor change the result.
+			let started = 0, isTelemetry = true, path = "", method: string | undefined, traced = init, traceId: string | undefined;
+			guard(() => {
+				started = performance.now();
+				const target = input instanceof Request ? input.url : String(input);
+				isTelemetry = target.includes(options.endpoint);
+				path = pathOf(target);
+				method = init?.method || (input as Request).method;
+				[traced, traceId] = (!isTelemetry && tracer?.fetch(target, input, init)) || [init];
+			});
 			return originalFetch(input, traced).then((response) => {
-				tracer?.settle(traceId);
-				if (!isTelemetry) crumbs?.add("request", method, path, response.status, elapsed(started));
-				if (!isTelemetry && response.status >= 500) {
-					const event = failure(`Request returned ${response.status}`, "HttpRequestError", path, started);
-					try { addRequestId(event, response.headers.get("x-request-id")); } catch { /* No headers. */ }
-					enqueue(event, true);
-				}
+				guard(() => {
+					tracer?.settle(traceId);
+					if (isTelemetry) return;
+					crumbs?.add("request", method, path, response.status, elapsed(started));
+					if (response.status >= 500) {
+						const event = failure(`Request returned ${response.status}`, "HttpRequestError", path, started);
+						try { addRequestId(event, response.headers.get("x-request-id")); } catch { /* No headers. */ }
+						enqueue(event, true);
+					}
+				});
 				return response;
 			}, (error: unknown) => {
-				tracer?.settle(traceId);
-				if (!isTelemetry) {
+				guard(() => {
+					tracer?.settle(traceId);
+					if (isTelemetry) return;
 					crumbs?.add("request", method, path, 0, elapsed(started));
 					enqueue(failure("Request failed", "NetworkError", path, started), true);
-				}
+				});
 				throw error;
 			});
 		}) as typeof fetch;
@@ -805,41 +987,43 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			return Reflect.apply(originalOpen, this, args);
 		}) as typeof XMLHttpRequest.prototype.open;
 		xhr.send = function (...args: Parameters<XMLHttpRequest["send"]>) {
-			const [method, url] = xhrUrls.get(this) ?? [];
-			const target = String(url ?? "");
-			if (!target.includes(options.endpoint)) {
-				const started = performance.now();
-				const path = pathOf(target);
-				let recorded = false;
-				const record = (message: string, errorType: string, requestId?: string | null) => {
-					if (recorded) return;
-					recorded = true;
-					crumbs?.add("request", method, path, this.status, elapsed(started));
-					const event = failure(message, errorType, path, started);
-					addRequestId(event, requestId);
-					enqueue(event, true);
-				};
-				const onError = () => record("Request failed", "NetworkError");
-				const onTimeout = () => record("Request timed out", "NetworkError");
-				this.addEventListener("loadend", () => {
-					if (this.status < 500 && !recorded) crumbs?.add("request", method, path, this.status, elapsed(started));
-					if (this.status >= 500) {
-						let requestId: string | null = null;
-						try { requestId = this.getResponseHeader("x-request-id"); } catch { /* Not exposed. */ }
-						record(`Request returned ${this.status}`, "HttpRequestError", requestId);
-					}
-					this.removeEventListener("error", onError);
-					this.removeEventListener("timeout", onTimeout);
-				}, { once: true });
-				this.addEventListener("error", onError, { once: true });
-				this.addEventListener("timeout", onTimeout, { once: true });
-			}
+			guard(() => {
+				const [method, url] = xhrUrls.get(this) ?? [];
+				const target = String(url ?? "");
+				if (!target.includes(options.endpoint)) {
+					const started = performance.now();
+					const path = pathOf(target);
+					let recorded = false;
+					const record = (message: string, errorType: string, requestId?: string | null) => guard(() => {
+						if (recorded) return;
+						recorded = true;
+						crumbs?.add("request", method, path, this.status, elapsed(started));
+						const event = failure(message, errorType, path, started);
+						addRequestId(event, requestId);
+						enqueue(event, true);
+					});
+					const onError = () => record("Request failed", "NetworkError");
+					const onTimeout = () => record("Request timed out", "NetworkError");
+					this.addEventListener("loadend", () => guard(() => {
+						if (this.status < 500 && !recorded) crumbs?.add("request", method, path, this.status, elapsed(started));
+						if (this.status >= 500) {
+							let requestId: string | null = null;
+							try { requestId = this.getResponseHeader("x-request-id"); } catch { /* Not exposed. */ }
+							record(`Request returned ${this.status}`, "HttpRequestError", requestId);
+						}
+						this.removeEventListener("error", onError);
+						this.removeEventListener("timeout", onTimeout);
+					}), { once: true });
+					this.addEventListener("error", onError, { once: true });
+					this.addEventListener("timeout", onTimeout, { once: true });
+				}
+			});
 			return Reflect.apply(originalSend, this, args);
 		};
 	}
 	if (options.captureTimings !== false && typeof PerformanceObserver !== "undefined") {
 		try {
-			const observer = new PerformanceObserver((list) => {
+			const observer = new PerformanceObserver((list) => guard(() => {
 				for (const entry of list.getEntries()) {
 					if (entry.duration < 200 || entry.name.includes(options.endpoint) || timingCount >= 20) continue;
 					const event = baseEvent("timing", "");
@@ -848,12 +1032,12 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 					timingCount++;
 					enqueue(event);
 				}
-			});
+			}));
 			observer.observe({ entryTypes: ["longtask", "resource"] });
 		} catch { /* Browser does not support these entry types. */ }
 	}
 
-	window.addEventListener("error", (event: ErrorEvent) => {
+	window.addEventListener("error", (event: ErrorEvent) => guard(() => {
 		const target = event.target as (EventTarget & { tagName?: string; src?: string }) | null;
 		const failedScript = target && target !== window && target.tagName === "SCRIPT" ? target : null;
 		const e = baseEvent("exception", failedScript ? "Script failed to load" : event.message || "Unknown error");
@@ -872,8 +1056,8 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			}
 		}
 		enqueue(e, true);
-	}, true);
-	window.addEventListener("securitypolicyviolation", (event: SecurityPolicyViolationEvent) => {
+	}), true);
+	window.addEventListener("securitypolicyviolation", (event: SecurityPolicyViolationEvent) => guard(() => {
 		if (event.disposition === "report") return;
 		const directive = event.effectiveDirective || event.violatedDirective || "unknown";
 		const e = baseEvent("csp_violation", `Content Security Policy blocked ${directive}`);
@@ -900,11 +1084,11 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 			...(blockedOrigin ? { cspBlockedOrigin: blockedOrigin.slice(0, 200) } : {}),
 			...(policyHash ? { cspPolicyHash: policyHash } : {}) });
 		enqueue(e, true);
-	});
+	}));
 
 	window.addEventListener(
 		"unhandledrejection",
-		(event: PromiseRejectionEvent) => {
+		(event: PromiseRejectionEvent) => guard(() => {
 			const reason: unknown = event.reason;
 			const isError = reason instanceof Error;
 			const e = baseEvent(
@@ -921,7 +1105,7 @@ export function initAutterBrowser(options: AutterBrowserOptions): void {
 				e.severity = "warning";
 			}
 			enqueue(e, true);
-		},
+		}),
 	);
 
 	document.addEventListener("visibilitychange", () => {

@@ -34,7 +34,8 @@ import {
 	unregisterFlushTargets,
 	type AutoFlushHandle,
 } from "./lifecycle.js";
-import { detectCommit, resolveEnvironment, resolveRelease } from "./deployment.js";
+import { detectCommit, resolveDeploymentIdentity } from "./deployment.js";
+import { resolveIngestEndpoint } from "./endpoint.js";
 import { makeRedactor, type RedactOptions } from "./redact.js";
 import { markCaptured } from "./requests.js";
 import {
@@ -75,7 +76,7 @@ import { resolveIngestKey } from "./ingest-auth.js";
 export interface AutterLoggingOptions {
 	/** Private ingest key (autter_rt_…). Omit to log locally only. */
 	apiKey?: string;
-	/** Ingester base URL. Default: https://otlp.autter.dev */
+	/** Ingester base URL. Default: AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT, then https://otlp.autter.dev (never OTEL_EXPORTER_OTLP_ENDPOINT). */
 	endpoint?: string;
 	service: string;
 	/** Same default as initAutterServer: NODE_ENV, else `test` under a test runner, else `production`. */
@@ -135,9 +136,10 @@ export function initAutterLogging(options: AutterLoggingOptions): AutterLogging 
 		};
 	}
 	if (isDebugEnabled() || options.debug === true) setDebugMode(true);
-	const endpoint = (options.endpoint ?? "https://otlp.autter.dev").replace(/\/$/, "");
-	const environment = resolveEnvironment(options.environment);
-	const release = resolveRelease(options.release);
+	// The option, then AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT (endpoint.ts).
+	const { endpoint } = resolveIngestEndpoint(options.endpoint);
+	// OTEL_RESOURCE_ATTRIBUTES first, as initAutterServer's spans (deployment.ts).
+	const { environment, release } = resolveDeploymentIdentity(options);
 	// Environment variables only (deployment.ts), as initAutterServer.
 	const commit = detectCommit();
 	const redact = makeRedactor(options.redactAttributes ?? true);

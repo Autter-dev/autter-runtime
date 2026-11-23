@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import {
+	detectLocalNetworks,
 	isLocalAddress,
 	loadConfig,
 	LOCAL_DEV_KEY,
 	localDevMode,
 	withLocalDevKey,
 	type IngesterConfig,
+	type LocalNetworks,
 	type StaticIngestKey,
 } from "./config.js";
 import { createIngesterApp } from "./server.js";
@@ -17,7 +19,7 @@ import { createIngesterApp } from "./server.js";
  * `docker compose up` work without a key step. It must stay useless anywhere
  * else: only AUTTER_LOCAL_DEV=1 enables it, that flag is refused next to a
  * key validator, a listed copy is ignored without the flag, and requests
- * with it are refused from addresses that are not loopback or private.
+ * with it are refused from addresses other than loopback (and, in a container, its own networks).
  */
 
 const EMPTY_TRACES = { resourceSpans: [] };
@@ -136,13 +138,46 @@ test("a listed copy of the local key is dropped without local dev mode", () => {
 	]);
 });
 
-test("loopback and private addresses are local; public ones are not", () => {
-	for (const address of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "10.1.2.3", "172.17.0.1", "172.31.255.1", "192.168.65.1", "::ffff:172.18.0.1", "fd00::1", "fe80::1"]) {
-		assert.equal(isLocalAddress(address), true, address);
+test("on the host only loopback is local: the rest of a private LAN is not", () => {
+	const host: LocalNetworks = { inContainer: false, subnets: [{ address: "192.168.1.20", netmask: "255.255.255.0" }] };
+	for (const address of ["127.0.0.1", "127.8.0.1", "::1", "::ffff:127.0.0.1"]) {
+		assert.equal(isLocalAddress(address, host), true, address);
 	}
-	for (const address of ["8.8.8.8", "172.32.0.1", "172.15.0.1", "100.64.0.1", "2001:db8::1", "::ffff:8.8.8.8", "", undefined]) {
-		assert.equal(isLocalAddress(address), false, String(address));
+	// Before, every 10/8, 172.16/12 and 192.168/16 address could use the
+	// well-known key: anyone on the same Wi-Fi as a laptop running the stack.
+	for (const address of ["192.168.1.30", "10.1.2.3", "172.17.0.1", "fd00::1", "fe80::1", "8.8.8.8", "", undefined]) {
+		assert.equal(isLocalAddress(address, host), false, String(address));
 	}
+});
+
+test("in a container, the container's own networks are local: the host through the published port, and sibling containers", () => {
+	// docker compose's project network, as the ingester container sees it.
+	const container: LocalNetworks = { inContainer: true, subnets: [{ address: "172.18.0.3", netmask: "255.255.0.0" }] };
+	for (const address of [
+		"127.0.0.1",
+		"::1",
+		"172.18.0.1", // the host, through the published 127.0.0.1:4318 (the bridge gateway)
+		"::ffff:172.18.0.1",
+		"172.18.0.5", // another container on the same network
+		"192.168.65.1", // the host as Docker Desktop forwards it
+	]) {
+		assert.equal(isLocalAddress(address, container), true, address);
+	}
+	for (const address of ["172.17.0.1", "172.19.0.1", "10.1.2.3", "192.168.1.30", "8.8.8.8", "fd00::1", "999.1.1.1"]) {
+		assert.equal(isLocalAddress(address, container), false, address);
+	}
+	// Whatever pool Docker picked for the network.
+	const pooled: LocalNetworks = { inContainer: true, subnets: [{ address: "192.168.32.2", netmask: "255.255.240.0" }] };
+	assert.equal(isLocalAddress("192.168.32.1", pooled), true);
+	assert.equal(isLocalAddress("192.168.48.1", pooled), false);
+});
+
+test("the process's own networks are detected without throwing", () => {
+	const detected = detectLocalNetworks();
+	assert.equal(typeof detected.inContainer, "boolean");
+	assert.ok(Array.isArray(detected.subnets));
+	// Loopback is local whatever was detected.
+	assert.equal(isLocalAddress("127.0.0.1"), true);
 });
 
 test("local dev mode accepts the local key from this machine", async (t) => {

@@ -2,7 +2,8 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     ports:
-      - "8123:8123"
+      # This machine only: the password below is well known.
+      - "127.0.0.1:8123:8123"
     environment:
       CLICKHOUSE_PASSWORD: dev
     ulimits:
@@ -20,13 +21,17 @@ services:
       context: .
       dockerfile: packages/otlp-ingester/Dockerfile
     ports:
-      - "4318:4318"
+      # This machine only: the ingester accepts the well-known local key. To
+      # take telemetry from other machines, configure real keys
+      # (AUTTER_INGEST_KEYS) and publish the port yourself.
+      - "127.0.0.1:4318:4318"
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_PASSWORD: dev
       # Local only: accept the built-in key autter_rt_local_dev_only from this
       # machine, so `docker compose up` works without a key step. The ingester
-      # refuses that key from other networks, refuses this flag next to a key
+      # accepts that key only from loopback and this compose network (the
+      # host through the published port, sibling containers), refuses this flag next to a key
       # validator, and ignores the key without the flag. Never copy this line
       # to a deployed ingester (deploy/single-server does not pass it).
       AUTTER_LOCAL_DEV: ${AUTTER_LOCAL_DEV:-1}

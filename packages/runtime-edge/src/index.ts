@@ -366,7 +366,31 @@ function resolveOptions<Env>(
 	options: AutterEdgeOptions | ((env: Env) => AutterEdgeOptions),
 	env: Env,
 ): AutterEdgeOptions {
-	return cleanKey(typeof options === "function" ? options(env) : options);
+	const opts = cleanKey(typeof options === "function" ? options(env) : options);
+	if (opts.environment) return opts;
+	const environment = environmentOf(env);
+	return environment ? { ...opts, environment } : opts;
+}
+
+/**
+ * The environment when the options give none: an `ENVIRONMENT` or `NODE_ENV`
+ * binding (Workers), else `process.env.NODE_ENV` where there is one (Next.js
+ * middleware, Vercel Edge). So `wrangler dev` or `next dev` with such a value
+ * does not report production. With none of them it stays "production".
+ */
+function environmentOf(env: unknown): string | undefined {
+	try {
+		const bindings = (env && typeof env === "object" ? env : {}) as Record<string, unknown>;
+		for (const value of [
+			bindings.ENVIRONMENT,
+			bindings.NODE_ENV,
+			(globalThis as { process?: { env?: Record<string, unknown> } }).process?.env?.NODE_ENV,
+		])
+			if (typeof value === "string" && value.length > 0 && value.length <= 100) return value;
+	} catch {
+		/* An unreadable binding: keep the default. */
+	}
+	return undefined;
 }
 
 const keyWarned = new Set<string>();

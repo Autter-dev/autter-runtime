@@ -36,12 +36,12 @@ npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, B
 
 | Package | Version | Use it for |
 | --- | --- | --- |
-| `@autter/runtime-browser` | 1.8.2 | Browser errors + usage, coded-error duck typing, request-id capture |
-| `@autter/runtime-node` | 1.16.1 | Node servers: OTel tracing, request summaries, coded errors, operations |
-| `@autter/runtime-next` | 1.11.1 | Next.js: server + client + `/edge` for `middleware.ts` |
-| `@autter/runtime-edge` | 1.4.3 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
-| `@autter/otlp-ingester` | 1.18.1 | Self-hosted ingest — upgrade it **before** the SDKs |
-| `@autter/runtime-cli` | 1.4.1 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
+| `@autter/runtime-browser` | 1.10.0 | Browser errors + usage, coded-error duck typing, request-id capture |
+| `@autter/runtime-node` | 1.19.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
+| `@autter/runtime-next` | 1.12.0 | Next.js: server + client + `/edge` for `middleware.ts` |
+| `@autter/runtime-edge` | 1.6.0 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
+| `@autter/otlp-ingester` | 1.20.0 | Self-hosted ingest — upgrade it **before** the SDKs |
+| `@autter/runtime-cli` | 1.6.0 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
 
 Minimum versions per feature, SDK and ingester are in one table:
 [Version compatibility](docs/COMPATIBILITY.md#compatibility-table). Once
@@ -206,6 +206,11 @@ docker run --rm -p 127.0.0.1:4319:4319 \
   -e CLICKHOUSE_URL=http://host.docker.internal:8123 -e CLICKHOUSE_PASSWORD=dev \
   ghcr.io/autter-dev/runtime-dashboard:latest
 ```
+
+The repo's `docker-compose.yml` publishes ClickHouse on `127.0.0.1:8123`
+only. On Linux, where `host.docker.internal` is not this loopback address,
+run the dashboard on the compose network instead:
+`--network autter-runtime_default -e CLICKHOUSE_URL=http://clickhouse:8123`.
 
 Or build from source with `cd dashboard && cargo run --release`. See the
 [dashboard README](dashboard/README.md) for configuration.

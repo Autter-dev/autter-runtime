@@ -268,6 +268,12 @@ the response (Vercel, Workers, Lambda response streaming) still deliver it.
 `@autter/runtime-next`'s `withRuntimeRequest` wires Next's `after()`
 automatically (Next 15+, `unstable_after` on 14.2; fails soft elsewhere).
 
+The browser relay takes the same option: `createBrowserRelayFetchHandler({
+waitUntil })` and `createBrowserRelayHandler({ waitUntil })` hand it the
+forward to the ingester, which runs after the 202. `createAutterRelayRoute`
+in `@autter/runtime-next` passes Next's `after()`, else the request's
+`waitUntil`.
+
 ## Logger-only mode: `initAutterLogging`
 
 For apps that already run their own OpenTelemetry SDK (a second NodeSDK would

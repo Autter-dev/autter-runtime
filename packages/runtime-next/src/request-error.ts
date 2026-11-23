@@ -5,6 +5,7 @@
  */
 import { captureEdgeException, type AutterEdgeOptions } from "@autter/runtime-edge";
 import { digestOf, isNextControlFlow } from "./control-flow.js";
+import { nextWaitUntil } from "./next-context.js";
 
 /** Next.js `onRequestError` request argument (typed structurally; no `next` dependency). */
 export interface NextRequestErrorRequest {
@@ -114,26 +115,6 @@ export function requestErrorAttributes(
 
 let warnedNoEdgeOptions = false;
 
-/**
- * The current request's `waitUntil` from Next's request context (set on the
- * edge runtime and in `next start`'s edge sandbox). Next awaits
- * `onRequestError` for middleware, but calls it fire-and-forget for errors
- * React reports during a render, so the delivery is handed to the platform
- * too: an edge function may stop once its response is done.
- */
-function nextWaitUntil(): ((promise: Promise<unknown>) => void) | undefined {
-	try {
-		const store = (globalThis as Record<symbol, unknown>)[Symbol.for("@next/request-context")] as
-			| { get?: () => { waitUntil?: unknown } | undefined }
-			| undefined;
-		const context = typeof store?.get === "function" ? store.get() : undefined;
-		const waitUntil = context?.waitUntil;
-		if (typeof waitUntil !== "function") return undefined;
-		return (promise) => (waitUntil as (promise: Promise<unknown>) => void).call(context, promise);
-	} catch {
-		return undefined;
-	}
-}
 
 /** Edge runtime: one promoted error record over `/v1/logs`. */
 export async function reportOnEdge(

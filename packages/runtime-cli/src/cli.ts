@@ -70,7 +70,7 @@ Options:
                          any tail of the path the server runs it from
                          ("/dist/" for /app/dist/server.js) or "/"
   --endpoint <url>       Ingester base URL. Default: $AUTTER_ENDPOINT,
-                         $AUTTER_RUNTIME_ENDPOINT, $OTEL_EXPORTER_OTLP_ENDPOINT,
+                         $AUTTER_RUNTIME_ENDPOINT (never $OTEL_EXPORTER_OTLP_ENDPOINT),
                          then https://otlp.autter.dev
   --concurrency <n>      Parallel uploads (default 8)
   --delete-after-upload  Delete each .map once the ingester has it

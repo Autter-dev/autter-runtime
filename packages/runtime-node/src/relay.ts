@@ -1,4 +1,5 @@
 import { authHeaders, noteIngestRefusal, resolveIngestKey, warnKeyKind, warnMissingKey } from "./ingest-auth.js";
+import { resolveIngestEndpoint } from "./endpoint.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Attributes } from "@opentelemetry/api";
 import { makeRedactor, type RedactOptions, type Redactor } from "./redact.js";
@@ -26,7 +27,7 @@ export interface RelayOptions {
 	 * at startup, instead of forwarding with "Bearer undefined".
 	 */
 	apiKey?: string;
-	/** Ingester base URL. Default: https://otlp.autter.dev */
+	/** Ingester base URL. Default: AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT, then https://otlp.autter.dev (never OTEL_EXPORTER_OTLP_ENDPOINT). */
 	endpoint?: string;
 	/** Max accepted request body. Default 64 KB. */
 	maxBodyBytes?: number;
@@ -86,6 +87,17 @@ export interface RelayOptions {
 	 * Default true.
 	 */
 	compatCheck?: boolean;
+	/**
+	 * Keeps the platform alive until the forward to the ingester is done. The
+	 * relay answers 202 at once and forwards afterwards (with retries, up to
+	 * about 25 s); on a serverless platform the function is frozen or ended
+	 * once the response is sent, so pass the platform's `waitUntil`
+	 * (Vercel's `waitUntil` from `@vercel/functions`, Cloudflare's
+	 * `ctx.waitUntil`, Netlify's `context.waitUntil`). Called with a promise
+	 * that never rejects. `createAutterRelayRoute` in `@autter/runtime-next`
+	 * passes Next.js's `after()` for you.
+	 */
+	waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 class IpWindow {
@@ -258,7 +270,6 @@ export function nodeClientKey(req: IncomingMessage, opts: RelayOptions): string 
 	return rightmostPublic(entries) ?? peer ?? entries[entries.length - 1] ?? "unknown";
 }
 
-const DEFAULT_ENDPOINT = "https://otlp.autter.dev";
 const DEFAULT_MAX_BODY = 64 * 1024;
 const MAX_EVENTS = 50;
 
@@ -608,9 +619,12 @@ const FORWARD_MAX_WAIT_MS = 10_000;
  * A 429, a 5xx (e.g. the ingester's 503 while it can't check the key) or a
  * network error is retried after the answer's Retry-After (at most 10 s),
  * else 1 s then 2 s; any other answer is final.
+ *
+ * Returns a promise that settles when the forward is done and never rejects
+ * (a failure goes to `onError`); it is also handed to `opts.waitUntil`, so a
+ * serverless platform keeps running until then.
  */
-function forward(payload: object, opts: RelayOptions, apiKey: string): void {
-	const endpoint = (opts.endpoint ?? DEFAULT_ENDPOINT).replace(/\/$/, "");
+function forward(payload: object, opts: RelayOptions, apiKey: string, endpoint: string): Promise<void> {
 	const url = `${endpoint}/v1/browser`;
 	const compat = opts.compatCheck !== false;
 	if (compat) ensureCompatConfigured(endpoint);
@@ -661,11 +675,21 @@ function forward(payload: object, opts: RelayOptions, apiKey: string): void {
 		}
 		noteRelayRejection(types, response.status, response.headers);
 	};
-	void attempt(1).catch((err) => {
-		(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(
-			err,
-		);
+	const done = attempt(1).catch((err) => {
+		try {
+			(opts.onError ?? ((e) => console.warn("autter relay forward failed:", e)))(err);
+		} catch {
+			/* A throwing onError must not reject the forward. */
+		}
 	});
+	if (opts.waitUntil) {
+		try {
+			opts.waitUntil(done);
+		} catch {
+			/* Outside a request context, or no platform support: the forward still runs. */
+		}
+	}
+	return done;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -692,6 +716,8 @@ export function createBrowserRelayFetchHandler(
 	const apiKey = resolveIngestKey(opts.apiKey);
 	if (!apiKey) warnMissingKey("relay");
 	else warnKeyKind(apiKey);
+	// The option, then AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT (endpoint.ts).
+	const { endpoint } = resolveIngestEndpoint(opts.endpoint);
 	return async (request: Request): Promise<Response> => {
 		if (request.method !== "POST") {
 			return new Response(null, { status: 405 });
@@ -738,7 +764,7 @@ export function createBrowserRelayFetchHandler(
 				headers: { "content-type": "application/json" },
 			});
 		}
-		forward(checked.payload, opts, apiKey);
+		void forward(checked.payload, opts, apiKey, endpoint);
 		return new Response(null, { status: 202 });
 	};
 }
@@ -780,6 +806,8 @@ export function createBrowserRelayHandler(
 	const apiKey = resolveIngestKey(opts.apiKey);
 	if (!apiKey) warnMissingKey("relay");
 	else warnKeyKind(apiKey);
+	// The option, then AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT (endpoint.ts).
+	const { endpoint } = resolveIngestEndpoint(opts.endpoint);
 
 	function handleParsed(raw: unknown, res: ServerResponse): void {
 		const checked = checkBrowserPayload(raw, redactor);
@@ -787,7 +815,7 @@ export function createBrowserRelayHandler(
 			respond(res, 400, { error: "invalid payload", issues: checked.issues });
 			return;
 		}
-		forward(checked.payload, opts, apiKey!);
+		void forward(checked.payload, opts, apiKey!, endpoint);
 		respond(res, 202);
 	}
 

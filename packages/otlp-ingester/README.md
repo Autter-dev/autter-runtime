@@ -134,7 +134,7 @@ Autter dashboard reads both. See [docs/COMPATIBILITY.md](../../docs/COMPATIBILIT
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / empty | |
 | `CLICKHOUSE_DATABASE` | `autter_runtime` | Created automatically |
 | `AUTTER_INGEST_KEYS` | — | JSON: `[{"key":"...","orgId":"...","repositoryId":"..."}]` (optional `scope`, `allowedOrigins`, `suppression`) |
-| `AUTTER_LOCAL_DEV` | off | `1`: local development only. Also accept the built-in key `autter_rt_local_dev_only`, from loopback and private addresses only. Set by the repo's `docker-compose.yml`, never by the deploys. Refused at startup together with `AUTTER_KEY_VALIDATOR_URL`; without it, a listed `autter_rt_local_dev_only` is ignored |
+| `AUTTER_LOCAL_DEV` | off | `1`: local development only. Also accept the built-in key `autter_rt_local_dev_only`, from this machine only: loopback, and when the ingester runs in a container (`/.dockerenv` or `/run/.containerenv`) the subnets of its own network interfaces and Docker Desktop's 192.168.65.0/24. Other private addresses (the rest of a LAN) are refused. Set by the repo's `docker-compose.yml`, never by the deploys. Refused at startup together with `AUTTER_KEY_VALIDATOR_URL`; without it, a listed `autter_rt_local_dev_only` is ignored |
 | `AUTTER_KEY_VALIDATOR_URL` | — | Webhook: `POST {key}` → `{orgId, repositoryId, scope?, allowedOrigins?, suppression?}`, or 404 for an unknown or revoked key (60 s cache; see [Validator outages](#validator-outages)) |
 | `AUTTER_KEY_VALIDATOR_TOKEN` | — | Bearer token sent to the validator |
 | `AUTTER_SINK_URL` | — | Issue-grouping webhook; at-least-once, across restarts with an outbox (`docs/ARCHITECTURE.md`) |
@@ -476,7 +476,7 @@ npm run dev
 ```
 
 `AUTTER_LOCAL_DEV=1` accepts the built-in key `autter_rt_local_dev_only`
-(tenant `local`/`local`) from loopback and private addresses. Or run
+(tenant `local`/`local`) from this machine only (loopback; in a container, also its own networks). Or run
 `docker compose up` from the repo root, which sets it for the container.
 
 Send a test error span:

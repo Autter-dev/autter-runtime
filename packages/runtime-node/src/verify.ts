@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compatRequest, fetchIngesterCompat, SDK_IDENTITY, type HttpResult } from "./compat.js";
 import { diagnoseConnectivity } from "./connectivity.js";
-import { checkStorage, resolveEndpoint, versionSkew, installedSdks } from "./doctor.js";
+import { checkStorage, endpointFrom, versionSkew, installedSdks } from "./doctor.js";
+import { otelEndpointNote, resolveIngestEndpoint, type IngestEndpointSource } from "./endpoint.js";
 import { defaultRelease, detectCommit } from "./deployment.js";
 import { classifyKey, keyProblemMessage, wrongKeyMessage } from "@autter/runtime-core";
 import { refusalReason, resolveIngestKey } from "./ingest-auth.js";
@@ -48,6 +49,10 @@ export interface VerifyStep {
 
 export interface VerifyReport {
 	endpoint: string;
+	/** Where `endpoint` came from: "option" (--endpoint), "AUTTER_ENDPOINT", "AUTTER_RUNTIME_ENDPOINT" or "default". */
+	endpointSource: IngestEndpointSource;
+	/** Set when OTEL_EXPORTER_OTLP_ENDPOINT points somewhere else: the SDK does not send there. */
+	endpointNote?: string;
 	service: string;
 	environment: string;
 	release: string | null;
@@ -207,7 +212,8 @@ const AUTH_FIX: Record<number, string> = {
 };
 
 export async function runVerify(options: VerifyOptions = {}, env: NodeJS.ProcessEnv = process.env): Promise<VerifyReport> {
-	const endpoint = resolveEndpoint(options.endpoint, env);
+	const { endpoint, source: endpointSource } = resolveIngestEndpoint(options.endpoint, env);
+	const endpointNote = otelEndpointNote(endpoint, env);
 	const timeoutMs = options.timeoutMs ?? 5000;
 	const waitMs = options.waitMs ?? 20_000;
 	const pollMs = options.pollMs ?? 500;
@@ -236,6 +242,8 @@ export async function runVerify(options: VerifyOptions = {}, env: NodeJS.Process
 		steps.sort((a, b) => ORDER.indexOf(a.step) - ORDER.indexOf(b.step));
 		return {
 			endpoint,
+			endpointSource,
+			...(endpointNote ? { endpointNote } : {}),
 			service,
 			environment,
 			release,
@@ -479,7 +487,8 @@ const MARK: Record<VerifyStep["status"], string> = { pass: "ok  ", fail: "FAIL",
 export function formatVerifyReport(report: VerifyReport): string {
 	const lines = [
 		"Autter Runtime verify",
-		`  endpoint   ${report.endpoint}`,
+		`  endpoint   ${report.endpoint} (${endpointFrom(report.endpointSource)})`,
+		...(report.endpointNote ? [`             note: ${report.endpointNote}`] : []),
 		`  service    ${report.service} (environment ${report.environment}${report.release ? `, release ${report.release}` : ", no release"})`,
 		`  test id    ${report.traceId}`,
 		"",
@@ -511,7 +520,7 @@ trace, release, logs. The test event is stored under environment "verify"
 and never opens an issue.
 
 Options:
-  --endpoint <url>      Ingester base URL (default: $AUTTER_ENDPOINT, $OTEL_EXPORTER_OTLP_ENDPOINT, or https://otlp.autter.dev)
+  --endpoint <url>      Ingester base URL (default: $AUTTER_ENDPOINT, $AUTTER_RUNTIME_ENDPOINT, or https://otlp.autter.dev; never $OTEL_EXPORTER_OTLP_ENDPOINT)
   --key <key>           Server ingest key (default: $AUTTER_RUNTIME_KEY)
   --service <name>      Service name (default: $AUTTER_SERVICE, $OTEL_SERVICE_NAME, or package.json name)
   --environment <name>  Environment for the test event (default: verify)

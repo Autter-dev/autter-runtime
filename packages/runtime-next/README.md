@@ -140,6 +140,12 @@ export const { POST } = createAutterRelayRoute({
 });
 ```
 
+The route answers the browser at once and forwards to the ingester after the
+response; that forward is handed to Next's `after()` (Next 15+,
+`unstable_after` on 14.2), else to the request's `waitUntil`, so Vercel and
+other serverless hosts keep the function alive until it is delivered. Pass
+your own `waitUntil` to override.
+
 **3. A client component** — browser tracker + render-error boundary:
 
 ```tsx
@@ -160,6 +166,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
   );
 }
 ```
+
+With no `environment`, the client reports the build's `NODE_ENV`
+(`development` under `next dev`, `production` in a build), which Next inlines.
+An explicit `environment` wins.
 
 React render errors don't reach `window.onerror` — the boundary reports
 them via `captureException` and then renders your fallback.

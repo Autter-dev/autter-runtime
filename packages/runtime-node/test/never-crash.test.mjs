@@ -193,8 +193,11 @@ test("initAutterLogging: flush and shutdown never reject against a 401 ingester"
 	});
 	await ingester.close();
 	assert.deepEqual(unhandled, []);
-	assert.ok(reported.length >= 2);
+	assert.ok(reported.length >= 1);
 	assert.ok(reported.every((error) => error.kind === "unauthorized"));
+	// After the 401 the sink pauses: the record written before shutdown is
+	// dropped quietly instead of being sent to be refused again.
+	assert.equal(ingester.hits.filter((url) => url === "/v1/logs").length, 1);
 });
 
 function runFixture(env) {
@@ -227,3 +230,122 @@ for (const scenario of CASES) {
 		assert.doesNotMatch(err, /UnhandledPromiseRejection|unhandled/i);
 	});
 }
+
+/**
+ * A local ingester with a body limit, like otlp-ingester's MAX_BODY_BYTES
+ * (1 MiB): a larger POST is answered 413 and nothing in it is kept. Counts
+ * the exception events it accepted on /v1/traces.
+ */
+async function limitedIngester(limit) {
+	const sizes = [];
+	const messages = [];
+	let refused = 0;
+	const server = http.createServer((req, res) => {
+		const chunks = [];
+		req.on("data", (chunk) => chunks.push(chunk));
+		req.on("end", () => {
+			const body = Buffer.concat(chunks);
+			sizes.push(body.length);
+			if (body.length > limit) {
+				refused++;
+				res.writeHead(413, { "content-type": "application/json" });
+				res.end(JSON.stringify({ error: "payload too large" }));
+				return;
+			}
+			if (req.url === "/v1/traces") {
+				for (const resource of JSON.parse(body).resourceSpans ?? [])
+					for (const scope of resource.scopeSpans ?? [])
+						for (const span of scope.spans ?? [])
+							for (const event of span.events ?? [])
+								if (event.name === "exception")
+									messages.push(event.attributes.find((a) => a.key === "exception.message")?.value.stringValue);
+			}
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end("{}");
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	return {
+		endpoint: `http://127.0.0.1:${server.address().port}`,
+		sizes,
+		messages,
+		refused: () => refused,
+		close: async () => {
+			server.closeAllConnections();
+			await new Promise((resolve) => server.close(resolve));
+		},
+	};
+}
+
+// An error storm: 600 captured exceptions used to leave as one 1.27 MB batch
+// (OpenTelemetry's 512 spans per export), refused whole with 413.
+for (const [name, limit, expectSplits] of [
+	["1 MiB, the ingester's default body limit", 1024 * 1024, false],
+	["64 KiB, so batches of 128 are refused and split", 64 * 1024, true],
+]) {
+	test(`600 captured exceptions all arrive at an ingester with a ${name}`, { timeout: 60_000 }, async () => {
+		const ingester = await limitedIngester(limit);
+		const { unhandled, warnings } = await observe(async () => {
+			const runtime = initAutterServer({
+				apiKey: "autter_rt_test",
+				service: "error-storm",
+				endpoint: ingester.endpoint,
+				autoFlush: false,
+				captureGlobalErrors: false,
+				memoryMetrics: false,
+				compatCheck: false,
+				metricIntervalMs: 3_600_000,
+				logging: { console: false },
+			});
+			try {
+				const padding = "x".repeat(1200);
+				for (let i = 0; i < 600; i++) captureException(new Error(`storm ${i} ${padding}`));
+				const flushed = await runtime.forceFlush();
+				assert.equal(flushed.ok, true, JSON.stringify(flushed.errors));
+			} finally {
+				await runtime.shutdown();
+			}
+		});
+		await ingester.close();
+		assert.deepEqual(unhandled, []);
+		const accepted = ingester.sizes.filter((size) => size <= limit);
+		assert.ok(accepted.length > 1, "the storm was sent in several batches");
+		if (expectSplits) assert.ok(ingester.refused() > 0, "batches over the limit were refused, then split");
+		else assert.equal(ingester.refused(), 0, `every POST is under 1 MiB: ${Math.max(...ingester.sizes)} bytes`);
+		const arrived = new Set(ingester.messages.map((message) => message?.split(" ")[1]));
+		assert.equal(arrived.size, 600, "every exception arrived");
+		assert.deepEqual(warnings, []);
+	});
+}
+
+test("a single span larger than the body limit is dropped with one warning, its batch's other spans arrive", { timeout: 60_000 }, async () => {
+	const ingester = await limitedIngester(64 * 1024);
+	const { unhandled, warnings } = await observe(async () => {
+		const runtime = initAutterServer({
+			apiKey: "autter_rt_test",
+			service: "error-storm",
+			endpoint: ingester.endpoint,
+			autoFlush: false,
+			captureGlobalErrors: false,
+			memoryMetrics: false,
+			compatCheck: false,
+			metricIntervalMs: 3_600_000,
+			logging: { console: false },
+		});
+		try {
+			for (let i = 0; i < 20; i++) captureException(new Error(`small ${i}`));
+			captureException(new Error(`huge ${"y".repeat(60_000)}`), { "big.one": "z".repeat(60_000) });
+			captureException(new Error(`huge ${"y".repeat(60_000)}`), { "big.two": "z".repeat(60_000) });
+			const flushed = await runtime.forceFlush();
+			assert.equal(flushed.ok, false);
+			assert.equal(flushed.errors[0].kind, "payload_too_large");
+		} finally {
+			await runtime.shutdown();
+		}
+	});
+	await ingester.close();
+	assert.deepEqual(unhandled, []);
+	assert.equal(new Set(ingester.messages.filter((m) => m?.startsWith("small"))).size, 20);
+	assert.equal(ingester.messages.filter((m) => m?.startsWith("huge")).length, 0);
+	assert.equal(warnings.filter((line) => /413 Payload Too Large/.test(line)).length, 1, warnings.join("\n"));
+});

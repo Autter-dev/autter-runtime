@@ -406,3 +406,95 @@ test("relay (node): trustProxy 1 behind Cloudflare keys the address Cloudflare a
 	assert.equal(await nodeCall(handler, { xff: "6.6.6.6, 198.51.100.1", peer: "172.64.0.1" }), 400);
 	assert.equal(await nodeCall(handler, { xff: "7.7.7.7, 198.51.100.1", peer: "172.64.0.2" }), 429);
 });
+
+test("relay: the forward is handed to waitUntil and resolves only once the ingester answered", async () => {
+	const originalFetch = globalThis.fetch;
+	let answer;
+	const posted = [];
+	globalThis.fetch = (url, init) => {
+		posted.push({ url: String(url), body: JSON.parse(init.body) });
+		return new Promise((resolve) => (answer = resolve));
+	};
+	try {
+		const kept = [];
+		const handler = createBrowserRelayFetchHandler({
+			apiKey: "autter_rt_test",
+			endpoint: "https://ingest.example.test/",
+			perIpRateLimit: false,
+			compatCheck: false,
+			waitUntil: (promise) => kept.push(promise),
+		});
+		const response = await handler(new Request("https://app.example.test/api/autter-runtime", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ version: 1, service: "web", environment: "test", events: [{ type: "message", timestamp: new Date().toISOString(), message: "hi" }] }),
+		}));
+		// The browser gets its 202 before the forward is done...
+		assert.equal(response.status, 202);
+		assert.equal(kept.length, 1);
+		let settled = false;
+		void kept[0].then(() => (settled = true));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(posted.length, 1);
+		assert.equal(posted[0].url, "https://ingest.example.test/v1/browser");
+		assert.equal(settled, false, "still forwarding");
+		// ...and the promise handed over settles once the ingester answered.
+		answer(new Response(null, { status: 202 }));
+		await kept[0];
+		assert.equal(settled, true);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("relay: a failed forward and a throwing waitUntil or onError never reject", async (t) => {
+	// The forward's retry waits (1 s, then 2 s) run on mocked timers.
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const originalFetch = globalThis.fetch;
+	let attempts = 0;
+	globalThis.fetch = async () => {
+		attempts++;
+		throw new TypeError("fetch failed");
+	};
+	const unhandled = [];
+	const onUnhandled = (reason) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		const kept = [];
+		const handler = createBrowserRelayFetchHandler({
+			apiKey: "autter_rt_test",
+			endpoint: "https://ingest.example.test",
+			perIpRateLimit: false,
+			compatCheck: false,
+			waitUntil: (promise) => {
+				kept.push(promise);
+				throw new Error("not in a request scope");
+			},
+			onError: () => {
+				throw new Error("a throwing onError");
+			},
+		});
+		const original = console.warn;
+		console.warn = () => {};
+		try {
+			const response = await handler(new Request("https://app.example.test/r", {
+				method: "POST",
+				body: JSON.stringify({ version: 1, service: "web", environment: "test", events: [{ type: "message", timestamp: new Date().toISOString(), message: "x" }] }),
+			}));
+			assert.equal(response.status, 202);
+			for (let i = 0; i < 10 && attempts < 3; i++) {
+				await new Promise((resolve) => setImmediate(resolve));
+				t.mock.timers.tick(2000);
+			}
+			await kept[0];
+			assert.equal(attempts, 3);
+		} finally {
+			console.warn = original;
+		}
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(unhandled, []);
+	} finally {
+		globalThis.fetch = originalFetch;
+		process.off("unhandledRejection", onUnhandled);
+	}
+});

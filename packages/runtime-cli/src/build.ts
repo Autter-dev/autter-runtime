@@ -13,7 +13,7 @@ export interface AutterSourceMapsOptions {
 	 * path (Vite `base`, webpack `output.publicPath`, Next `/_next/`), else "/". */
 	urlPrefix?: string;
 	/** Ingester base URL. Default: $AUTTER_ENDPOINT, $AUTTER_RUNTIME_ENDPOINT,
-	 * $OTEL_EXPORTER_OTLP_ENDPOINT, else https://otlp.autter.dev. */
+	 * else https://otlp.autter.dev ($OTEL_EXPORTER_OTLP_ENDPOINT is never used). */
 	endpoint?: string;
 	/** Upload-only key (`autter_rtu_…`, recommended for CI) or server key
 	 * (`autter_rt_…`). Default: $AUTTER_RUNTIME_KEY. Without one (and
@@ -107,7 +107,7 @@ export function formatUploadSummary(summary: UploadSummary): string[] {
 	for (const item of summary.failed) lines.push(`failed ${item.filename}: ${item.error}`);
 	lines.push(
 		`${summary.uploaded.length} ${verb}, ${summary.skipped.length} already uploaded, ${summary.failed.length} failed ` +
-			`(release ${summary.release} from ${summary.releaseSource}, ${summary.endpoint})`,
+			`(release ${summary.release} from ${summary.releaseSource}, ${summary.endpoint} from ${summary.endpointSource})`,
 	);
 	return lines;
 }

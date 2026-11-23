@@ -57,6 +57,7 @@ import {
 } from "@autter/runtime-node";
 import pkg from "../package.json" with { type: "json" };
 import { isNextControlFlow } from "./control-flow.js";
+import { nextWaitUntil } from "./next-context.js";
 
 export {
 	createRuntimeLogger,
@@ -165,11 +166,45 @@ export function registerAutter(options: AutterServerOptions): AutterServer {
 	});
 }
 
-/** App Router relay route: `export const { POST } = createAutterRelayRoute({...})`. */
+/**
+ * App Router relay route: `export const { POST } = createAutterRelayRoute({...})`.
+ *
+ * The relay answers 202 at once and forwards to the ingester afterwards. On
+ * Vercel and other serverless hosts the function can stop as soon as the
+ * response is sent, so the forward is handed to Next's `after()` (Next 15+;
+ * `unstable_after` on 14.2), else to the request context's `waitUntil`
+ * (edge runtime). A `waitUntil` you pass wins.
+ */
 export function createAutterRelayRoute(options: RelayOptions): {
 	POST: (request: Request) => Promise<Response>;
 } {
-	return { POST: createBrowserRelayFetchHandler(options) };
+	return { POST: createBrowserRelayFetchHandler({ ...options, waitUntil: options.waitUntil ?? keepAlive }) };
+}
+
+/**
+ * Keeps the platform running until `promise` settles: Next's after() when it
+ * is loaded and works in this scope, else the request context's waitUntil,
+ * else after() once it has loaded. Never throws.
+ */
+function keepAlive(promise: Promise<unknown>): void {
+	if (after) {
+		try {
+			after(promise);
+			return;
+		} catch {
+			/* Outside a request scope: try the request context. */
+		}
+	}
+	const waitUntil = nextWaitUntil();
+	if (waitUntil) {
+		try {
+			waitUntil(promise);
+			return;
+		} catch {
+			/* No usable request context. */
+		}
+	}
+	if (after === undefined) scheduleAfter(promise);
 }
 
 type AfterFn = (task: Promise<unknown> | (() => unknown)) => void;

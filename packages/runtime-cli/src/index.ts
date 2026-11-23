@@ -43,6 +43,7 @@ export {
 	MAX_UPLOAD_BYTES,
 	isInAppSource,
 	resolveEndpoint,
+	resolveEndpointSource,
 	servedFilename,
 	storedMapJson,
 	storedSourcesContent,

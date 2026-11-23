@@ -8,6 +8,7 @@ import {
 	createBrowserRelayHandler,
 } from "../dist/index.js";
 import { quietPeriod, until } from "./support/wait.mjs";
+import { tsImport } from "tsx/esm/api";
 
 // A file: URL, not a path: the child imports it, and on Windows an absolute
 // path (D:\...) is not a valid import specifier.
@@ -234,5 +235,97 @@ test("relay logs the ingester's refusal of a forwarded batch once", async () => 
 	} finally {
 		warnings.restore();
 		await ingester.close();
+	}
+});
+
+// One endpoint resolver (src/endpoint.ts) for the SDK, the relay, doctor and
+// verify: the option, then AUTTER_ENDPOINT, then AUTTER_RUNTIME_ENDPOINT, then
+// the hosted default. OTEL_EXPORTER_OTLP_ENDPOINT never decides where the
+// Autter key goes. Before, `verify` honoured AUTTER_ENDPOINT while the SDK
+// sent its key and telemetry to the hosted endpoint.
+test("the endpoint resolver: option, AUTTER_ENDPOINT, AUTTER_RUNTIME_ENDPOINT, default; never OTEL_EXPORTER_OTLP_ENDPOINT", async () => {
+	const { resolveIngestEndpoint, otelEndpointNote } = await tsImport("../src/endpoint.ts", import.meta.url);
+	const otel = { OTEL_EXPORTER_OTLP_ENDPOINT: "https://vendor.example" };
+	assert.deepEqual(resolveIngestEndpoint(undefined, otel), { endpoint: "https://otlp.autter.dev", source: "default" });
+	assert.deepEqual(resolveIngestEndpoint(undefined, { ...otel, AUTTER_RUNTIME_ENDPOINT: "https://b.example/" }), { endpoint: "https://b.example", source: "AUTTER_RUNTIME_ENDPOINT" });
+	assert.deepEqual(resolveIngestEndpoint(undefined, { AUTTER_ENDPOINT: "https://a.example", AUTTER_RUNTIME_ENDPOINT: "https://b.example" }), { endpoint: "https://a.example", source: "AUTTER_ENDPOINT" });
+	assert.deepEqual(resolveIngestEndpoint("https://opt.example//", { AUTTER_ENDPOINT: "https://a.example" }), { endpoint: "https://opt.example", source: "option" });
+	assert.deepEqual(resolveIngestEndpoint("  ", { AUTTER_ENDPOINT: " https://a.example " }), { endpoint: "https://a.example", source: "AUTTER_ENDPOINT" });
+	assert.match(otelEndpointNote("https://otlp.autter.dev", otel), /OTEL_EXPORTER_OTLP_ENDPOINT is set to https:\/\/vendor\.example, but Autter SDKs never send the Autter key there/);
+	assert.equal(otelEndpointNote("https://vendor.example", otel), null);
+	assert.equal(otelEndpointNote("https://otlp.autter.dev", {}), null);
+});
+
+test("initAutterServer and initAutterLogging send to AUTTER_ENDPOINT, never to OTEL_EXPORTER_OTLP_ENDPOINT", async () => {
+	const autter = await stubIngester(() => [200, { partialSuccess: {} }]);
+	const vendor = await stubIngester(() => [200, { partialSuccess: {} }]);
+	try {
+		const env = { AUTTER_RUNTIME_KEY: "autter_rt_from_env", AUTTER_ENDPOINT: autter.url, OTEL_EXPORTER_OTLP_ENDPOINT: vendor.url };
+		const server = await runServerScript(undefined, "", env);
+		assert.equal(server.code, 0, server.output);
+		assert.ok(autter.requests.some((r) => r.url === "/v1/traces"), server.output);
+		for (const r of autter.requests) assert.equal(r.authorization, "Bearer autter_rt_from_env");
+
+		const logging = await new Promise((resolve) => {
+			const script = `
+				import { initAutterLogging, runtimeLogger } from ${JSON.stringify(index)};
+				const logging = initAutterLogging({ apiKey: "autter_rt_from_env", service: "svc", logging: { console: false } });
+				runtimeLogger.info("hello");
+				await logging.flush();
+				await logging.shutdown();
+			`;
+			const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, ...env } });
+			let output = "";
+			child.stdout.on("data", (c) => (output += c));
+			child.stderr.on("data", (c) => (output += c));
+			child.on("exit", (code) => resolve({ code, output }));
+		});
+		assert.equal(logging.code, 0, logging.output);
+		assert.ok(autter.requests.some((r) => r.url === "/v1/logs"), logging.output);
+		assert.deepEqual(vendor.requests, [], "the other vendor's collector never gets the Autter key");
+	} finally {
+		await autter.close();
+		await vendor.close();
+	}
+});
+
+test("the relay forwards to AUTTER_RUNTIME_ENDPOINT when no endpoint option is given", async () => {
+	const autter = await stubIngester(() => [202, {}]);
+	const previous = process.env.AUTTER_RUNTIME_ENDPOINT;
+	process.env.AUTTER_RUNTIME_ENDPOINT = autter.url;
+	try {
+		const kept = [];
+		const handler = createBrowserRelayFetchHandler({ apiKey: "autter_rt_relay", perIpRateLimit: false, compatCheck: false, waitUntil: (p) => kept.push(p) });
+		const response = await handler(new Request("https://app.example.test/r", {
+			method: "POST",
+			body: JSON.stringify({ version: 1, service: "web", environment: "test", events: [{ type: "message", timestamp: new Date().toISOString(), message: "x" }] }),
+		}));
+		assert.equal(response.status, 202);
+		await kept[0];
+		assert.deepEqual(autter.requests.map((r) => [r.url, r.authorization]), [["/v1/browser", "Bearer autter_rt_relay"]]);
+	} finally {
+		if (previous === undefined) delete process.env.AUTTER_RUNTIME_ENDPOINT;
+		else process.env.AUTTER_RUNTIME_ENDPOINT = previous;
+		await autter.close();
+	}
+});
+
+test("verify reports where its endpoint came from, and that OTEL_EXPORTER_OTLP_ENDPOINT is not used", async () => {
+	const { runVerify } = await import("../dist/index.js");
+	const { formatVerifyReport } = await tsImport("../src/verify.ts", import.meta.url);
+	const autter = await stubIngester(() => [503, { error: "down" }]);
+	try {
+		const report = await runVerify(
+			{ key: "autter_rt_test", timeoutMs: 1000, waitMs: 0 },
+			{ AUTTER_ENDPOINT: autter.url, OTEL_EXPORTER_OTLP_ENDPOINT: "https://vendor.example" },
+		);
+		assert.equal(report.endpoint, autter.url);
+		assert.equal(report.endpointSource, "AUTTER_ENDPOINT");
+		assert.match(report.endpointNote, /never send the Autter key there/);
+		const text = formatVerifyReport(report);
+		assert.ok(text.includes(`endpoint   ${autter.url} (from AUTTER_ENDPOINT)`), text);
+		assert.ok(text.includes("note: OTEL_EXPORTER_OTLP_ENDPOINT is set to https://vendor.example"), text);
+	} finally {
+		await autter.close();
 	}
 });

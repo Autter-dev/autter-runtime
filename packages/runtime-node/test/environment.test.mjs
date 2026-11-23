@@ -333,3 +333,20 @@ test("initAutterLogging: the same environment and release defaults", async () =>
 	assert.equal(only(off.logs, "service.version"), undefined);
 	assert.equal(only(off.logs, "deployment.commit"), SHA);
 });
+
+test("OTEL_RESOURCE_ATTRIBUTES: log records and request summaries report the environment and release spans do", async () => {
+	// The documented setup: the environment in OTEL_RESOURCE_ATTRIBUTES and
+	// NODE_ENV=production. Spans took staging (the NodeSDK merges those
+	// attributes over the SDK's resource) while log records said production,
+	// so an error and its request summary landed in two environments.
+	const env = { OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=staging,service.version=r5", NODE_ENV: "production" };
+	const server = await run("server", { release: "v1" }, env);
+	assert.equal(only(server.spans, "environment"), "staging");
+	assert.equal(only(server.logs, "environment"), "staging", "log resource matches the span resource");
+	assert.equal(only(server.spans, "service.version"), "r5");
+	assert.equal(only(server.logs, "service.version"), "r5");
+
+	const logging = await run("logging", {}, env);
+	assert.equal(only(logging.logs, "environment"), "staging");
+	assert.equal(only(logging.logs, "service.version"), "r5");
+});

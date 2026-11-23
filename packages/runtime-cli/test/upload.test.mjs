@@ -12,6 +12,7 @@ import {
 	MAX_MAP_CHARS,
 	RELEASE_ENV_VARS,
 	resolveEndpoint,
+	resolveEndpointSource,
 	resolveRelease,
 	servedFilename,
 	storedMapJson,
@@ -391,4 +392,25 @@ test("each sourcemaps command takes only its own flags", async () => {
 	assert.match(usage.stderr, /sourcemaps inject does not take --best-effort/);
 	assert.equal((await cli(["sourcemaps", "verify", tempDir(), "--install"])).code, 64);
 	assert.match((await cli(["--help"])).stdout, /sourcemaps setup \[dir\]/);
+});
+
+test("$OTEL_EXPORTER_OTLP_ENDPOINT is never used: the key and sources go to Autter, and the CLI says where", async () => {
+	const urls = [];
+	const lines = [];
+	const fetch = async (url, init) => {
+		urls.push(String(url));
+		if (String(url).endsWith("/check")) return new Response(JSON.stringify({ missing: JSON.parse(init.body).maps?.map((m) => m.debugId) ?? [] }), { status: 200 });
+		return new Response("{}", { status: 201 });
+	};
+	const env = { OTEL_EXPORTER_OTLP_ENDPOINT: "https://vendor.example" };
+	const summary = await uploadDir(build(), { release: "abc123", key: SERVER_KEY, env, fetch, log: (line) => lines.push(line) });
+	assert.ok(urls.length > 0);
+	assert.ok(urls.every((url) => url.startsWith("https://otlp.autter.dev/v1/sourcemaps")), urls.join("\n"));
+	assert.equal(summary.endpoint, "https://otlp.autter.dev");
+	assert.equal(summary.endpointSource, "default");
+	assert.match(lines[0], /^uploading to https:\/\/otlp\.autter\.dev \(from default\)$/);
+	assert.match(lines.join("\n"), /\$OTEL_EXPORTER_OTLP_ENDPOINT is not used for source maps/);
+	assert.equal(resolveEndpoint(undefined, env), "https://otlp.autter.dev");
+	assert.deepEqual(resolveEndpointSource(undefined, { AUTTER_RUNTIME_ENDPOINT: "https://self.example/" }), { endpoint: "https://self.example", source: "$AUTTER_RUNTIME_ENDPOINT" });
+	assert.deepEqual(resolveEndpointSource("https://flag.example", { AUTTER_ENDPOINT: "https://env.example" }), { endpoint: "https://flag.example", source: "--endpoint" });
 });

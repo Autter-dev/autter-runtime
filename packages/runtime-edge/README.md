@@ -97,7 +97,7 @@ then an `expected` coded error → `degraded`, a thrown error or status ≥ 500 
 | --- | --- | --- |
 | `apiKey` | — | Server key. Without it nothing is exported (one warning). |
 | `endpoint` | `https://otlp.autter.dev` | Ingester base URL (`/v1/logs` is appended) |
-| `service`, `environment`, `release` | —, `production`, — | Resource attributes |
+| `service`, `environment`, `release` | —, an `ENVIRONMENT` or `NODE_ENV` binding, else `process.env.NODE_ENV`, else `production`, — | Resource attributes |
 | `requestIdHeader` | `x-request-id` | Also added to `Access-Control-Expose-Headers` when the response has CORS headers |
 | `ignore` | `[]` | Path globs not summarised (`*` one segment, `**` any depth) |
 | `routeOf(request)` | pathname with ids → `:id` | Route template for `http.route` and the summary name |

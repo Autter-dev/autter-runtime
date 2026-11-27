@@ -36,12 +36,12 @@ npm install @autter/runtime-edge      # Cloudflare Workers, Vercel Edge, Deno, B
 
 | Package | Version | Use it for |
 | --- | --- | --- |
-| `@autter/runtime-browser` | 1.10.0 | Browser errors + usage, coded-error duck typing, request-id capture |
-| `@autter/runtime-node` | 1.19.0 | Node servers: OTel tracing, request summaries, coded errors, operations |
-| `@autter/runtime-next` | 1.12.0 | Next.js: server + client + `/edge` for `middleware.ts` |
-| `@autter/runtime-edge` | 1.6.0 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
-| `@autter/otlp-ingester` | 1.20.0 | Self-hosted ingest — upgrade it **before** the SDKs |
-| `@autter/runtime-cli` | 1.6.0 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
+| `@autter/runtime-browser` | 1.10.1 | Browser errors + usage, coded-error duck typing, request-id capture |
+| `@autter/runtime-node` | 1.19.1 | Node servers: OTel tracing, request summaries, coded errors, operations |
+| `@autter/runtime-next` | 1.12.1 | Next.js: server + client + `/edge` for `middleware.ts` |
+| `@autter/runtime-edge` | 1.6.1 | Fetch-only runtimes: request summaries and coded errors over `/v1/logs` |
+| `@autter/otlp-ingester` | 1.20.1 | Self-hosted ingest — upgrade it **before** the SDKs |
+| `@autter/runtime-cli` | 1.6.1 | Build time: debug ids + source map upload (CLI, Vite/Rollup, webpack, Next.js) |
 
 Minimum versions per feature, SDK and ingester are in one table:
 [Version compatibility](docs/COMPATIBILITY.md#compatibility-table). Once

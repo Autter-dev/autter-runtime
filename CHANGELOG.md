@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.23.1] - 2026-11-27
+
+Packages: `runtime-browser` 1.10.1, `runtime-node` 1.19.1, `runtime-edge` 1.6.1, `runtime-next` 1.12.1, `runtime-cli` 1.6.1, `otlp-ingester` 1.20.1. No code changes from 1.23.0.
+
+- Docs: [Endpoint regression telemetry](docs/ENDPOINT-REGRESSIONS.md) has a new "Code evidence" section. It says which repository code the platform's analysis of a slow endpoint reads (the route's indexed handler, the diff between the baseline release and the slow one, functions named by the slow trace's spans, then path matches), that the release diff needs `release` to be a commit SHA on both releases, and that spans named after the function they run can be matched to code.
+
 ## [1.23.0] - 2026-11-23
 
 Packages: `runtime-browser` 1.10.0, `runtime-node` 1.19.0, `runtime-edge` 1.6.0, `runtime-next` 1.12.0 (now requires `runtime-node` 1.19.0, `runtime-browser` 1.10.0 and `runtime-edge` 1.6.0 or later), `runtime-cli` 1.6.0, `otlp-ingester` 1.20.0, and the repo's `docker-compose.yml`. `runtime-core` (private, bundled into the others) is unchanged.

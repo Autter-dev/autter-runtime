@@ -70,6 +70,12 @@ Cumulative histograms, missing methods or routes, invalid counts, and intervals 
 
 The ingester never derives these histograms from spans: spans are sampled, and a p95 from a 1% sample is not one. A sender with spans and no histograms gets no regression detection. To keep slow traces from another OTel SDK, use a tail-sampling step that keeps them, such as the OpenTelemetry Collector `tail_sampling` processor with a `latency` policy (and a `status_code` policy for errors). Spans without `autter.retention_reason` can be picked as the normal request too, as long as they succeeded and were no slower than the baseline p95.
 
+## Code evidence
+
+Besides the trace comparison, the analysis reads repository source. In order of weight it uses: the indexed handler of the slow route (file, function and line); the code that changed between the baseline release and the slow release, as diff hunks from GitHub; functions in the code index whose names match the slow trace's span names; and, last, files whose path matches words in the route or span name. Source is read at the slow release, up to 5 files.
+
+The release diff needs `release` to be a commit SHA that exists in the linked GitHub repository, on both the baseline and the slow release. With another release value (a version string or build number) the analysis still runs, without the diff. A changed hunk is named as the cause only when the trace comparison shows the added time in the span that the code runs in. Timing alone is never treated as proof. The incident timeline lists the code that was read. Name span functions after the function they run (for example `OrderRepo.findByCustomer`) so they can be matched to code.
+
 ## Storage and release order
 
 Migration `0005-latency-histograms` adds `runtime_latency_histograms`. The table stores authenticated organization and repository IDs. Stable point identities and query-time deduplication prevent retries from adding the same histogram twice.
